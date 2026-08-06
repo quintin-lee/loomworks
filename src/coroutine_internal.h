@@ -5,39 +5,50 @@
 #include <ucontext.h>
 #include <stdbool.h>
 
-/* Cache line alignment for hot fields. */
+/* One cache line on modern x86-64.  Fields that are accessed by
+ * different threads concurrently (e.g. the mutex, condition variables)
+ * are aligned to avoid false sharing. */
 #define CTPPOOL_CACHELINE_ALIGN  __attribute__((aligned(64)))
 
 /**
  * @brief Internal coroutine structure.
  *
- * Stack layout (allocated via mmap):
+ * Stack layout (mmap with PROT_NONE guard pages on each side):
  *   [GUARD][GUARD][STACK][GUARD][GUARD]
  *   where GUARD pages are PROT_NONE.
+ *
+ * Context switching uses POSIX ucontext(3).  The scheduler context
+ * (g_scheduler) is thread-local and persistent across all coroutines
+ * created on the same thread.
  */
 struct ctpool_coroutine {
-    ctpool_coro_state_t   state;
-    ctpool_coro_fn        entry_fn;
-    void                 *user_data;
-    size_t                stack_size;
+    ctpool_coro_state_t   state;        /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR). */
+    ctpool_coro_fn        entry_fn;     /**< User entry function. */
+    void                 *user_data;    /**< Opaque argument passed to entry_fn. */
+    size_t                stack_size;   /**< Requested stack size in bytes. */
 
-    /* Context for save/restore. */
-    ucontext_t            ctx;
+    ucontext_t            ctx;          /**< Saved context for swapcontext(). */
 
-    /* Stack allocation metadata. */
-    void                 *mmap_base;    /* Base address returned by mmap. */
-    size_t                mmap_size;    /* Total mmap region size (includes guards). */
-    void                 *stack_start;  /* Start of usable stack. */
-    void                 *stack_end;    /* End of usable stack (exclusive). */
+    void                 *mmap_base;    /**< Base address from mmap(). */
+    size_t                mmap_size;    /**< Total size of the mmap region (includes guards). */
+    void                 *stack_start;  /**< Start of the usable (mprotect'd) region. */
+    void                 *stack_end;    /**< End of the usable region (exclusive). */
 
-    /* Padding for cache-line alignment. */
-    uint64_t              padding[6];
+    uint64_t              padding[6];   /**< Pad to 64-byte cache-line boundary. */
 };
 
-/* Internal: signal handler for SIGSEGV/SIGBUS guard page hits. */
+/**
+ * @brief Install the SIGSEGV/SIGBUS guard-page handler (idempotent).
+ *
+ * Must be called before any coroutine resume that might trigger a guard
+ * page violation.  Uses atomic load to avoid redundant sigaction() calls
+ * across threads.
+ */
 void ctpool_coro_install_guard_handler(void);
 
-/* Internal: uninstall the signal handler. */
+/**
+ * @brief Remove the guard-page signal handler and restore defaults.
+ */
 void ctpool_coro_uninstall_guard_handler(void);
 
 #endif /* CTPPOOL_COROUTINE_INTERNAL_H */

@@ -1,3 +1,23 @@
+/**
+ * @file thread_pool.c
+ * @brief Thread pool implementation.
+ *
+ * A fixed-size worker pool backed by a singly-linked FIFO task queue.
+ * Workers block on a condition variable until a task is available or the
+ * pool is shut down.  Shutdown is idempotent: calling
+ * ctpool_pool_shutdown() multiple times is safe.
+ *
+ * Queue capacity enforcement:
+ *   When queue_capacity > 0, ctpool_pool_submit() rejects tasks with
+ *   CTPPOOL_ERR_INVALID once the queue is full.  This is a non-blocking
+ *   check — callers must retry or handle the error.
+ *
+ * Future support:
+ *   ctpool_pool_submit_future() wraps the user function in
+ *   future_task_wrapper(), which stores the return value into a
+ *   ctpool_future_t protected by its own mutex+condvar.  The caller
+ *   blocks on ctpool_future_wait() until the worker signals readiness.
+ */
 #define _POSIX_C_SOURCE 200809L
 #include "ctpool/thread_pool.h"
 #include "thread_pool_internal.h"
@@ -7,6 +27,9 @@
 #include <stdio.h>
 #include <unistd.h>
 
+/* ================================================================
+ *  Forward declarations
+ * ================================================================ */
 static ctpool_result_t pool_init(ctpool_thread_pool_t *pool);
 static void pool_destroy_internal(ctpool_thread_pool_t *pool);
 static void *worker_entry(void *arg);
@@ -14,6 +37,14 @@ static ctpool_task_t *task_create(ctpool_task_fn fn, void *data);
 static void task_destroy(ctpool_task_t *task);
 static void future_task_wrapper(void *arg);
 
+/* ================================================================
+ *  pool_init — initialise locks, defaults, and worker thread array
+ *
+ *  worker_count == 0 → auto (sysconf(_SC_NPROCESSORS_ONLN) * 2,
+ *  capped at 128).
+ *  stack_size == 0   → CTPPOOL_DEFAULT_STACK_SIZE.
+ *  queue_capacity > CTPPOOL_MAX_QUEUE_CAPACITY → clamped down.
+ * ================================================================ */
 static ctpool_result_t pool_init(ctpool_thread_pool_t *pool)
 {
     if (pool->worker_count == 0) {
@@ -56,11 +87,23 @@ static ctpool_result_t pool_init(ctpool_thread_pool_t *pool)
     return CTPPOOL_OK;
 }
 
+/* ================================================================
+ *  pool_destroy_internal — free every resource owned by the pool.
+ *
+ *  Does NOT touch pool->threads or pool->workers beyond freeing the
+ *  arrays; the join loop lives in ctpool_pool_shutdown().
+ *  Queue task nodes are freed one by one.
+ * ================================================================ */
 static void pool_destroy_internal(ctpool_thread_pool_t *pool)
 {
     if (!pool) return;
+    /* Drain any tasks still pending in the queue. */
     ctpool_task_t *t = pool->queue_head;
-    while (t) { ctpool_task_t *n = t->next; free(t); t = n; }
+    while (t) {
+        ctpool_task_t *n = t->next;
+        free(t);
+        t = n;
+    }
     pthread_cond_destroy(&pool->drain_cond);
     pthread_cond_destroy(&pool->cond);
     pthread_mutex_destroy(&pool->lock);
@@ -69,13 +112,25 @@ static void pool_destroy_internal(ctpool_thread_pool_t *pool)
     free(pool);
 }
 
+/* ================================================================
+ *  worker_entry — per-worker loop.
+ *
+ *  Blocks on pool->cond while the queue is empty and the pool is not
+ *  shutting down.  On wakeup:
+ *    1. If shutdown is set and the queue is empty → exit thread.
+ *    2. Otherwise dequeue one task (under lock), run it outside the
+ *       lock to maximise concurrency.
+ * ================================================================ */
 static void *worker_entry(void *arg)
 {
     ctpool_thread_pool_t *pool = (ctpool_thread_pool_t *)arg;
     while (1) {
         pthread_mutex_lock(&pool->lock);
-        while (pool->queue_len == 0 && !pool->shutdown)
+        /* Spin until work arrives or shutdown is signalled. */
+        while (pool->queue_len == 0 && !pool->shutdown) {
             pthread_cond_wait(&pool->cond, &pool->lock);
+        }
+        /* All workers exit once shutdown is set and the queue is empty. */
         if (pool->shutdown && pool->queue_len == 0) {
             pthread_mutex_unlock(&pool->lock); break;
         }
@@ -91,35 +146,69 @@ static void *worker_entry(void *arg)
     return NULL;
 }
 
+/* ================================================================
+ *  task_create / task_destroy — allocate and free a single task node.
+ * ================================================================ */
 static ctpool_task_t *task_create(ctpool_task_fn fn, void *data)
 {
     ctpool_task_t *t = (ctpool_task_t *)malloc(sizeof(*t));
     if (!t) return NULL;
-    t->fn = fn; t->user_data = data; t->next = NULL;
+    t->fn        = fn;
+    t->user_data = data;
+    t->next      = NULL;
     return t;
 }
 
-static void task_destroy(ctpool_task_t *t) { if (t) free(t); }
+static void task_destroy(ctpool_task_t *t)
+{
+    if (t) free(t);
+}
 
+/* ================================================================
+ *  ctpool_enqueue_unlocked — append @p task to the tail of the queue.
+ *
+ *  Must be called with pool->lock held.
+ * ================================================================ */
 void ctpool_enqueue_unlocked(ctpool_thread_pool_t *pool, ctpool_task_t *task)
 {
-    if (pool->queue_tail) pool->queue_tail->next = task;
-    else pool->queue_head = task;
+    if (pool->queue_tail) {
+        pool->queue_tail->next = task;
+    } else {
+        pool->queue_head = task;
+    }
     pool->queue_tail = task;
     pool->queue_len++;
 }
 
+/* ================================================================
+ *  ctpool_dequeue_unlocked — remove and return the head task.
+ *
+ *  Must be called with pool->lock held.
+ *  Returns NULL when the queue is empty.
+ * ================================================================ */
 ctpool_task_t *ctpool_dequeue_unlocked(ctpool_thread_pool_t *pool)
 {
-    if (!pool->queue_head) return NULL;
+    if (!pool->queue_head) {
+        return NULL;
+    }
     ctpool_task_t *t = pool->queue_head;
     pool->queue_head = t->next;
-    if (!pool->queue_head) pool->queue_tail = NULL;
+    if (pool->queue_head == NULL) {
+        pool->queue_tail = NULL;
+    }
     t->next = NULL;
     pool->queue_len--;
     return t;
 }
 
+/* ================================================================
+ *  future_task_wrapper — executed by a worker thread.
+ *
+ *  Invokes the user-provided function, then stores the result into
+ *  the associated ctpool_future_t under its mutex.  The future's
+ *  condition variable is signalled so that ctpool_future_wait() can
+ *  return.
+ * ================================================================ */
 static void future_task_wrapper(void *arg)
 {
     future_task_ctx_t *ctx = (future_task_ctx_t *)arg;
@@ -134,8 +223,17 @@ static void future_task_wrapper(void *arg)
     free(ctx);
 }
 
-/* ---------- Public API ---------- */
-
+/* ================================================================
+ *  ctpool_pool_create — allocate and start the pool.
+ *
+ *  @param config  Configuration (NULL → defaults).  Zero-valued
+ *                 fields are filled in by pool_init().
+ *  @param pool    Output pointer; set only on success.
+ *  @return        CTPPOOL_OK on success, error code otherwise.
+ *
+ *  If any pthread_create() fails, already-created worker threads are
+ *  joined and all resources are freed before returning the error.
+ * ================================================================ */
 ctpool_result_t ctpool_pool_create(const ctpool_pool_config_t *config,
                                     ctpool_thread_pool_t **pool)
 {
@@ -165,11 +263,23 @@ ctpool_result_t ctpool_pool_create(const ctpool_pool_config_t *config,
     return CTPPOOL_OK;
 }
 
+/* ================================================================
+ *  ctpool_pool_submit — enqueue a fire-and-forget task.
+ *
+ *  Rejects the task (CTPPOOL_ERR_INVALID) when the queue is at
+ *  capacity (queue_capacity > 0).  Rejects with CTPPOOL_ERR_SHUTDOWN
+ *  when the pool is shutting down or has already shut down.
+ *
+ *  @return  CTPPOOL_OK on success.
+ * ================================================================ */
 ctpool_result_t ctpool_pool_submit(ctpool_thread_pool_t *pool,
                                     ctpool_task_fn fn, void *data)
 {
-    if (!pool || !fn) return CTPPOOL_ERR_INVALID;
+    if (!pool || !fn) {
+        return CTPPOOL_ERR_INVALID;
+    }
     pthread_mutex_lock(&pool->lock);
+    /* Reject submissions once shutdown has started. */
     if (pool->shutdown || pool->draining) {
         pthread_mutex_unlock(&pool->lock);
         return CTPPOOL_ERR_SHUTDOWN;
@@ -186,15 +296,30 @@ ctpool_result_t ctpool_pool_submit(ctpool_thread_pool_t *pool,
     return CTPPOOL_OK;
 }
 
+/* ================================================================
+ *  ctpool_pool_submit_future — enqueue a task whose result can be
+ *  retrieved via a ctpool_future_t.
+ *
+ *  A fresh future and its associated mutex/condvar are allocated
+ *  before the task is submitted.  If submission fails the future is
+ *  freed and NULL is stored in @p future.
+ *
+ *  @return  CTPPOOL_OK on success.
+ * ================================================================ */
 ctpool_result_t ctpool_pool_submit_future(ctpool_thread_pool_t *pool,
                                            ctpool_task_fn_result fn,
                                            void *data,
                                            ctpool_future_t **future)
 {
-    if (!pool || !fn || !future) return CTPPOOL_ERR_INVALID;
+    if (!pool || !fn || !future) {
+        return CTPPOOL_ERR_INVALID;
+    }
     ctpool_future_t *fut = (ctpool_future_t *)calloc(1, sizeof(*fut));
     if (!fut) return CTPPOOL_ERR_ALLOC;
-    if (pthread_mutex_init(&fut->mutex, NULL) != 0) { free(fut); return CTPPOOL_ERR_ALLOC; }
+    if (pthread_mutex_init(&fut->mutex, NULL) != 0) {
+        free(fut);
+        return CTPPOOL_ERR_ALLOC;
+    }
     if (pthread_cond_init(&fut->cond, NULL) != 0) {
         pthread_mutex_destroy(&fut->mutex); free(fut); return CTPPOOL_ERR_ALLOC;
     }
@@ -212,6 +337,15 @@ ctpool_result_t ctpool_pool_submit_future(ctpool_thread_pool_t *pool,
     return CTPPOOL_OK;
 }
 
+/* ================================================================
+ *  ctpool_future_wait — block until the future's task has completed.
+ *
+ *  The caller receives the result pointer through @p result (which may
+ *  be NULL if the caller does not need it).  Ownership of the result
+ *  pointer transfers to the caller; the pool does not free it.
+ *
+ *  @return  CTPPOOL_OK on success.
+ * ================================================================ */
 ctpool_result_t ctpool_future_wait(ctpool_future_t *future, void **result)
 {
     if (!future) return CTPPOOL_ERR_INVALID;
@@ -222,6 +356,12 @@ ctpool_result_t ctpool_future_wait(ctpool_future_t *future, void **result)
     return CTPPOOL_OK;
 }
 
+/* ================================================================
+ *  ctpool_future_destroy — free a future's synchronisation primitives.
+ *
+ *  The result pointer stored in the future is NOT freed; the caller
+ *  is responsible for freeing it after ctpool_future_wait().
+ * ================================================================ */
 void ctpool_future_destroy(ctpool_future_t *future)
 {
     if (!future) return;
@@ -233,10 +373,24 @@ void ctpool_future_destroy(ctpool_future_t *future)
     free(future);
 }
 
+/* ================================================================
+ *  ctpool_pool_shutdown — signal all workers to exit and wait for them.
+ *
+ *  Idempotent: a second call returns immediately because the workers
+ *  have already been joined (see pool->joined).
+ *
+ *  Sequence:
+ *    1. Set shutdown=true and broadcast on pool->cond to wake all
+ *       sleeping workers.
+ *    2. pthread_join each worker thread.
+ *    3. Set draining=false and broadcast on drain_cond so that any
+ *       external waiter (e.g. pending_count observers) is notified.
+ * ================================================================ */
 void ctpool_pool_shutdown(ctpool_thread_pool_t *pool)
 {
     if (!pool) return;
     pthread_mutex_lock(&pool->lock);
+    /* Already joined → nothing to do. */
     if (pool->joined) {
         pthread_mutex_unlock(&pool->lock);
         return;
@@ -253,6 +407,14 @@ void ctpool_pool_shutdown(ctpool_thread_pool_t *pool)
     pthread_mutex_unlock(&pool->lock);
 }
 
+/* ================================================================
+ *  ctpool_pool_destroy — free the pool and set the handle to NULL.
+ *
+ *  Must be called after ctpool_pool_shutdown().  Calling this on a
+ *  non-shutdown pool will leak worker threads.
+ *
+ *  Safe to call with a NULL handle or a handle already set to NULL.
+ * ================================================================ */
 void ctpool_pool_destroy(ctpool_thread_pool_t **pool)
 {
     if (!pool || !*pool) return;
@@ -260,12 +422,23 @@ void ctpool_pool_destroy(ctpool_thread_pool_t **pool)
     *pool = NULL;
 }
 
+/* ================================================================
+ *  ctpool_pool_worker_count — return the number of worker threads.
+ *
+ *  Returns 0 when @p pool is NULL (safe null-pointer query).
+ * ================================================================ */
 uint32_t ctpool_pool_worker_count(const ctpool_thread_pool_t *pool)
 {
     if (!pool) return 0;
     return pool->worker_count;
 }
 
+/* ================================================================
+ *  ctpool_pool_pending_count — return the number of tasks in the queue.
+ *
+ *  Acquires the lock briefly for a consistent snapshot.  Returns 0
+ *  when @p pool is NULL.
+ * ================================================================ */
 uint32_t ctpool_pool_pending_count(const ctpool_thread_pool_t *pool)
 {
     if (!pool) return 0;
