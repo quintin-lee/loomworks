@@ -1,21 +1,21 @@
-# ctpool API 参考文档
+# ctpool API Reference
 
-> 本文档描述 ctpool 库的所有公共 API。所有句柄均为不透明指针，头文件中不包含结构体定义。
-
----
-
-## 目录
-
-1. [线程池 API](#1-线程池-api)
-2. [协程 API](#2-协程-api)
-3. [结果码速查](#3-结果码速查)
-4. [线程安全性](#4-线程安全性)
+> This document describes all public APIs of the ctpool library. All handles are opaque pointers; struct definitions are not exposed in headers.
 
 ---
 
-## 1. 线程池 API
+## Table of Contents
 
-### 1.1 创建与销毁
+1. [Thread Pool API](#1-thread-pool-api)
+2. [Coroutine API](#2-coroutine-api)
+3. [Result Codes Quick Reference](#3-result-codes-quick-reference)
+4. [Thread Safety](#4-thread-safety)
+
+---
+
+## 1. Thread Pool API
+
+### 1.1 Create and Destroy
 
 ```c
 ctpool_result_t ctpool_pool_create(const ctpool_pool_config_t *config,
@@ -24,19 +24,19 @@ ctpool_result_t ctpool_pool_create(const ctpool_pool_config_t *config,
 void ctpool_pool_destroy(ctpool_thread_pool_t **pool);
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `config` | 配置结构体，传 `NULL` 使用默认值（worker_count 自动适配，queue_capacity=0 无界） |
-| `pool` | 输出参数，创建成功后指向新池句柄 |
+| Parameter | Description |
+|-----------|-------------|
+| `config` | Configuration struct; pass `NULL` for defaults (auto worker count, unbounded queue) |
+| `pool` | Output parameter; set to the new pool handle on success |
 
-**默认配置：**
-- `worker_count`：`min(hardware_concurrency * 2, 64)`
-- `stack_size`：128 KiB
-- `queue_capacity`：0（无界）
+**Default configuration:**
+- `worker_count`: `min(hardware_concurrency * 2, 64)`
+- `stack_size`: 128 KiB
+- `queue_capacity`: 0 (unbounded)
 
-**使用注意：** 必须先用 `ctpool_pool_shutdown()` 等待任务排空，再调用 `ctpool_pool_destroy()`。
+**Note:** Always call `ctpool_pool_shutdown()` to drain pending tasks before calling `ctpool_pool_destroy()`.
 
-### 1.2 提交任务
+### 1.2 Submit Tasks
 
 ```c
 ctpool_result_t ctpool_pool_submit(ctpool_thread_pool_t *pool,
@@ -49,31 +49,31 @@ ctpool_result_t ctpool_pool_submit_future(ctpool_thread_pool_t *pool,
                                           ctpool_future_t **future);
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `fn` | 任务函数，签名 `void (*)(void*)` 或 `void* (*)(void*)` |
-| `data` | 传给任务函数的 opaque 指针 |
-| `future` | 输出参数，仅 `submit_future` 使用 |
+| Parameter | Description |
+|-----------|-------------|
+| `fn` | Task function, signature `void (*)(void*)` or `void* (*)(void*)` |
+| `data` | Opaque pointer passed to the task function |
+| `future` | Output parameter, used only with `submit_future` |
 
-**区别：**
-- `submit`：fire-and-forget，无返回值
-- `submit_future`：返回 `future` 句柄，可用 `ctpool_future_wait()` 获取结果
+**Difference:**
+- `submit`: fire-and-forget, no return value
+- `submit_future`: returns a `future` handle; retrieve the result with `ctpool_future_wait()`
 
-### 1.3 获取 Future 结果
+### 1.3 Retrieve Future Results
 
 ```c
 ctpool_result_t ctpool_future_wait(ctpool_future_t *future, void **result);
 void            ctpool_future_destroy(ctpool_future_t *future);
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `future` | `submit_future` 返回的句柄 |
-| `result` | 输出参数，指向任务函数返回的指针（由调用者负责释放） |
+| Parameter | Description |
+|-----------|-------------|
+| `future` | Handle returned by `submit_future` |
+| `result` | Output parameter pointing to the pointer returned by the task function (caller is responsible for freeing) |
 
-**注意：** `result` 指向的内存由任务函数内部 `malloc` 分配，调用者需在 `ctpool_future_destroy()` 之前释放。
+**Note:** Memory pointed to by `result` is allocated by the task function via `malloc`. The caller must free it before calling `ctpool_future_destroy()`.
 
-### 1.4 关闭与查询
+### 1.4 Shutdown and Query
 
 ```c
 void ctpool_pool_shutdown(ctpool_thread_pool_t *pool);
@@ -81,25 +81,25 @@ uint32_t ctpool_pool_worker_count(const ctpool_thread_pool_t *pool);
 uint32_t ctpool_pool_pending_count(const ctpool_thread_pool_t *pool);
 ```
 
-- `shutdown()`：阻塞直到所有已提交任务执行完毕，然后 join 所有 worker 线程
-- `worker_count()`：返回实际创建的工作线程数（含自动计算后的值）
-- `pending_count()`：返回当前队列中等待执行的任务数（可能不准确，因并发操作）
+- `shutdown()`: Blocks until all submitted tasks complete, then joins all worker threads
+- `worker_count()`: Returns the actual number of worker threads created (including auto-computed value)
+- `pending_count()`: Returns the current number of tasks waiting in the queue (may be inaccurate due to concurrent operations)
 
-### 1.5 配置结构体
+### 1.5 Configuration Structure
 
 ```c
 typedef struct {
-    uint32_t worker_count;     /* 0 = 自动，上限 64 */
+    uint32_t worker_count;     /* 0 = auto, max 64 */
     size_t   stack_size;       /* 0 = 128 KiB */
-    uint32_t queue_capacity;   /* 0 = 无界，最大 1M */
+    uint32_t queue_capacity;   /* 0 = unbounded, max 1M */
 } ctpool_pool_config_t;
 ```
 
 ---
 
-## 2. 协程 API
+## 2. Coroutine API
 
-### 2.1 创建与销毁
+### 2.1 Create and Destroy
 
 ```c
 ctpool_coro_result_t ctpool_coro_create(ctpool_coro_fn fn,
@@ -110,28 +110,28 @@ ctpool_coro_result_t ctpool_coro_create(ctpool_coro_fn fn,
 void ctpool_coro_destroy(ctpool_coroutine_t **coro);
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `fn` | 协程入口函数，签名 `void (*)(void*)` |
-| `data` | 传给入口函数的 opaque 指针 |
-| `stack_size` | 栈大小（字节），0 使用默认 64 KiB |
-| `coro` | 输出参数 |
+| Parameter | Description |
+|-----------|-------------|
+| `fn` | Coroutine entry function, signature `void (*)(void*)` |
+| `data` | Opaque pointer passed to the entry function |
+| `stack_size` | Stack size in bytes; 0 uses default 64 KiB |
+| `coro` | Output parameter |
 
-**销毁注意：** 必须在协程处于 `DONE` 或 `ERROR` 状态时调用。
+**Destroy note:** Must only be called when the coroutine is in `DONE` or `ERROR` state.
 
-### 2.2 启动与恢复
+### 2.2 Start and Resume
 
 ```c
 ctpool_coro_result_t ctpool_coro_resume(ctpool_coroutine_t *coro);
 ```
 
-| 状态 | 行为 |
-|------|------|
-| `NEW` | 首次启动，分配并设置 ucontext，执行入口函数 |
-| `SUSPENDED` | 从上次 yield 点恢复执行 |
-| `DONE` / `ERROR` | 返回 `CTPPOOL_CORO_ERR_RUNNING` |
+| State | Behavior |
+|-------|----------|
+| `NEW` | First start: allocate and configure ucontext, execute entry function |
+| `SUSPENDED` | Resume from the last yield point |
+| `DONE` / `ERROR` | Return `CTPPOOL_CORO_ERR_RUNNING` |
 
-### 2.3 让步与终止
+### 2.3 Yield and Terminate
 
 ```c
 void ctpool_coro_yield(void);
@@ -140,10 +140,10 @@ void ctpool_coro_suspend(void);
 ctpool_coro_result_t ctpool_coro_terminate(ctpool_coroutine_t *coro);
 ```
 
-- `yield()` / `suspend()`：让出控制权，返回到最近一次 `resume()` 的调用点。`suspend()` 是 `yield()` 的别名。
-- `terminate()`：强制终止协程，置 `state=DONE`，恢复执行到调度器。若协程已在当前线程中运行则立即切换。
+- `yield()` / `suspend()`: Yield control back to the caller. `suspend()` is an alias for `yield()`.
+- `terminate()`: Forcefully terminate the coroutine, set `state=DONE`, and resume execution in the scheduler. If the coroutine is currently running in the calling thread, the switch happens immediately.
 
-### 2.4 状态与调试
+### 2.4 State and Debugging
 
 ```c
 ctpool_coro_state_t ctpool_coro_state(const ctpool_coroutine_t *coro);
@@ -155,74 +155,74 @@ ctpool_coro_result_t ctpool_coro_stack_info(const ctpool_coroutine_t *coro,
 const char *ctpool_coro_result_str(ctpool_coro_result_t result);
 ```
 
-- `state()`：返回当前状态枚举值
-- `stack_info()`：获取栈地址范围（用于调试/内存检查）
-- `result_str()`：将结果码转换为可读字符串
+- `state()`: Returns the current state enum value
+- `stack_info()`: Returns the stack address range (for debugging / memory checking)
+- `result_str()`: Converts a result code to a human-readable string
 
-### 2.5 配置常量
+### 2.5 Configuration Constants
 
 ```c
 #define CTPPOOL_CORO_DEFAULT_STACK_SIZE    (64 * 1024)   /* 64 KiB */
-#define CTPPOOL_CORO_GUARD_PAGES_EACH      1              /* 每端保护页数 */
+#define CTPPOOL_CORO_GUARD_PAGES_EACH      1              /* Guard pages per side */
 ```
 
 ---
 
-## 3. 结果码速查
+## 3. Result Codes Quick Reference
 
-### 线程池 (`ctpool_result_t`)
+### Thread Pool (`ctpool_result_t`)
 
-| 值 | 常量 | 含义 |
-|----|------|------|
-| 0 | `CTPPOOL_OK` | 成功 |
-| 1 | `CTPPOOL_ERR_ALLOC` | 内存分配失败 |
-| 2 | `CTPPOOL_ERR_THREAD` | 线程创建失败 |
-| 3 | `CTPPOOL_ERR_INVALID` | 参数无效或队列已满 |
-| 4 | `CTPPOOL_ERR_SHUTDOWN` | 池已关闭 |
-| 5 | `CTPPOOL_ERR_TIMEOUT` | 超时（预留） |
+| Value | Constant | Meaning |
+|-------|----------|---------|
+| 0 | `CTPPOOL_OK` | Success |
+| 1 | `CTPPOOL_ERR_ALLOC` | Memory allocation failed |
+| 2 | `CTPPOOL_ERR_THREAD` | Thread creation failed |
+| 3 | `CTPPOOL_ERR_INVALID` | Invalid argument or queue full |
+| 4 | `CTPPOOL_ERR_SHUTDOWN` | Pool is shutting down or shut down |
+| 5 | `CTPPOOL_ERR_TIMEOUT` | Timeout (reserved) |
 
-### 协程 (`ctpool_coro_result_t`)
+### Coroutine (`ctpool_coro_result_t`)
 
-| 值 | 常量 | 含义 |
-|----|------|------|
-| 0 | `CTPPOOL_CORO_OK` | 成功 |
-| 1 | `CTPPOOL_CORO_ERR_ALLOC` | mmap 分配失败 |
-| 2 | `CTPPOOL_CORO_ERR_CONTEXT` | ucontext 操作失败 |
-| 3 | `CTPPOOL_CORO_ERR_MPROTECT` | mprotect 失败 |
-| 4 | `CTPPOOL_CORO_ERR_INVALID` | 参数无效 |
-| 5 | `CTPPOOL_CORO_ERR_GUARD` | 保护页触发（栈溢出） |
-| 6 | `CTPPOOL_CORO_ERR_RUNNING` | 非法状态操作 |
+| Value | Constant | Meaning |
+|-------|----------|---------|
+| 0 | `CTPPOOL_CORO_OK` | Success |
+| 1 | `CTPPOOL_CORO_ERR_ALLOC` | mmap allocation failed |
+| 2 | `CTPPOOL_CORO_ERR_CONTEXT` | ucontext operation failed |
+| 3 | `CTPPOOL_CORO_ERR_MPROTECT` | mprotect failed |
+| 4 | `CTPPOOL_CORO_ERR_INVALID` | Invalid argument |
+| 5 | `CTPPOOL_CORO_ERR_GUARD` | Guard page triggered (stack overflow) |
+| 6 | `CTPPOOL_CORO_ERR_RUNNING` | Invalid state for operation |
 
-### 协程状态 (`ctpool_coro_state_t`)
+### Coroutine State (`ctpool_coro_state_t`)
 
-| 值 | 常量 | 含义 |
-|----|------|------|
-| 0 | `CTPPOOL_CORO_NEW` | 已创建，未启动 |
-| 1 | `CTPPOOL_CORO_RUNNING` | 正在执行 |
-| 2 | `CTPPOOL_CORO_SUSPENDED` | 已 yield，等待 resume |
-| 3 | `CTPPOOL_CORO_DONE` | 正常完成 |
-| 4 | `CTPPOOL_CORO_ERROR` | 发生错误 |
+| Value | Constant | Meaning |
+|-------|----------|---------|
+| 0 | `CTPPOOL_CORO_NEW` | Created, not started |
+| 1 | `CTPPOOL_CORO_RUNNING` | Currently executing |
+| 2 | `CTPPOOL_CORO_SUSPENDED` | Yielded, waiting for resume |
+| 3 | `CTPPOOL_CORO_DONE` | Completed normally |
+| 4 | `CTPPOOL_CORO_ERROR` | Error occurred |
 
 ---
 
-## 4. 线程安全性
+## 4. Thread Safety
 
-| API | 线程安全 | 说明 |
-|-----|---------|------|
-| `ctpool_pool_create` | ✅ 安全 | 线程内调用 |
-| `ctpool_pool_submit` | ✅ 安全 | 多并发调用，内部持锁 |
-| `ctpool_pool_submit_future` | ✅ 安全 | 多并发调用，内部持锁 |
-| `ctpool_pool_shutdown` | ⚠️ 仅调用一次 | 必须在所有 submit 完成后调用 |
-| `ctpool_pool_destroy` | ✅ 安全（NULL 检查） | 必须在 shutdown 后调用 |
-| `ctpool_future_wait` | ✅ 安全 | 内部自旋+条件变量等待 |
-| `ctpool_future_destroy` | ✅ 安全 | 必须在 wait 完成后调用 |
-| `ctpool_coro_create` | ✅ 安全 | 线程内调用 |
-| `ctpool_coro_resume` | ✅ 安全 | 单线程内调用 |
-| `ctpool_coro_yield` | ✅ 安全 | 在协程内部调用 |
-| `ctpool_coro_destroy` | ✅ 安全 | 必须在协程 DONE 后调用 |
-| `ctpool_coro_stack_info` | ✅ 安全 | 读操作，无需锁 |
+| API | Thread-safe | Notes |
+|-----|-------------|-------|
+| `ctpool_pool_create` | ✅ Yes | Call within a single thread |
+| `ctpool_pool_submit` | ✅ Yes | Safe for concurrent calls; internal locking |
+| `ctpool_pool_submit_future` | ✅ Yes | Safe for concurrent calls; internal locking |
+| `ctpool_pool_shutdown` | ⚠️ Call once only | Must be called after all submits are complete |
+| `ctpool_pool_destroy` | ✅ Yes (NULL-safe) | Must be called after shutdown |
+| `ctpool_future_wait` | ✅ Yes | Internal spin + condition variable wait |
+| `ctpool_future_destroy` | ✅ Yes | Must be called after `wait()` returns |
+| `ctpool_coro_create` | ✅ Yes | Call within a single thread |
+| `ctpool_coro_resume` | ✅ Yes | Call within a single thread |
+| `ctpool_coro_yield` | ✅ Yes | Call from within the coroutine |
+| `ctpool_coro_destroy` | ✅ Yes | Must be called after coroutine reaches DONE |
+| `ctpool_coro_stack_info` | ✅ Yes | Read-only operation, no lock needed |
 
-**禁止行为：**
-- 在 `shutdown()` 之后调用 `submit()` / `submit_future()`
-- 跨线程调用 `resume()` / `yield()` / `terminate()` 同一个协程
-- 在协程未完成（非 DONE/ERROR）时调用 `destroy()`
+**Prohibited operations:**
+- Calling `submit()` / `submit_future()` after `shutdown()`
+- Calling `resume()` / `yield()` / `terminate()` on the same coroutine from different threads
+- Calling `destroy()` on a coroutine that is not in DONE/ERROR state

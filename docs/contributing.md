@@ -1,113 +1,113 @@
-# ctpool 贡献指南
+# ctpool Contributing Guide
 
-感谢你对 ctpool 的贡献！本文档说明代码规范和提交流程。
+Thank you for your interest in contributing to ctpool! This document describes coding standards and the submission process.
 
 ---
 
-## 1. 编码规范
+## 1. Coding Standards
 
-### 1.1 语言标准
+### 1.1 Language Standards
 
-- **强制：** 纯 C11（`-std=c11`），禁止使用 C++ 特性
-- **强制：** 禁止 C99 扩展语法（如 variadic macros 之外的 `__func__`、`inline` 用法等）
-- **允许：** POSIX.1-2008 扩展（`_POSIX_C_SOURCE 200809L`）
+- **Required:** Pure C11 (`-std=c11`), C++ features are strictly prohibited
+- **Required:** C99 extension syntax is prohibited (e.g., `__func__` outside variadic macros, non-standard `inline` usage)
+- **Allowed:** POSIX.1-2008 extensions (`_POSIX_C_SOURCE 200809L`)
 
-### 1.2 编译要求
+### 1.2 Compilation Requirements
 
-所有代码必须通过以下编译选项：
+All code must compile cleanly under:
 
 ```bash
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread <sources>
 clang -std=c11 -Wall -Wextra -Werror -pedantic -pthread <sources>
 ```
 
-常见编译错误及修复：
+Common warnings and fixes:
 
-| 警告 | 原因 | 修复 |
-|------|------|------|
-| `unused parameter` | 函数参数未使用 | 使用 `(void)param;` 显式忽略 |
-| `implicit fallthrough` | switch case 无 break | 添加 `break` 或 `__attribute__((fallthrough))` |
-| `missing field initializer` | 结构体初始化不完整 | 使用 `.field = value` 命名初始化 |
-| `cast increases alignment` | 指针转换可能改变对齐 | 使用 `uintptr_t` 中间转换 |
+| Warning | Cause | Fix |
+|---------|-------|-----|
+| `unused parameter` | Function parameter not used | Use `(void)param;` to explicitly suppress |
+| `implicit fallthrough` | switch case missing break | Add `break` or `__attribute__((fallthrough))` |
+| `missing field initializer` | Incomplete struct initializer | Use `.field = value` designated initialization |
+| `cast increases alignment` | Pointer cast may change alignment | Use `uintptr_t` intermediate cast |
 
-### 1.3 命名规范
+### 1.3 Naming Conventions
 
-| 类型 | 前缀 | 示例 |
-|------|------|------|
-| 公共函数 | `ctpool_` | `ctpool_pool_create()` |
-| 内部函数 | `pool_` / `coro_` | `pool_init()`, `coro_entry()` |
-| 类型别名 | `_t` 后缀 | `ctpool_thread_pool_t` |
-| 枚举值 | `CTPPOOL_` / `CTPPOOL_CORO_` | `CTPPOOL_OK`, `CTPPOOL_CORO_NEW` |
-| 宏常量 | `CTPPOOL_` / `CTPPOOL_CORO_` | `CTPPOOL_DEFAULT_STACK_SIZE` |
+| Type | Prefix | Example |
+|------|--------|---------|
+| Public functions | `ctpool_` | `ctpool_pool_create()` |
+| Internal functions | `pool_` / `coro_` | `pool_init()`, `coro_entry()` |
+| Type aliases | `_t` suffix | `ctpool_thread_pool_t` |
+| Enum values | `CTPPOOL_` / `CTPPOOL_CORO_` | `CTPPOOL_OK`, `CTPPOOL_CORO_NEW` |
+| Macro constants | `CTPPOOL_` / `CTPPOOL_CORO_` | `CTPPOOL_DEFAULT_STACK_SIZE` |
 
-### 1.4 错误处理
+### 1.4 Error Handling
 
-- 所有系统调用必须检查返回值
-- 失败时返回相应的错误码，不 abort / exit
-- 资源泄漏必须避免：每个分配路径都有对应的释放路径
+- All system calls must check their return values
+- On failure, return the appropriate error code; never call `abort()` or `exit()`
+- Resource leaks must be avoided: every allocation path must have a corresponding free path
 
 ```c
-// ✅ 正确
+// ✅ Correct
 if (pthread_mutex_init(&pool->lock, NULL) != 0) {
     free(pool);
     return CTPPOOL_ERR_ALLOC;
 }
 
-// ❌ 错误
-pthread_mutex_init(&pool->lock, NULL);  // 未检查返回值
+// ❌ Incorrect
+pthread_mutex_init(&pool->lock, NULL);  // return value not checked
 ```
 
-### 1.5 内存安全
+### 1.5 Memory Safety
 
-- 所有 `malloc`/`calloc` 必须检查返回值
-- 所有 `mmap` 必须检查 `MAP_FAILED`
-- 所有 `mprotect` 必须检查返回值
-- `destroy` 函数必须释放所有分配的资源
+- All `malloc`/`calloc` calls must check the return value
+- All `mmap` calls must check for `MAP_FAILED`
+- All `mprotect` calls must check the return value
+- `destroy` functions must free all allocated resources
 
-### 1.6 线程安全
+### 1.6 Thread Safety
 
-- 共享数据必须通过锁或原子操作保护
-- `_Thread_local` 变量不需要锁，但需注意信号处理器中的安全性
-- 不要跨线程共享 `ucontext_t` 结构
+- Shared data must be protected by locks or atomic operations
+- `_Thread_local` variables do not need locks, but safety in signal handlers must be considered
+- Do not share `ucontext_t` structures across threads
 
 ---
 
-## 2. 测试要求
+## 2. Testing Requirements
 
-### 2.1 测试覆盖
+### 2.1 Test Coverage
 
-每个新功能或修复必须包含对应的测试用例：
+Every new feature or fix must include corresponding test cases:
 
-| 测试文件 | 覆盖范围 |
-|----------|----------|
-| `tests/test_thread_pool.c` | 线程池所有 API |
-| `tests/test_coroutine.c` | 协程所有 API |
-| `tests/test_integration.c` | 线程池 + 协程组合使用 |
+| Test file | Coverage |
+|-----------|----------|
+| `tests/test_thread_pool.c` | All thread pool APIs |
+| `tests/test_coroutine.c` | All coroutine APIs |
+| `tests/test_integration.c` | Thread pool + coroutine combined usage |
 
-### 2.2 运行测试
+### 2.2 Running Tests
 
 ```bash
-# CMake 方式
+# CMake
 cd build_cmake && ctest --output-on-failure
 
-# 直接编译方式
+# Direct compilation
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
     -I include src/thread_pool.c src/coroutine.c \
     tests/test_coroutine.c -o test_coroutine && ./test_coroutine
 ```
 
-### 2.3 测试用例要求
+### 2.3 Test Case Requirements
 
-- **边界条件：** NULL 参数、空句柄、重复销毁
-- **错误路径：** 分配失败、上下文创建失败、保护页触发
-- **正常路径：** 完整生命周期（create → resume → yield → destroy）
-- **并发测试：** 多线程提交、多协程并发
+- **Boundary conditions:** NULL arguments, null handles, double destroy
+- **Error paths:** allocation failure, context creation failure, guard page trigger
+- **Normal paths:** full lifecycle (create → resume → yield → destroy)
+- **Concurrency tests:** multi-threaded submission, multi-coroutine concurrency
 
 ---
 
-## 3. 提交规范
+## 3. Commit Standards
 
-### 3.1 Commit 消息格式
+### 3.1 Commit Message Format
 
 ```
 <type>(<scope>): <description>
@@ -117,16 +117,16 @@ gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
 <footer (optional)>
 ```
 
-**type 类型：**
-- `feat`：新功能
-- `fix`：bug 修复
-- `docs`：文档变更
-- `style`：代码格式（不影响功能）
-- `refactor`：重构（不改变行为）
-- `test`：测试相关
-- `chore`：构建/工具链变更
+**Type:**
+- `feat` — new feature
+- `fix` — bug fix
+- `docs` — documentation change
+- `style` — code style (no functional change)
+- `refactor` — refactoring (no behavior change)
+- `test` — test-related
+- `chore` — build/toolchain change
 
-**示例：**
+**Example:**
 ```
 fix(coroutine): prevent crash when destroying cross-thread coroutine
 
@@ -136,23 +136,23 @@ were resumed from different threads. Made g_scheduler _Thread_local.
 Closes #42
 ```
 
-### 3.2 PR 要求
+### 3.2 PR Requirements
 
-1. 所有测试必须通过（`ctest`）
-2. 必须通过 `-Wall -Wextra -Werror -pedantic` 编译
-3. 变更需包含对应测试用例
-4. 公共 API 变更需在 README.md 中更新示例
+1. All tests must pass (`ctest`)
+2. Must compile cleanly under `-Wall -Wextra -Werror -pedantic`
+3. Changes must include corresponding test cases
+4. Public API changes must update README.md examples
 
 ---
 
-## 4. 代码审查检查清单
+## 4. Code Review Checklist
 
-提交 PR 前请确认：
+Before submitting a PR, confirm:
 
-- [ ] 编译通过：`gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread`
-- [ ] 测试通过：`ctest --output-on-failure`
-- [ ] 无内存泄漏：所有分配路径有对应的释放路径
-- [ ] 线程安全：共享数据有适当的锁/原子保护
-- [ ] 错误处理：所有系统调用返回值已检查
-- [ ] 文档更新：公共 API 变更已更新文档
-- [ ] Commit 消息符合规范
+- [ ] Compiles cleanly: `gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread`
+- [ ] Tests pass: `ctest --output-on-failure`
+- [ ] No memory leaks: every allocation path has a corresponding free path
+- [ ] Thread-safe: shared data has appropriate lock/atomic protection
+- [ ] Error handling: all system call return values are checked
+- [ ] Documentation updated: public API changes reflected in docs
+- [ ] Commit message follows the format specified above

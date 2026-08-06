@@ -1,31 +1,32 @@
-# ctpool 架构设计文档
+# ctpool Architecture
 
-## 1. 系统概览
+## 1. System Overview
 
-ctpool 是一个纯 C11 并发库，包含两个独立子系统：
+ctpool is a pure C11 concurrency library comprising two independent subsystems:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                        ctpool                           │
 ├─────────────────────────┬───────────────────────────────┤
-│      线程池子模块        │       协程子模块               │
+│     Thread Pool         │       Coroutine               │
 │  thread_pool.h/c        │  coroutine.h/c                │
 ├─────────────────────────┼───────────────────────────────┤
-│  • 工作线程管理          │  • ucontext 上下文切换          │
-│  • 有界/无界任务队列     │  • mmap PROT_NONE 保护栈       │
-│  • Future 异步返回值     │  • SIGSEGV/SIGBUS 保护页捕获   │
-│  • 优雅关闭与任务排空    │  • 跨线程安全的 per-thread 调度 │
-│  • 缓存行对齐防伪共享    │  • 64 位 makecontext 安全传参   │
+│  • Worker thread mgmt   │  • ucontext save/restore       │
+│  • Bounded/unbounded    │  • mmap PROT_NONE guard stack │
+│    task queue           │  • SIGSEGV/SIGBUS guard hit   │
+│  • Future async results │  • Per-thread scheduler       │
+│  • Graceful shutdown    │  • 64-bit safe makecontext    │
+│  • Cache-line aligned   │  • Thread-safe signal handler │
 └─────────────────────────┴───────────────────────────────┘
 ```
 
-两个子模块共享同一套 API 规范（不透明指针、错误码、C11 标准），但内部实现完全独立，无交叉依赖。
+The two subsystems share the same API conventions (opaque pointers, result codes, C11 standard) but have completely independent internal implementations with no cross-dependencies.
 
 ---
 
-## 2. 线程池架构
+## 2. Thread Pool Architecture
 
-### 2.1 组件关系
+### 2.1 Component Relationships
 
 ```
                     ┌──────────────────────┐
@@ -37,37 +38,37 @@ ctpool 是一个纯 C11 并发库，包含两个独立子系统：
         ▼                   ▼                   ▼
 ┌───────────────┐  ┌───────────────┐  ┌────────────────┐
 │  lock + cond  │  │  linked list  │  │  worker[]     │
-│  (cacheline 0)│  │  (queue head) │  │  (per-index   │
+│  (cache line 0)│ │  (queue head) │  │  (per-index   │
 ├───────────────┤  ├───────────────┤  │   worker_ctx) │
 │  drain_cond   │  │  (queue tail) │  ├───────────────┤
-│ (cacheline 1) │  │  (queue_len)  │  │  task_queue_* │
+│ (cache line 2)│  │  (queue_len)  │  │  task_queue_* │
 └───────────────┘  └───────────────┘  │  [cache line  │
-                                      │   2,3,4...]   │
-                                      └───────────────┘
+                                       │   3,4...]      │
+                                       └───────────────┘
 ```
 
-### 2.2 缓存行布局
+### 2.2 Cache-Line Layout
 
-```
+```c
 struct ctpool_thread_pool {
-    // ── 共享状态（写时频繁竞争，必须对齐到不同 cache line）──
+    // ── Shared state (frequently written, must span different cache lines) ──
     pthread_mutex_t lock              __attribute__((aligned(64)));  // cache line 0
     pthread_cond_t  cond              __attribute__((aligned(64)));  // cache line 1
     pthread_cond_t  drain_cond        __attribute__((aligned(64)));  // cache line 2
-    bool            shutdown;                                        // 与 lock 同 cache line
+    bool            shutdown;                                         // same cache line as drain_cond
     bool            draining;
 
-    // ── 队列（读写频繁，独立 cache line）──
-    ctpool_task_t  *queue_head;                                     // cache line 3
+    // ── Queue (frequently read/written, independent cache line) ──
+    ctpool_task_t  *queue_head;                                      // cache line 3
     ctpool_task_t  *queue_tail;
     uint32_t        queue_len;
 
-    // ── 工作线程数组（每个 worker 独占 cache line）──
+    // ── Worker array (each worker独占 its own cache line) ──
     ctpool_worker_ctx_t workers[];
 };
 
 struct ctpool_worker_ctx {
-    uint64_t padding[7];            // 防止与相邻 worker 的伪共享
+    uint64_t padding[7];            // prevents false sharing with adjacent workers
     ctpool_task_t *task_queue_head;
     ctpool_task_t *task_queue_tail;
     uint32_t       task_queue_len;
@@ -75,38 +76,38 @@ struct ctpool_worker_ctx {
 };
 ```
 
-### 2.3 任务生命周期
+### 2.3 Task Lifecycle
 
 ```
 submit() ──► task_create() ──► enqueue() ──► worker dequeue()
     │              │                  │                │
     ▼              ▼                  ▼                ▼
- 用户调用      malloc 分配        持锁插入链表       持锁弹出链表
-                                           调用 fn(data)
-                                           释放 task 节点
+  User call    malloc alloc      lock+insert        lock+remove
+                                           call fn(data)
+                                           free task node
 ```
 
-### 2.4 关闭流程
+### 2.4 Shutdown Flow
 
 ```
 shutdown()
-  ├─ 持锁置 shutdown=true, draining=true
-  ├─ broadcast cond (唤醒所有等待 worker)
-  └─ join 所有 worker 线程
-       ├─ worker 检测到 shutdown && queue_len==0 → break
-       └─ 释放队列中剩余任务（如有）
+  ├─ Acquire lock, set shutdown=true, draining=true
+  ├─ Broadcast cond (wake all waiting workers)
+  └─ Join all worker threads
+       ├─ Worker detects shutdown && queue_len==0 → break
+       └─ Drain remaining tasks from queue (if any)
 
 pool_destroy()
-  ├─ 持锁释放队列中所有 task 节点
+  ├─ Acquire lock, free all remaining task nodes in queue
   ├─ destroy drain_cond, cond, lock
   └─ free(threads), free(workers), free(pool)
 ```
 
 ---
 
-## 3. 协程架构
+## 3. Coroutine Architecture
 
-### 3.1 组件关系
+### 3.1 Component Relationships
 
 ```
                     ┌──────────────────────┐
@@ -130,69 +131,69 @@ pool_destroy()
 └───────────────────┘ └───────────────────┘ └──────────────────┘
 ```
 
-### 3.2 栈布局
+### 3.2 Stack Layout
 
 ```
-高地址 ┌──────────────────────┐
-       │  GUARD (PROT_NONE)   │  ← 防止栈向上溢出
-       ├──────────────────────┤
-       │                      │
-       │    可用栈空间         │  PROT_READ | PROT_WRITE
-       │    (64 KiB 默认)     │
-       │                      │
-       ├──────────────────────┤
-       │  GUARD (PROT_NONE)   │  ← 防止栈向下溢出（起始保护页）
-       │  GUARD (PROT_NONE)   │
-低地址 └──────────────────────┘
-         ↑  mmap_base
-              ↑ stack_start
-                   ↑ stack_end
+High address ┌──────────────────────┐
+             │  GUARD (PROT_NONE)   │  ← prevents upward stack overflow
+             ├──────────────────────┤
+             │                      │
+             │    Usable stack      │  PROT_READ | PROT_WRITE
+             │    (64 KiB default)  │
+             │                      │
+             ├──────────────────────┤
+             │  GUARD (PROT_NONE)   │  ← prevents downward stack overflow (starting guard)
+             │  GUARD (PROT_NONE)   │
+Low address  └──────────────────────┘
+              ↑ mmap_base
+                   ↑ stack_start
+                        ↑ stack_end
 ```
 
-### 3.3 上下文切换流程
+### 3.3 Context Switching Flow
 
 ```
-主线程                         协程栈
-  │                              │
-  │  ctpool_coro_resume(coro)   │
-  │  ├─ setjmp(g_guard_jmp)     │
-  │  ├─ getcontext(&coro->ctx)  │
+Main thread                      Coroutine stack
+  │                                  │
+  │  ctpool_coro_resume(coro)       │
+  │  ├─ setjmp(g_guard_jmp)         │
+  │  ├─ getcontext(&coro->ctx)      │
   │  ├─ makecontext(ctx, coro_entry, 1, coro_ptr)
   │  └─ swapcontext(&scheduler, &coro->ctx)
-  │          ◄──────────────────── 切换到协程栈
-  │                              │  coro_entry(coro_ptr)
-  │                              │  ├─ g_current = coro
-  │                              │  ├─ coro->entry_fn(data)
-  │                              │  │    ├─ ... 用户代码 ...
-  │                              │  │    └─ ctpool_coro_yield()
-  │                              │  │         └─ swapcontext(&coro->ctx, &scheduler)
-  │                              │  └─ coro->state = DONE / SUSPENDED
-  │          ───────────────────►  切回调度器栈
-  │  swapcontext 返回             │
-  │  return CTPPOOL_CORO_OK      │
-  │                              │
+  │          ◄───────────────────────  switch to coroutine stack
+  │                                  │  coro_entry(coro_ptr)
+  │                                  │  ├─ g_current = coro
+  │                                  │  ├─ coro->entry_fn(data)
+  │                                  │  │    ├─ ... user code ...
+  │                                  │  │    └─ ctpool_coro_yield()
+  │                                  │  │         └─ swapcontext(&coro->ctx, &scheduler)
+  │                                  │  └─ coro->state = DONE / SUSPENDED
+  │          ───────────────────────►  switch back to scheduler stack
+  │  swapcontext returns              │
+  │  return CTPPOOL_CORO_OK           │
+  │                                  │
 ```
 
-### 3.4 信号处理流程
+### 3.4 Signal Handling Flow
 
 ```
-协程栈溢出 → 访问 PROT_NONE 页
+Coroutine stack overflow → access PROT_NONE page
     │
     ▼
-SIGSEGV / SIGBUS 信号
+SIGSEGV / SIGBUS signal
     │
     ▼
 guard_handler(sig, info, uctx)
     │
     ├─ c = g_current
-    ├─ 校验 fault_addr 在当前协程 mmap 范围内
-    ├─ 校验 fault_addr 在 guard page（base 或 end-ps）
+    ├─ Verify fault_addr is within current coroutine mmap range
+    ├─ Verify fault_addr is on a guard page (base or end-ps)
     ├─ c->state = CTPPOOL_CORO_ERROR
     ├─ g_current = NULL
     └─ longjmp(g_guard_jmp, 1)
             │
             ▼
-    setjmp(g_guard_jmp) 返回非零值
+    setjmp(g_guard_jmp) returns non-zero
             │
             ▼
     return CTPPOOL_CORO_ERR_GUARD
@@ -200,57 +201,57 @@ guard_handler(sig, info, uctx)
 
 ---
 
-## 4. 线程安全模型
+## 4. Thread Safety Model
 
-### 4.1 线程池
+### 4.1 Thread Pool
 
-- **互斥锁**：单个 `pthread_mutex_t` 保护队列和状态，所有 worker 和主线程共享
-- **条件变量**：
-  - `cond` — worker 等待新任务时阻塞，主线程 submit 后 signal
-  - `drain_cond` — shutdown 后主线程等待所有 worker join
-- **无锁队列操作**：`ctpool_enqueue_unlocked()` / `ctpool_dequeue_unlocked()` 必须在持锁状态下调用
+- **Mutex**: Single `pthread_mutex_t` protects the queue and state, shared by all workers and the main thread
+- **Condition variables**:
+  - `cond` — workers block waiting for new tasks; main thread signals after submit
+  - `drain_cond` — main thread waits after shutdown for all workers to join
+- **Lock-free queue ops**: `ctpool_enqueue_unlocked()` / `ctpool_dequeue_unlocked()` must be called while holding the lock
 
-### 4.2 协程
+### 4.2 Coroutines
 
-- **per-thread 调度器**：`g_scheduler` 和 `g_guard_jmp` 均为 `_Thread_local`，每个线程独立维护
-- **`g_guard_installed`**：使用 `_Atomic bool`，多个线程同时 install 时只执行一次 `sigaction`
-- **`g_current`**：`_Thread_local` 指针，信号处理器中直接读取，无需锁
+- **Per-thread scheduler**: `g_scheduler` and `g_guard_jmp` are `_Thread_local`, each thread maintains its own
+- **`g_guard_installed`**: Uses `_Atomic bool`; multiple threads calling install concurrently only execute `sigaction` once
+- **`g_current`**: `_Thread_local` pointer, read directly in the signal handler without locking
 
-### 4.3 为什么协程不支持跨线程 resume
+### 4.3 Why coroutines do not support cross-thread resume
 
 ```
-线程 A：coro = ctpool_coro_create(...)
-线程 A：ctpool_coro_resume(coro)   ← 在线程 A 的 g_scheduler 上运行
-线程 B：ctpool_coro_resume(coro)   ← 在线程 B 的 g_scheduler 上运行
-        ↑ 不安全：ucontext_t 不是线程安全的，swapcontext 跨线程使用未定义行为
+Thread A: coro = ctpool_coro_create(...)
+Thread A: ctpool_coro_resume(coro)   ← runs on Thread A's g_scheduler
+Thread B: ctpool_coro_resume(coro)   ← runs on Thread B's g_scheduler
+        ↑ UNSAFE: ucontext_t is not thread-safe; swapcontext across threads is undefined behavior
 ```
 
-如需跨线程使用协程，必须在同一线程内完成 create → resume → destroy 完整生命周期。
+To use a coroutine safely across threads, the entire lifecycle (create → resume → destroy) must occur within a single thread.
 
 ---
 
-## 5. 内存模型
+## 5. Memory Model
 
-### 5.1 线程池内存分配
+### 5.1 Thread Pool Memory Allocation
 
 ```
 ctpool_pool_create()
-  ├─ calloc(1, sizeof(ctpool_thread_pool_t))   ← pool 结构体
-  ├─ calloc(worker_count, sizeof(ctpool_worker_ctx_t))  ← 工作线程上下文数组
-  ├─ calloc(worker_count, sizeof(pthread_t))   ← 线程句柄数组
+  ├─ calloc(1, sizeof(ctpool_thread_pool_t))    ← pool structure
+  ├─ calloc(worker_count, sizeof(ctpool_worker_ctx_t))  ← worker context array
+  ├─ calloc(worker_count, sizeof(pthread_t))     ← thread handle array
   └─ pthread_mutex_init / pthread_cond_init × 3
 
 ctpool_pool_submit()
-  └─ malloc(sizeof(ctpool_task_t))             ← 每个任务节点
+  └─ malloc(sizeof(ctpool_task_t))               ← per-task node
 
 ctpool_pool_submit_future()
-  ├─ calloc(1, sizeof(ctpool_future_t))        ← future 结构体
+  ├─ calloc(1, sizeof(ctpool_future_t))          ← future structure
   ├─ pthread_mutex_init(&fut->mutex)
   ├─ pthread_cond_init(&fut->cond)
-  └─ malloc(sizeof(future_task_ctx_t))          ← 任务包装上下文
+  └─ malloc(sizeof(future_task_ctx_t))            ← task wrapper context
 
 ctpool_pool_destroy()
-  ├─ 遍历释放 queue_head → queue_tail 所有 task
+  ├─ Traverse and free all task nodes in queue
   ├─ pthread_cond_destroy × 2
   ├─ pthread_mutex_destroy
   ├─ free(threads)
@@ -258,38 +259,38 @@ ctpool_pool_destroy()
   └─ free(pool)
 ```
 
-### 5.2 协程内存分配
+### 5.2 Coroutine Memory Allocation
 
 ```
 ctpool_coro_create()
-  ├─ calloc(1, sizeof(ctpool_coroutine_t))     ← 协程结构体
-  └─ mmap(total_sz, PROT_NONE)                 ← 含保护页的整个栈区域
-     └─ mprotect(stack_start, usable_sz, RW)   ← 可用区域设为可读可写
+  ├─ calloc(1, sizeof(ctpool_coroutine_t))       ← coroutine structure
+  └─ mmap(total_sz, PROT_NONE)                   ← full stack region including guards
+     └─ mprotect(stack_start, usable_sz, RW)     ← usable region set readable/writable
 
 ctpool_coro_resume()
-  └─ malloc(131072)                            ← 调度器栈（per-thread，仅分配一次）
+  └─ malloc(131072)                              ← scheduler stack (per-thread, allocated once)
 
 ctpool_coro_destroy()
-  ├─ munmap(mmap_base, mmap_size)              ← 释放整个栈区域（含保护页）
-  └─ free(c)                                   ← 释放协程结构体
+  ├─ munmap(mmap_base, mmap_size)                ← free entire stack region (including guards)
+  └─ free(c)                                     ← free coroutine structure
 
-注：调度器栈 (g_scheduler_stack) 不释放（进程级常驻，约 128KB），符合常规做法。
+Note: The scheduler stack (g_scheduler_stack) is intentionally not freed (process-level常驻, ~128KB).
 ```
 
 ---
 
-## 6. 错误处理策略
+## 6. Error Handling Strategy
 
-| 操作 | 失败时行为 |
-|------|-----------|
-| `pthread_mutex_init` | 返回 `CTPPOOL_ERR_ALLOC`，释放已分配资源 |
-| `pthread_cond_init` | 返回 `CTPPOOL_ERR_ALLOC`，销毁已初始化的互斥锁 |
-| `pthread_create` | 置 `shutdown=true`，broadcast cond，join 已创建线程，释放所有资源 |
-| `malloc` / `calloc` | 返回 `CTPPOOL_ERR_ALLOC` |
-| `mmap` | 返回 `CTPPOOL_CORO_ERR_ALLOC` |
-| `mprotect` | munmap 已 mmap 区域，返回 `CTPPOOL_CORO_ERR_MPROTECT` |
-| `sigaction` | 打印 stderr 错误信息，不 abort，继续运行（无保护页功能） |
-| `swapcontext` | 置 `state = CTPPOOL_CORO_ERROR`，返回 `CTPPOOL_CORO_ERR_CONTEXT` |
-| 栈溢出（guard page） | `longjmp` 到 `g_guard_jmp`，返回 `CTPPOOL_CORO_ERR_GUARD` |
+| Operation | Failure behavior |
+|-----------|-----------------|
+| `pthread_mutex_init` | Return `CTPPOOL_ERR_ALLOC`, free allocated resources |
+| `pthread_cond_init` | Return `CTPPOOL_ERR_ALLOC`, destroy already-initialized mutex |
+| `pthread_create` | Set `shutdown=true`, broadcast cond, join created threads, free all resources |
+| `malloc` / `calloc` | Return `CTPPOOL_ERR_ALLOC` |
+| `mmap` | Return `CTPPOOL_CORO_ERR_ALLOC` |
+| `mprotect` | munmap the already-allocated region, return `CTPPOOL_CORO_ERR_MPROTECT` |
+| `sigaction` | Print stderr error, do not abort, continue running (no guard page protection) |
+| `swapcontext` | Set `state = CTPPOOL_CORO_ERROR`, return `CTPPOOL_CORO_ERR_CONTEXT` |
+| Stack overflow (guard page) | `longjmp` to `g_guard_jmp`, return `CTPPOOL_CORO_ERR_GUARD` |
 
-所有错误路径均保证资源正确释放，无内存泄漏。
+All error paths guarantee correct resource cleanup with no memory leaks.
