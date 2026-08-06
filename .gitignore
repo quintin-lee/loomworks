@@ -1,0 +1,9 @@
+# Build artifacts
+build/
+build_cmake/
+Testing/
+*.o
+*.a
+*.so
+*.so.*
+vgcore.*
