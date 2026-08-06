@@ -24,6 +24,7 @@
 typedef struct loom_task {
     loom_task_fn      fn;        /**< Task function to execute. */
     void             *user_data; /**< Opaque argument passed to @p fn. */
+    bool              cancelled; /**< true if task was cancelled before execution. */
     struct loom_task *next;      /**< Next node in the queue. */
 } loom_task_t;
 

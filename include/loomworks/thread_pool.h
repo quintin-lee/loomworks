@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -161,6 +162,41 @@ uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool);
  * @return      Pending task count, or 0 if pool is invalid.
  */
 uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool);
+
+/**
+ * @brief Cancel a task that is still in the queue (not yet started).
+ *
+ * Searches the pending queue for a task whose user_data pointer matches
+ * @p data. If found and not yet begun execution, the task is removed and freed.
+ *
+ * @param pool  The pool handle.
+ * @param data  Opaque pointer that was passed to loom_pool_submit().
+ * @return      LOOMWORKS_OK if a matching pending task was cancelled,
+ *              LOOMWORKS_ERR_INVALID if not found or already running.
+ */
+loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data);
+
+/**
+ * @brief Cancel all tasks currently waiting in the queue.
+ *
+ * Removed tasks are NOT executed. The number of cancelled tasks is
+ * returned via @p count (may be NULL).
+ *
+ * @param pool  The pool handle.
+ * @param count Output pointer for the number of cancelled tasks (optional).
+ */
+void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count);
+
+/**
+ * @brief Wait for a future with a timeout.
+ *
+ * @param future   The future handle.
+ * @param result   Output pointer for the result (may be NULL).
+ * @param deadline Absolute time (timespec) after which to give up waiting.
+ * @return         LOOMWORKS_OK on success, LOOMWORKS_ERR_TIMEOUT on expiry.
+ */
+loom_result_t
+loom_future_wait_timeout(loom_future_t *future, void **result, const struct timespec *deadline);
 
 #ifdef __cplusplus
 }

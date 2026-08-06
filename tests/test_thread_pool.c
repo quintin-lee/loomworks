@@ -101,6 +101,7 @@ static void test_future_result(void)
     ASSERT(loom_future_wait(future, &result) == LOOMWORKS_OK, "wait future");
     ASSERT(result != NULL, "result not null");
     /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
     ASSERT(*(int *)result == 42, "result value is 42");
     free(result);
 
@@ -380,6 +381,137 @@ static void test_future_wait_completed(void)
     ASSERT(true, "future wait completed");
 }
 
+/* ---------- Helpers for cancel/timeout tests ---------- */
+typedef struct {
+    bool *done;
+} slow_task_arg_t;
+
+static void increment_task(void *arg)
+{
+    int *c = (int *)arg;
+    __sync_fetch_and_add(c, 1);
+}
+
+static void *fast_result_task(void *arg)
+{
+    (void)arg;
+    int *val = (int *)malloc(sizeof(int));
+    if (val) {
+        *val = 42;
+    }
+    return (void *)val;
+}
+
+static void *slow_result_task(void *arg)
+{
+    (void)arg;
+    for (volatile int i = 0; i < 50000000; i++)
+        ;
+    int *val = (int *)malloc(sizeof(int));
+    if (val) {
+        *val = 99;
+    }
+    return (void *)val;
+}
+
+/* ---------- Test: cancel pending task ---------- */
+static void test_cancel(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    /* Submit a slow task and try to cancel it */
+    slow_task_arg_t *arg = (slow_task_arg_t *)malloc(sizeof(*arg));
+    arg->done            = false;
+    ASSERT(loom_pool_submit(pool, slow_task, arg) == LOOMWORKS_OK, "submit slow task");
+
+    /* The task might already be running, so cancel may or may not succeed */
+    loom_result_t rc = loom_pool_cancel(pool, arg);
+    if (rc == LOOMWORKS_OK) {
+        /* Cancelled before execution -- verify it didn't run */
+        /* We need to wait a bit then check; for this test just verify no crash */
+    }
+    free(arg);
+
+    /* Submit an instant task and cancel it before it runs */
+    int counter = 0;
+    ASSERT(loom_pool_submit(pool, increment_task, &counter) == LOOMWORKS_OK, "submit inc");
+    ASSERT(loom_pool_cancel(pool, &counter) == LOOMWORKS_OK, "cancel inc");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancel_all ---------- */
+static void test_cancel_all(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    int counters[10];
+    for (int i = 0; i < 10; i++) {
+        counters[i] = 0;
+        ASSERT(loom_pool_submit(pool, increment_task, &counters[i]) == LOOMWORKS_OK, "submit task");
+    }
+
+    uint32_t cancelled = 0;
+    loom_pool_cancel_all(pool, &cancelled);
+    ASSERT(cancelled == 10, "all 10 tasks cancelled");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: future_wait_timeout (should succeed) ---------- */
+static void test_future_wait_timeout_ok(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_future_t *fut = NULL;
+    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut) == LOOMWORKS_OK,
+           "submit future");
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 5; /* 5 second timeout -- should always succeed */
+
+    void *result = NULL;
+    ASSERT(loom_future_wait_timeout(fut, &result, &deadline) == LOOMWORKS_OK,
+           "wait_timeout succeeds");
+    ASSERT(result != NULL, "result not null");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    ASSERT(*(int *)result == 42, "result value is 42");
+    free(result);
+
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: future_wait_timeout (should timeout) ---------- */
+static void test_future_wait_timeout_expired(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_future_t *fut = NULL;
+    ASSERT(loom_pool_submit_future(pool, slow_result_task, NULL, &fut) == LOOMWORKS_OK,
+           "submit slow future");
+
+    /* Deadline in the past */
+    struct timespec deadline = {.tv_sec = 0, .tv_nsec = 0};
+
+    void *result = NULL;
+    ASSERT(loom_future_wait_timeout(fut, &result, &deadline) == LOOMWORKS_ERR_TIMEOUT,
+           "wait_timeout times out");
+
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -403,6 +535,10 @@ int main(void)
     test_no_data_task();
     test_destroy_null();
     test_future_wait_completed();
+    test_cancel();
+    test_cancel_all();
+    test_future_wait_timeout_ok();
+    test_future_wait_timeout_expired();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

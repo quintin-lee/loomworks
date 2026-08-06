@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ================================================================
@@ -406,6 +407,51 @@ loom_result_t loom_future_wait(loom_future_t *future, void **result)
 }
 
 /* ================================================================
+ *  loom_future_wait_timeout
+ *
+ *  Same semantics as loom_future_wait() but returns LOOMWORKS_ERR_TIMEOUT
+ *  if the timeout expires before the task completes.
+ *
+ *  @param future   The future handle.
+ *  @param result   Output pointer for the result (may be NULL).
+ *  @param deadline Absolute time (timespec) to wait until.
+ *  @return         LOOMWORKS_OK on success, LOOMWORKS_ERR_TIMEOUT on expiry.
+ * ================================================================ */
+loom_result_t
+loom_future_wait_timeout(loom_future_t *future, void **result, const struct timespec *deadline)
+{
+    if (!future || !deadline) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    pthread_mutex_lock(&future->mutex);
+    if (future->ready) {
+        if (result) {
+            *result = future->result;
+        }
+        pthread_mutex_unlock(&future->mutex);
+        return LOOMWORKS_OK;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    long remaining_ns = (long)(deadline->tv_sec - now.tv_sec) * 1000000000L +
+                        (long)(deadline->tv_nsec - now.tv_nsec);
+    if (remaining_ns <= 0) {
+        pthread_mutex_unlock(&future->mutex);
+        return LOOMWORKS_ERR_TIMEOUT;
+    }
+    int rc = pthread_cond_timedwait(&future->cond, &future->mutex, deadline);
+    if (rc == ETIMEDOUT) {
+        pthread_mutex_unlock(&future->mutex);
+        return LOOMWORKS_ERR_TIMEOUT;
+    }
+    if (result) {
+        *result = future->result;
+    }
+    pthread_mutex_unlock(&future->mutex);
+    return LOOMWORKS_OK;
+}
+
+/* ================================================================
  *  loom_future_destroy — free a future's synchronisation primitives.
  *
  *  The result pointer stored in the future is NOT freed; the caller
@@ -461,6 +507,82 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
     pool->joined   = true;
     pthread_cond_broadcast(&pool->drain_cond);
     pthread_mutex_unlock(&pool->lock);
+}
+
+/* ================================================================
+ *  loom_pool_cancel -- cancel a single pending task by user_data pointer.
+ *
+ *  Searches the queue for a task with matching user_data.  If found
+ *  before the task starts executing, removes and frees it.
+ *
+ *  @return  LOOMWORKS_OK if cancelled, LOOMWORKS_ERR_INVALID if not found.
+ * ================================================================ */
+loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
+{
+    if (!pool || !data) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    pthread_mutex_lock(&pool->lock);
+    if (pool->shutdown) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
+    loom_task_t *prev = NULL;
+    loom_task_t *cur  = pool->queue_head;
+    while (cur) {
+        if (cur->user_data == data && !cur->cancelled) {
+            if (prev) {
+                prev->next = cur->next;
+            } else {
+                pool->queue_head = cur->next;
+            }
+            if (cur == pool->queue_tail) {
+                pool->queue_tail = prev;
+            }
+            pool->queue_len--;
+            loom_task_t *to_free = cur;
+            pthread_mutex_unlock(&pool->lock);
+            task_destroy(to_free);
+            return LOOMWORKS_OK;
+        }
+        prev = cur;
+        cur  = cur->next;
+    }
+    pthread_mutex_unlock(&pool->lock);
+    return LOOMWORKS_ERR_INVALID;
+}
+
+/* ================================================================
+ *  loom_pool_cancel_all -- cancel every task still in the queue.
+ *
+ *  Tasks already being executed are NOT interrupted.  Only queued
+ *  tasks are removed and freed.
+ *
+ *  @param count  Output pointer for the number of cancelled tasks (may be NULL).
+ * ================================================================ */
+void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
+{
+    if (!pool) {
+        return;
+    }
+    uint32_t cancelled = 0;
+    pthread_mutex_lock(&pool->lock);
+    if (!pool->shutdown) {
+        loom_task_t *cur = pool->queue_head;
+        pool->queue_head = NULL;
+        pool->queue_tail = NULL;
+        pool->queue_len  = 0;
+        while (cur) {
+            loom_task_t *next = cur->next;
+            task_destroy(cur);
+            cur = next;
+            cancelled++;
+        }
+    }
+    pthread_mutex_unlock(&pool->lock);
+    if (count) {
+        *count = cancelled;
+    }
 }
 
 /* ================================================================
