@@ -15,10 +15,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get install -y cmake clang-tools
-      - name: Configure
+        run: sudo apt-get install -y cmake clang-tools valgrind
+      - name: Configure (default)
         run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.cc }}
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
         run: cd build && ctest --output-on-failure
+
+  sanitize:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get install -y cmake
+      - name: Configure with ${{ matrix.sanitizer }}
+        run: >
+          cmake -S . -B build
+          -DCMAKE_C_COMPILER=gcc
+          -DCMAKE_C_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+      - name: Build
+        run: cmake --build build -j$(nproc)
+      - name: Test (ASan/UBSan)
+        run: |
+          cd build
+          export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so
+          ctest --output-on-failure
+
+  valgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get install -y cmake valgrind libc6-dbg
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_C_COMPILER=gcc
+      - name: Build
+        run: cmake --build build -j$(nproc)
+      - name: Valgrind memcheck
+        run: >
+          cd build &&
+          valgrind --leak-check=full --error-exitcode=1
+          ./test_thread_pool &&
+          valgrind --leak-check=full --error-exitcode=1
+          ./test_coroutine &&
+          valgrind --leak-check=full --error-exitcode=1
+          ./test_integration

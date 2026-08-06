@@ -65,7 +65,7 @@ static void          future_task_wrapper(void *arg);
  * ================================================================ */
 static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
 {
-    if (!pool || !pool->metric_cb) {
+    if (!pool) {
         return;
     }
     if (pool->metrics) {
@@ -814,6 +814,11 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
 void loom_pool_set_metrics_callback(loom_thread_pool_t *pool, loom_metric_fn cb, void *user_data)
 {
     if (!pool) {
+        return;
+    }
+    if (cb == NULL) {
+        /* Unregister only — do not clobber an existing callback. */
+        pool->metric_user_data = NULL;
         return;
     }
     union {

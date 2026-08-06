@@ -1,0 +1,22 @@
+# Valgrind suppression rules for loomworks
+#
+# ucontext-based coroutines use mmap'd stacks with PROT_NONE guard pages.
+# Valgrind may flag the scheduler stack as "possibly lost" because it is
+# intentionally never freed (reclaimed at thread exit). These suppressions
+# eliminate those false positives.
+
+{
+   loomworks_scheduler_stack
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun: malloc
+   fun: loom_coro_create
+}
+{
+   loomworks_guard_page_mprotect
+   Memcheck:Leak
+   match-leak-kinds: definite
+   obj:*
+   fun: mprotect
+   fun: loom_coro_create
+}

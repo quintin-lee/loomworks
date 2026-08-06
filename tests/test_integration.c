@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/loomworks.h"
+#include "loomworks/metrics.h"
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -342,6 +343,36 @@ static void test_large_stack_coroutines(void)
     ASSERT(counter == N, "large stack coroutines completed");
 }
 
+
+/* ---------- Test: concurrent metrics accuracy ---------- */
+static void noop_task(void *arg) { (void)arg; }
+static void test_metrics_concurrent(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 8, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create metrics pool");
+
+    loom_metrics_t *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK,
+           "create metrics collector");
+
+    const int N = 10000;
+    for (int i = 0; i < N; i++) {
+        ASSERT(loom_pool_submit(pool, noop_task, NULL) == LOOMWORKS_OK,
+               "submit during metrics stress");
+    }
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    uint64_t submitted = loom_metrics_submitted(metrics);
+    uint64_t completed = loom_metrics_completed(metrics);
+    ASSERT(submitted == (uint64_t)N, "metrics: submitted count matches");
+    ASSERT(completed == (uint64_t)N, "metrics: completed count matches");
+
+    loom_metrics_destroy(&metrics);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -362,6 +393,7 @@ int main(void)
     test_bounded_queue_concurrent();
     test_yield_in_pool();
     test_large_stack_coroutines();
+    test_metrics_concurrent();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

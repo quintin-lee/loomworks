@@ -129,9 +129,38 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS loomworks_static loomworks_shared
+    EXPORT loomworksTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 install(DIRECTORY include/loomworks
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# ---------------------------------------------------------------------------
+# Export config — enables downstream find_package(loomworks)
+# ---------------------------------------------------------------------------
+install(EXPORT loomworksTargets
+    FILE loomworksTargets.cmake
+    NAMESPACE loomworks::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/loomworks
+)
+
+# Generate package config file
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/loomworksConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/loomworksConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/loomworks
+)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/loomworksConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/loomworksConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/loomworksConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/loomworks
 )
