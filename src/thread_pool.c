@@ -38,6 +38,7 @@ static ctpool_result_t pool_init(ctpool_thread_pool_t *pool)
 
     pool->shutdown = false;
     pool->draining = false;
+    pool->joined = false;
     pool->queue_head = NULL;
     pool->queue_tail = NULL;
     pool->queue_len = 0;
@@ -236,6 +237,10 @@ void ctpool_pool_shutdown(ctpool_thread_pool_t *pool)
 {
     if (!pool) return;
     pthread_mutex_lock(&pool->lock);
+    if (pool->joined) {
+        pthread_mutex_unlock(&pool->lock);
+        return;
+    }
     pool->shutdown = true; pool->draining = true;
     pthread_cond_broadcast(&pool->cond);
     pthread_mutex_unlock(&pool->lock);
@@ -243,6 +248,7 @@ void ctpool_pool_shutdown(ctpool_thread_pool_t *pool)
         pthread_join(pool->threads[i], NULL);
     pthread_mutex_lock(&pool->lock);
     pool->draining = false;
+    pool->joined = true;
     pthread_cond_broadcast(&pool->drain_cond);
     pthread_mutex_unlock(&pool->lock);
 }

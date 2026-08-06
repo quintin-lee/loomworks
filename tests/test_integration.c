@@ -42,6 +42,14 @@ static void coro_task(void *arg)
     __sync_fetch_and_add(counter, 1);
 }
 
+static void yield_coro_task(void *arg)
+{
+    int *counter = (int *)arg;
+    __sync_fetch_and_add(counter, 1);
+    ctpool_coro_yield();
+    __sync_fetch_and_add(counter, 1);
+}
+
 /* ---------- Test: stress pool ---------- */
 static void test_stress_pool(void)
 {
@@ -171,6 +179,161 @@ static void test_future_in_pool(void)
     ASSERT(total == (long)N * 12345L, "future results correct");
 }
 
+/* ---------- Test: stress yield coroutines ---------- */
+static void test_stress_yield_coroutines(void)
+{
+    const int N = 200;
+    int counter = 0;
+
+    for (int i = 0; i < N; i++) {
+        ctpool_coroutine_t *coro = NULL;
+        ASSERT(ctpool_coro_create(yield_coro_task, &counter, 0, &coro) == CTPPOOL_CORO_OK, "create yield coro");
+        ASSERT(ctpool_coro_resume(coro) == CTPPOOL_CORO_OK, "1st resume");
+        ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_SUSPENDED, "SUSPENDED");
+        ASSERT(ctpool_coro_resume(coro) == CTPPOOL_CORO_OK, "2nd resume");
+        ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE");
+        ctpool_coro_destroy(&coro);
+    }
+
+    ASSERT(counter == N * 2, "all yield coroutines completed");
+}
+
+/* ---------- Test: pool with many futures ---------- */
+static void test_pool_many_futures(void)
+{
+    ctpool_thread_pool_t *pool = NULL;
+    ASSERT(ctpool_pool_create(NULL, &pool) == CTPPOOL_OK, "create pool");
+
+    const int N = 500;
+    long total = 0;
+
+    ctpool_future_t *futures[N];
+    for (int i = 0; i < N; i++) {
+        ASSERT(ctpool_pool_submit_future(pool, pool_result_task, NULL, &futures[i]) == CTPPOOL_OK, "submit future");
+    }
+
+    for (int i = 0; i < N; i++) {
+        void *res = NULL;
+        ASSERT(ctpool_future_wait(futures[i], &res) == CTPPOOL_OK, "wait future");
+        if (res) {
+            total += *(long *)res;
+            free(res);
+        }
+        ctpool_future_destroy(futures[i]);
+    }
+
+    ctpool_pool_shutdown(pool);
+    ctpool_pool_destroy(&pool);
+
+    ASSERT(total == (long)N * 12345L, "many futures results correct");
+}
+
+/* ---------- Test: concurrent pool + coroutines ---------- */
+typedef struct {
+    ctpool_thread_pool_t *pool;
+    int                   iters;
+} coro_in_pool_arg_t;
+
+static void *coro_in_pool_task(void *arg)
+{
+    coro_in_pool_arg_t *ca = (coro_in_pool_arg_t *)arg;
+    int local_count = 0;
+
+    for (int i = 0; i < ca->iters; i++) {
+        ctpool_coroutine_t *coro = NULL;
+        ctpool_coro_create(coro_task, &local_count, 0, &coro);
+        ctpool_coro_resume(coro);
+        ctpool_coro_destroy(&coro);
+    }
+
+    free(ca);
+    return NULL;
+}
+
+static void test_concurrent_pool_coroutines(void)
+{
+    ctpool_thread_pool_t *pool = NULL;
+    ASSERT(ctpool_pool_create(NULL, &pool) == CTPPOOL_OK, "create pool");
+
+    const int N = 50;
+    pthread_t tids[4];
+
+    for (int t = 0; t < 4; t++) {
+        coro_in_pool_arg_t *ca = (coro_in_pool_arg_t *)malloc(sizeof(*ca));
+        ca->pool  = pool;
+        ca->iters = N;
+        pthread_create(&tids[t], NULL, coro_in_pool_task, ca);
+    }
+    for (int t = 0; t < 4; t++) {
+        pthread_join(tids[t], NULL);
+    }
+
+    ctpool_pool_shutdown(pool);
+    ctpool_pool_destroy(&pool);
+    ASSERT(true, "concurrent pool+coroutines completed");
+}
+
+/* ---------- Test: bounded queue with concurrent workers ---------- */
+static void test_bounded_queue_concurrent(void)
+{
+    ctpool_thread_pool_t *pool = NULL;
+    ctpool_pool_config_t cfg = { .worker_count = 4, .queue_capacity = 20 };
+    ASSERT(ctpool_pool_create(&cfg, &pool) == CTPPOOL_OK, "create bounded pool");
+
+    int counter = 0;
+    const int N = 100;
+
+    for (int i = 0; i < N; i++) {
+        ctpool_result_t rc = ctpool_pool_submit(pool, pool_task, &counter);
+        if (rc != CTPPOOL_OK) {
+            /* Queue full — that's expected with capacity 20 and 4 workers */
+            ASSERT(rc == CTPPOOL_ERR_INVALID, "full queue returns ERR_INVALID");
+        }
+    }
+
+    ctpool_pool_shutdown(pool);
+    ctpool_pool_destroy(&pool);
+    ASSERT(counter <= N, "bounded queue: tasks completed");
+}
+
+/* ---------- Test: yield in pool workers ---------- */
+static void test_yield_in_pool(void)
+{
+    ctpool_thread_pool_t *pool = NULL;
+    ASSERT(ctpool_pool_create(NULL, &pool) == CTPPOOL_OK, "create pool");
+
+    int counter = 0;
+    const int N = 50;
+
+    for (int i = 0; i < N; i++) {
+        interop_arg_t *ia = (interop_arg_t *)malloc(sizeof(*ia));
+        ia->counter = &counter;
+        ia->pool    = pool;
+        ctpool_pool_submit(pool, interop_task, ia);
+    }
+
+    ctpool_pool_shutdown(pool);
+    ctpool_pool_destroy(&pool);
+    ASSERT(counter == N, "yield coroutines in pool completed");
+}
+
+/* ---------- Test: sequential coroutines with large stack ---------- */
+static void test_large_stack_coroutines(void)
+{
+    const int N = 50;
+    int counter = 0;
+
+    for (int i = 0; i < N; i++) {
+        ctpool_coroutine_t *coro = NULL;
+        ASSERT(ctpool_coro_create(coro_task, &counter, 262144, &coro) == CTPPOOL_CORO_OK, "create 256KB stack coro");
+        ASSERT(ctpool_coro_resume(coro) == CTPPOOL_CORO_OK, "resume large stack coro");
+        ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE");
+        ctpool_coro_destroy(&coro);
+    }
+
+    ASSERT(counter == N, "large stack coroutines completed");
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -185,6 +348,12 @@ int main(void)
     test_guard_page();
     test_config_validation();
     test_future_in_pool();
+    test_stress_yield_coroutines();
+    test_pool_many_futures();
+    test_concurrent_pool_coroutines();
+    test_bounded_queue_concurrent();
+    test_yield_in_pool();
+    test_large_stack_coroutines();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

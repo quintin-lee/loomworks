@@ -51,6 +51,7 @@ struct ctpool_thread_pool {
     pthread_cond_t          drain_cond CTPPOOL_CACHELINE_ALIGN;
     bool                    shutdown;
     bool                    draining;
+    bool                    joined;
 
     ctpool_task_t          *queue_head;
     ctpool_task_t          *queue_tail;
