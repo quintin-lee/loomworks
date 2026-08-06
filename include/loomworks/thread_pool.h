@@ -75,6 +75,16 @@ typedef struct {
 } loom_pool_config_t;
 
 /**
+ * @brief Task priority levels (lower number = higher priority).
+ */
+typedef enum {
+    LOOMWORKS_PRIORITY_LOW      = 10, /**< Default low priority. */
+    LOOMWORKS_PRIORITY_NORMAL   = 5,  /**< Normal priority. */
+    LOOMWORKS_PRIORITY_HIGH     = 1,  /**< High priority. */
+    LOOMWORKS_PRIORITY_REALTIME = 0,  /**< Realtime / critical priority. */
+} loom_task_priority_t;
+
+/**
  * @brief Create a thread pool.
  *
  * @param config   Configuration for the pool (pass NULL for defaults).
@@ -109,6 +119,34 @@ loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
                                       loom_task_fn_result fn,
                                       void               *data,
                                       loom_future_t     **future);
+
+/**
+ * @brief Submit a fire-and-forget task with explicit priority.
+ *
+ * @param pool     The pool handle.
+ * @param fn       Task function.
+ * @param data     Opaque user data.
+ * @param priority Task priority (see loom_task_priority_t).
+ * @return         LOOMWORKS_OK on success.
+ */
+loom_result_t
+loom_pool_submit_priority(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority);
+
+/**
+ * @brief Submit a result task with explicit priority.
+ *
+ * @param pool     The pool handle.
+ * @param fn       Task function returning a result pointer.
+ * @param data     Opaque user data.
+ * @param priority Task priority.
+ * @param future   Output pointer for the future handle.
+ * @return         LOOMWORKS_OK on success.
+ */
+loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
+                                               loom_task_fn_result fn,
+                                               void               *data,
+                                               uint8_t             priority,
+                                               loom_future_t     **future);
 
 /**
  * @brief Wait for a future's result. Blocks until the task completes.

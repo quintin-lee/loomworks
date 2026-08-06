@@ -626,6 +626,62 @@ static void test_task_group_submit_after_destroy(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: priority ordering ---------- */
+static void test_priority_ordering(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    /* Submit tasks in reverse priority order: low, normal, high, realtime */
+    int order[4] = {0, 0, 0, 0};
+    ASSERT(loom_pool_submit_priority(pool, increment_task, &order[0], LOOMWORKS_PRIORITY_LOW) ==
+               LOOMWORKS_OK,
+           "submit low");
+    ASSERT(loom_pool_submit_priority(pool, increment_task, &order[1], LOOMWORKS_PRIORITY_NORMAL) ==
+               LOOMWORKS_OK,
+           "submit normal");
+    ASSERT(loom_pool_submit_priority(pool, increment_task, &order[2], LOOMWORKS_PRIORITY_HIGH) ==
+               LOOMWORKS_OK,
+           "submit high");
+    ASSERT(loom_pool_submit_priority(
+               pool, increment_task, &order[3], LOOMWORKS_PRIORITY_REALTIME) == LOOMWORKS_OK,
+           "submit realtime");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    /* With single worker, higher priority tasks should execute first.
+     * Execution order: realtime(3), high(2), normal(1), low(0) */
+    ASSERT(order[3] == 1, "realtime executed");
+    ASSERT(order[2] == 1, "high executed");
+    ASSERT(order[1] == 1, "normal executed");
+    ASSERT(order[0] == 1, "low executed");
+}
+
+/* ---------- Test: priority future ---------- */
+static void test_priority_future(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_future_t *fut = NULL;
+    ASSERT(loom_pool_submit_future_priority(
+               pool, fast_result_task, NULL, LOOMWORKS_PRIORITY_HIGH, &fut) == LOOMWORKS_OK,
+           "submit priority future");
+    ASSERT(fut != NULL, "future not null");
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_OK, "wait future");
+    ASSERT(result != NULL, "result not null");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    ASSERT(*(int *)result == 42, "result value is 42");
+    free(result);
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -659,6 +715,8 @@ int main(void)
     test_task_group_destroy_cancels();
     test_task_group_null_safety();
     test_task_group_submit_after_destroy();
+    test_priority_ordering();
+    test_priority_future();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
