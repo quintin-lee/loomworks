@@ -152,6 +152,13 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     pthread_cond_destroy(&pool->drain_cond);
     pthread_cond_destroy(&pool->cond);
     pthread_mutex_destroy(&pool->lock);
+
+    /* Clear metrics so no worker accesses freed pool via metric_cb / metrics.
+     * The metrics object itself is owned by the caller and destroyed separately. */
+    pool->metric_cb        = NULL;
+    pool->metric_user_data = NULL;
+    pool->metrics          = NULL;
+
     free(pool->threads);
     free(pool->workers);
     free(pool);

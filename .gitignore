@@ -1,6 +1,6 @@
 # Build artifacts
 build/
-build_cmake/
+build_*/
 Testing/
 *.o
 *.a

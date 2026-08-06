@@ -363,7 +363,6 @@ static void test_metrics_concurrent(void)
     }
 
     loom_pool_shutdown(pool);
-    loom_pool_destroy(&pool);
 
     uint64_t submitted = loom_metrics_submitted(metrics);
     uint64_t completed = loom_metrics_completed(metrics);
@@ -371,6 +370,7 @@ static void test_metrics_concurrent(void)
     ASSERT(completed == (uint64_t)N, "metrics: completed count matches");
 
     loom_metrics_destroy(&metrics);
+    loom_pool_destroy(&pool);
 }
 
 /* ================================================================
