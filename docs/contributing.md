@@ -1,6 +1,6 @@
-# ctpool Contributing Guide
+# loomworks Contributing Guide
 
-Thank you for your interest in contributing to ctpool! This document describes coding standards and the submission process.
+Thank you for your interest in contributing to loomworks! This document describes coding standards and the submission process.
 
 ---
 
@@ -34,11 +34,11 @@ Common warnings and fixes:
 
 | Type | Prefix | Example |
 |------|--------|---------|
-| Public functions | `ctpool_` | `ctpool_pool_create()` |
+| Public functions | `loom_` | `loom_pool_create()` |
 | Internal functions | `pool_` / `coro_` | `pool_init()`, `coro_entry()` |
-| Type aliases | `_t` suffix | `ctpool_thread_pool_t` |
-| Enum values | `CTPPOOL_` / `CTPPOOL_CORO_` | `CTPPOOL_OK`, `CTPPOOL_CORO_NEW` |
-| Macro constants | `CTPPOOL_` / `CTPPOOL_CORO_` | `CTPPOOL_DEFAULT_STACK_SIZE` |
+| Type aliases | `_t` suffix | `loom_thread_pool_t` |
+| Enum values | `LOOMWORKS_` / `LOOMWORKS_CORO_` | `LOOMWORKS_OK`, `LOOMWORKS_CORO_NEW` |
+| Macro constants | `LOOMWORKS_` / `LOOMWORKS_CORO_` | `LOOMWORKS_DEFAULT_STACK_SIZE` |
 
 ### 1.4 Error Handling
 
@@ -50,7 +50,7 @@ Common warnings and fixes:
 // ✅ Correct
 if (pthread_mutex_init(&pool->lock, NULL) != 0) {
     free(pool);
-    return CTPPOOL_ERR_ALLOC;
+    return LOOMWORKS_ERR_ALLOC;
 }
 
 // ❌ Incorrect

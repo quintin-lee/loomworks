@@ -1,14 +1,14 @@
-#ifndef CTPPOOL_COROUTINE_INTERNAL_H
-#define CTPPOOL_COROUTINE_INTERNAL_H
+#ifndef LOOMWORKS_COROUTINE_INTERNAL_H
+#define LOOMWORKS_COROUTINE_INTERNAL_H
 
-#include "ctpool/coroutine.h"
+#include "loomworks/coroutine.h"
 #include <ucontext.h>
 #include <stdbool.h>
 
 /* One cache line on modern x86-64.  Fields that are accessed by
  * different threads concurrently (e.g. the mutex, condition variables)
  * are aligned to avoid false sharing. */
-#define CTPPOOL_CACHELINE_ALIGN  __attribute__((aligned(64)))
+#define LOOMWORKS_CACHELINE_ALIGN  __attribute__((aligned(64)))
 
 /**
  * @brief Internal coroutine structure.
@@ -21,9 +21,9 @@
  * (g_scheduler) is thread-local and persistent across all coroutines
  * created on the same thread.
  */
-struct ctpool_coroutine {
-    ctpool_coro_state_t   state;        /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR). */
-    ctpool_coro_fn        entry_fn;     /**< User entry function. */
+struct loom_coroutine {
+    loom_coro_state_t   state;        /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR). */
+    loom_coro_fn        entry_fn;     /**< User entry function. */
     void                 *user_data;    /**< Opaque argument passed to entry_fn. */
     size_t                stack_size;   /**< Requested stack size in bytes. */
 
@@ -44,11 +44,11 @@ struct ctpool_coroutine {
  * page violation.  Uses atomic load to avoid redundant sigaction() calls
  * across threads.
  */
-void ctpool_coro_install_guard_handler(void);
+void loom_coro_install_guard_handler(void);
 
 /**
  * @brief Remove the guard-page signal handler and restore defaults.
  */
-void ctpool_coro_uninstall_guard_handler(void);
+void loom_coro_uninstall_guard_handler(void);
 
-#endif /* CTPPOOL_COROUTINE_INTERNAL_H */
+#endif /* LOOMWORKS_COROUTINE_INTERNAL_H */

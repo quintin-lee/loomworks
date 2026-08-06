@@ -1,5 +1,5 @@
-#ifndef CTPPOOL_COROUTINE_H
-#define CTPPOOL_COROUTINE_H
+#ifndef LOOMWORKS_COROUTINE_H
+#define LOOMWORKS_COROUTINE_H
 
 /**
  * @file coroutine.h
@@ -27,64 +27,64 @@ extern "C" {
 #endif
 
 /** Opaque coroutine handle. */
-typedef struct ctpool_coroutine ctpool_coroutine_t;
+typedef struct loom_coroutine loom_coroutine_t;
 
 /**
  * @brief Coroutine state.
  */
 typedef enum {
-    CTPPOOL_CORO_NEW,       /**< Coroutine created but not started. */
-    CTPPOOL_CORO_RUNNING,   /**< Currently executing. */
-    CTPPOOL_CORO_SUSPENDED, /**< Paused via yield or initial suspend. */
-    CTPPOOL_CORO_DONE,      /**< Completed execution. */
-    CTPPOOL_CORO_ERROR,     /**< Error state (e.g., guard page hit). */
-} ctpool_coro_state_t;
+    LOOMWORKS_CORO_NEW,       /**< Coroutine created but not started. */
+    LOOMWORKS_CORO_RUNNING,   /**< Currently executing. */
+    LOOMWORKS_CORO_SUSPENDED, /**< Paused via yield or initial suspend. */
+    LOOMWORKS_CORO_DONE,      /**< Completed execution. */
+    LOOMWORKS_CORO_ERROR,     /**< Error state (e.g., guard page hit). */
+} loom_coro_state_t;
 
 /**
  * @brief Result codes for coroutine operations.
  */
 typedef enum {
-    CTPPOOL_CORO_OK = 0,        /**< Operation succeeded. */
-    CTPPOOL_CORO_ERR_ALLOC,     /**< Memory allocation failed. */
-    CTPPOOL_CORO_ERR_CONTEXT,   /**< Context creation failed. */
-    CTPPOOL_CORO_ERR_MPROTECT,  /**< mprotect call failed. */
-    CTPPOOL_CORO_ERR_INVALID,   /**< Invalid coroutine handle or state. */
-    CTPPOOL_CORO_ERR_GUARD,     /**< Guard page violation detected. */
-    CTPPOOL_CORO_ERR_RUNNING,   /**< Operation invalid in current state. */
-} ctpool_coro_result_t;
+    LOOMWORKS_CORO_OK = 0,        /**< Operation succeeded. */
+    LOOMWORKS_CORO_ERR_ALLOC,     /**< Memory allocation failed. */
+    LOOMWORKS_CORO_ERR_CONTEXT,   /**< Context creation failed. */
+    LOOMWORKS_CORO_ERR_MPROTECT,  /**< mprotect call failed. */
+    LOOMWORKS_CORO_ERR_INVALID,   /**< Invalid coroutine handle or state. */
+    LOOMWORKS_CORO_ERR_GUARD,     /**< Guard page violation detected. */
+    LOOMWORKS_CORO_ERR_RUNNING,   /**< Operation invalid in current state. */
+} loom_coro_result_t;
 
 /**
  * @brief Coroutine entry function signature.
  *
  * @param user_data  Opaque pointer provided at creation time.
  */
-typedef void (*ctpool_coro_fn)(void *user_data);
+typedef void (*loom_coro_fn)(void *user_data);
 
 /**
  * @brief Default coroutine stack size.
  */
-#define CTPPOOL_CORO_DEFAULT_STACK_SIZE (64 * 1024)  /* 64 KiB */
+#define LOOMWORKS_CORO_DEFAULT_STACK_SIZE (64 * 1024)  /* 64 KiB */
 
 /**
  * @brief Number of guard pages on each side of the stack.
  */
-#define CTPPOOL_CORO_GUARD_PAGES_EACH 1
+#define LOOMWORKS_CORO_GUARD_PAGES_EACH 1
 
 /**
  * @brief Create a new coroutine.
  *
- * The coroutine is in the NEW state. Call ctpool_coro_resume() to start it.
+ * The coroutine is in the NEW state. Call loom_coro_resume() to start it.
  *
  * @param fn       Entry function for the coroutine.
  * @param data     Opaque user data passed to the entry function.
  * @param stack_size  Stack size in bytes (0 uses default).
  * @param coro     Output pointer for the created coroutine handle.
- * @return         CTPPOOL_CORO_OK on success, error code otherwise.
+ * @return         LOOMWORKS_CORO_OK on success, error code otherwise.
  */
-ctpool_coro_result_t ctpool_coro_create(ctpool_coro_fn fn,
+loom_coro_result_t loom_coro_create(loom_coro_fn fn,
                                          void *data,
                                          size_t stack_size,
-                                         ctpool_coroutine_t **coro);
+                                         loom_coroutine_t **coro);
 
 /**
  * @brief Start or resume a coroutine.
@@ -93,24 +93,24 @@ ctpool_coro_result_t ctpool_coro_create(ctpool_coro_fn fn,
  * If it is SUSPENDED, this resumes execution from the yield point.
  *
  * @param coro  The coroutine handle.
- * @return      CTPPOOL_CORO_OK on success, error code otherwise.
+ * @return      LOOMWORKS_CORO_OK on success, error code otherwise.
  */
-ctpool_coro_result_t ctpool_coro_resume(ctpool_coroutine_t *coro);
+loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro);
 
 /**
  * @brief Yield control back to the caller (scheduler).
  *
  * Must be called from within a running coroutine. Execution will resume
- * at the same point on the next ctpool_coro_resume() call.
+ * at the same point on the next loom_coro_resume() call.
  */
-void ctpool_coro_yield(void);
+void loom_coro_yield(void);
 
 /**
  * @brief Suspend the current coroutine, returning control to the caller.
  *
  * Equivalent to yield but explicitly marks the coroutine as SUSPENDED.
  */
-void ctpool_coro_suspend(void);
+void loom_coro_suspend(void);
 
 /**
  * @brief Terminate a coroutine before it completes naturally.
@@ -119,27 +119,27 @@ void ctpool_coro_suspend(void);
  * pool will be cleaned up automatically.
  *
  * @param coro  The coroutine handle.
- * @return      CTPPOOL_CORO_OK on success, error code otherwise.
+ * @return      LOOMWORKS_CORO_OK on success, error code otherwise.
  */
-ctpool_coro_result_t ctpool_coro_terminate(ctpool_coroutine_t *coro);
+loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro);
 
 /**
  * @brief Destroy a coroutine and free all resources.
  *
  * Must be called after the coroutine is in DONE state, or after
- * ctpool_coro_terminate() has been called.
+ * loom_coro_terminate() has been called.
  *
  * @param coro  Pointer to the coroutine handle (set to NULL on return).
  */
-void ctpool_coro_destroy(ctpool_coroutine_t **coro);
+void loom_coro_destroy(loom_coroutine_t **coro);
 
 /**
  * @brief Get the current state of a coroutine.
  *
  * @param coro  The coroutine handle.
- * @return      Current state, or CTPPOOL_CORO_ERROR if handle is invalid.
+ * @return      Current state, or LOOMWORKS_CORO_ERROR if handle is invalid.
  */
-ctpool_coro_state_t ctpool_coro_state(const ctpool_coroutine_t *coro);
+loom_coro_state_t loom_coro_state(const loom_coroutine_t *coro);
 
 /**
  * @brief Get the stack address range for debugging.
@@ -147,19 +147,19 @@ ctpool_coro_state_t ctpool_coro_state(const ctpool_coroutine_t *coro);
  * @param coro       The coroutine handle.
  * @param start      Output pointer for stack start address.
  * @param end        Output pointer for stack end address (exclusive).
- * @return           CTPPOOL_CORO_OK on success.
+ * @return           LOOMWORKS_CORO_OK on success.
  */
-ctpool_coro_result_t ctpool_coro_stack_info(const ctpool_coroutine_t *coro,
+loom_coro_result_t loom_coro_stack_info(const loom_coroutine_t *coro,
                                              void **start,
                                              void **end);
 
 /**
  * @brief Get a human-readable string for a result code.
  */
-const char *ctpool_coro_result_str(ctpool_coro_result_t result);
+const char *loom_coro_result_str(loom_coro_result_t result);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* CTPPOOL_COROUTINE_H */
+#endif /* LOOMWORKS_COROUTINE_H */

@@ -1,4 +1,4 @@
-# ctpool Design Decisions
+# loomworks Design Decisions
 
 This document records key design choices and their rationales, for future maintenance and extension reference.
 
@@ -83,7 +83,7 @@ This document records key design choices and their rationales, for future mainte
 
 ## 5. Why Does `destroy` Reject NULL-Pointer Arguments?
 
-**Decision:** `ctpool_coro_destroy(ctpool_coroutine_t **coro)` handles NULL `coro` by checking `!*coro`, but does not accept garbage pointers like `0xDEAD`.
+**Decision:** `loom_coro_destroy(loom_coroutine_t **coro)` handles NULL `coro` by checking `!*coro`, but does not accept garbage pointers like `0xDEAD`.
 
 **Rationale:**
 - Accepting a NULL `coro` pointer itself (the double pointer) is a common C API convention that simplifies caller code
@@ -105,13 +105,13 @@ This document records key design choices and their rationales, for future mainte
 - Compile error: `relocation R_X86_64_TPOFF32 against 'g_current' can not be used when making a shared object`
 - Workaround: `-fPIC -ftls-model=initial-exec` enables shared library support, but adds complexity and slight performance overhead
 
-**Current limitation:** The library is used via static linking only (`libctpool.a`).
+**Current limitation:** The library is used via static linking only (`libloomworks.a`).
 
 ---
 
 ## 7. Why Two Guard Pages Per Side Instead of One?
 
-**Decision:** Each side uses 2 PROT_NONE guard pages (`CTPPOOL_CORO_GUARD_PAGES_EACH * 2`).
+**Decision:** Each side uses 2 PROT_NONE guard pages (`LOOMWORKS_CORO_GUARD_PAGES_EACH * 2`).
 
 **Rationale:**
 - First guard page: serves as the boundary of the usable stack
@@ -145,7 +145,7 @@ makecontext(&ctx, entry, 1, (unsigned long)coro);  // May truncate on ILP32
 
 ## 9. Why Not Use C11 `_Generic` for Unified API?
 
-**Decision:** Thread pool and coroutine APIs remain in separate namespaces (`ctpool_pool_*` vs `ctpool_coro_*`).
+**Decision:** Thread pool and coroutine APIs remain in separate namespaces (`loom_pool_*` vs `loom_coro_*`).
 
 **Rationale:**
 - `_Generic` selectors are complex to implement in C11 and provide poor IDE autocomplete
@@ -165,15 +165,15 @@ makecontext(&ctx, entry, 1, (unsigned long)coro);  // May truncate on ILP32
 
 **Layout verification:**
 ```c
-struct ctpool_thread_pool {
+struct loom_thread_pool {
     pthread_mutex_t lock              ← cache line 0 (64B)
     pthread_cond_t  cond              ← cache line 1 (64B)
     pthread_cond_t  drain_cond        ← cache line 2 (64B)
     bool            shutdown          ← shares cache line 2 with drain_cond
     bool            draining
     ...
-    ctpool_task_t  *queue_head        ← cache line 3 (8B + padding)
-    ctpool_task_t  *queue_tail        ← same cache line as queue_head
+    loom_task_t  *queue_head        ← cache line 3 (8B + padding)
+    loom_task_t  *queue_tail        ← same cache line as queue_head
     uint32_t        queue_len
 };
 ```

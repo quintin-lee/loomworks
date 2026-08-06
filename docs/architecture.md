@@ -1,12 +1,12 @@
-# ctpool Architecture
+# loomworks Architecture
 
 ## 1. System Overview
 
-ctpool is a pure C11 concurrency library comprising two independent subsystems:
+loomworks is a pure C11 concurrency library comprising two independent subsystems:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                        ctpool                           │
+│                        loomworks                           │
 ├─────────────────────────┬───────────────────────────────┤
 │     Thread Pool         │       Coroutine               │
 │  thread_pool.h/c        │  coroutine.h/c                │
@@ -30,7 +30,7 @@ The two subsystems share the same API conventions (opaque pointers, result codes
 
 ```
                     ┌──────────────────────┐
-                    │   ctpool_thread_pool │
+                    │   loom_thread_pool │
                     │   (opaque handle)    │
                     └───────┬──────────────┘
                             │
@@ -50,7 +50,7 @@ The two subsystems share the same API conventions (opaque pointers, result codes
 ### 2.2 Cache-Line Layout
 
 ```c
-struct ctpool_thread_pool {
+struct loom_thread_pool {
     // ── Shared state (frequently written, must span different cache lines) ──
     pthread_mutex_t lock              __attribute__((aligned(64)));  // cache line 0
     pthread_cond_t  cond              __attribute__((aligned(64)));  // cache line 1
@@ -59,18 +59,18 @@ struct ctpool_thread_pool {
     bool            draining;
 
     // ── Queue (frequently read/written, independent cache line) ──
-    ctpool_task_t  *queue_head;                                      // cache line 3
-    ctpool_task_t  *queue_tail;
+    loom_task_t  *queue_head;                                      // cache line 3
+    loom_task_t  *queue_tail;
     uint32_t        queue_len;
 
     // ── Worker array (each worker独占 its own cache line) ──
-    ctpool_worker_ctx_t workers[];
+    loom_worker_ctx_t workers[];
 };
 
-struct ctpool_worker_ctx {
+struct loom_worker_ctx {
     uint64_t padding[7];            // prevents false sharing with adjacent workers
-    ctpool_task_t *task_queue_head;
-    ctpool_task_t *task_queue_tail;
+    loom_task_t *task_queue_head;
+    loom_task_t *task_queue_tail;
     uint32_t       task_queue_len;
     uint64_t padding2[7];
 };
@@ -111,7 +111,7 @@ pool_destroy()
 
 ```
                     ┌──────────────────────┐
-                    │  ctpool_coroutine_t  │  (opaque, per-coroutine)
+                    │  loom_coroutine_t  │  (opaque, per-coroutine)
                     │  ┌────────────────┐  │
                     │  │ ucontext_t ctx │  │  ← save/restore points
                     │  ├────────────────┤  │
@@ -155,7 +155,7 @@ Low address  └─────────────────────�
 ```
 Main thread                      Coroutine stack
   │                                  │
-  │  ctpool_coro_resume(coro)       │
+  │  loom_coro_resume(coro)       │
   │  ├─ setjmp(g_guard_jmp)         │
   │  ├─ getcontext(&coro->ctx)      │
   │  ├─ makecontext(ctx, coro_entry, 1, coro_ptr)
@@ -165,12 +165,12 @@ Main thread                      Coroutine stack
   │                                  │  ├─ g_current = coro
   │                                  │  ├─ coro->entry_fn(data)
   │                                  │  │    ├─ ... user code ...
-  │                                  │  │    └─ ctpool_coro_yield()
+  │                                  │  │    └─ loom_coro_yield()
   │                                  │  │         └─ swapcontext(&coro->ctx, &scheduler)
   │                                  │  └─ coro->state = DONE / SUSPENDED
   │          ───────────────────────►  switch back to scheduler stack
   │  swapcontext returns              │
-  │  return CTPPOOL_CORO_OK           │
+  │  return LOOMWORKS_CORO_OK           │
   │                                  │
 ```
 
@@ -188,7 +188,7 @@ guard_handler(sig, info, uctx)
     ├─ c = g_current
     ├─ Verify fault_addr is within current coroutine mmap range
     ├─ Verify fault_addr is on a guard page (base or end-ps)
-    ├─ c->state = CTPPOOL_CORO_ERROR
+    ├─ c->state = LOOMWORKS_CORO_ERROR
     ├─ g_current = NULL
     └─ longjmp(g_guard_jmp, 1)
             │
@@ -196,7 +196,7 @@ guard_handler(sig, info, uctx)
     setjmp(g_guard_jmp) returns non-zero
             │
             ▼
-    return CTPPOOL_CORO_ERR_GUARD
+    return LOOMWORKS_CORO_ERR_GUARD
 ```
 
 ---
@@ -209,7 +209,7 @@ guard_handler(sig, info, uctx)
 - **Condition variables**:
   - `cond` — workers block waiting for new tasks; main thread signals after submit
   - `drain_cond` — main thread waits after shutdown for all workers to join
-- **Lock-free queue ops**: `ctpool_enqueue_unlocked()` / `ctpool_dequeue_unlocked()` must be called while holding the lock
+- **Lock-free queue ops**: `loom_enqueue_unlocked()` / `loom_dequeue_unlocked()` must be called while holding the lock
 
 ### 4.2 Coroutines
 
@@ -220,9 +220,9 @@ guard_handler(sig, info, uctx)
 ### 4.3 Why coroutines do not support cross-thread resume
 
 ```
-Thread A: coro = ctpool_coro_create(...)
-Thread A: ctpool_coro_resume(coro)   ← runs on Thread A's g_scheduler
-Thread B: ctpool_coro_resume(coro)   ← runs on Thread B's g_scheduler
+Thread A: coro = loom_coro_create(...)
+Thread A: loom_coro_resume(coro)   ← runs on Thread A's g_scheduler
+Thread B: loom_coro_resume(coro)   ← runs on Thread B's g_scheduler
         ↑ UNSAFE: ucontext_t is not thread-safe; swapcontext across threads is undefined behavior
 ```
 
@@ -235,22 +235,22 @@ To use a coroutine safely across threads, the entire lifecycle (create → resum
 ### 5.1 Thread Pool Memory Allocation
 
 ```
-ctpool_pool_create()
-  ├─ calloc(1, sizeof(ctpool_thread_pool_t))    ← pool structure
-  ├─ calloc(worker_count, sizeof(ctpool_worker_ctx_t))  ← worker context array
+loom_pool_create()
+  ├─ calloc(1, sizeof(loom_thread_pool_t))    ← pool structure
+  ├─ calloc(worker_count, sizeof(loom_worker_ctx_t))  ← worker context array
   ├─ calloc(worker_count, sizeof(pthread_t))     ← thread handle array
   └─ pthread_mutex_init / pthread_cond_init × 3
 
-ctpool_pool_submit()
-  └─ malloc(sizeof(ctpool_task_t))               ← per-task node
+loom_pool_submit()
+  └─ malloc(sizeof(loom_task_t))               ← per-task node
 
-ctpool_pool_submit_future()
-  ├─ calloc(1, sizeof(ctpool_future_t))          ← future structure
+loom_pool_submit_future()
+  ├─ calloc(1, sizeof(loom_future_t))          ← future structure
   ├─ pthread_mutex_init(&fut->mutex)
   ├─ pthread_cond_init(&fut->cond)
   └─ malloc(sizeof(future_task_ctx_t))            ← task wrapper context
 
-ctpool_pool_destroy()
+loom_pool_destroy()
   ├─ Traverse and free all task nodes in queue
   ├─ pthread_cond_destroy × 2
   ├─ pthread_mutex_destroy
@@ -262,15 +262,15 @@ ctpool_pool_destroy()
 ### 5.2 Coroutine Memory Allocation
 
 ```
-ctpool_coro_create()
-  ├─ calloc(1, sizeof(ctpool_coroutine_t))       ← coroutine structure
+loom_coro_create()
+  ├─ calloc(1, sizeof(loom_coroutine_t))       ← coroutine structure
   └─ mmap(total_sz, PROT_NONE)                   ← full stack region including guards
      └─ mprotect(stack_start, usable_sz, RW)     ← usable region set readable/writable
 
-ctpool_coro_resume()
+loom_coro_resume()
   └─ malloc(131072)                              ← scheduler stack (per-thread, allocated once)
 
-ctpool_coro_destroy()
+loom_coro_destroy()
   ├─ munmap(mmap_base, mmap_size)                ← free entire stack region (including guards)
   └─ free(c)                                     ← free coroutine structure
 
@@ -283,14 +283,14 @@ Note: The scheduler stack (g_scheduler_stack) is intentionally not freed (proces
 
 | Operation | Failure behavior |
 |-----------|-----------------|
-| `pthread_mutex_init` | Return `CTPPOOL_ERR_ALLOC`, free allocated resources |
-| `pthread_cond_init` | Return `CTPPOOL_ERR_ALLOC`, destroy already-initialized mutex |
+| `pthread_mutex_init` | Return `LOOMWORKS_ERR_ALLOC`, free allocated resources |
+| `pthread_cond_init` | Return `LOOMWORKS_ERR_ALLOC`, destroy already-initialized mutex |
 | `pthread_create` | Set `shutdown=true`, broadcast cond, join created threads, free all resources |
-| `malloc` / `calloc` | Return `CTPPOOL_ERR_ALLOC` |
-| `mmap` | Return `CTPPOOL_CORO_ERR_ALLOC` |
-| `mprotect` | munmap the already-allocated region, return `CTPPOOL_CORO_ERR_MPROTECT` |
+| `malloc` / `calloc` | Return `LOOMWORKS_ERR_ALLOC` |
+| `mmap` | Return `LOOMWORKS_CORO_ERR_ALLOC` |
+| `mprotect` | munmap the already-allocated region, return `LOOMWORKS_CORO_ERR_MPROTECT` |
 | `sigaction` | Print stderr error, do not abort, continue running (no guard page protection) |
-| `swapcontext` | Set `state = CTPPOOL_CORO_ERROR`, return `CTPPOOL_CORO_ERR_CONTEXT` |
-| Stack overflow (guard page) | `longjmp` to `g_guard_jmp`, return `CTPPOOL_CORO_ERR_GUARD` |
+| `swapcontext` | Set `state = LOOMWORKS_CORO_ERROR`, return `LOOMWORKS_CORO_ERR_CONTEXT` |
+| Stack overflow (guard page) | `longjmp` to `g_guard_jmp`, return `LOOMWORKS_CORO_ERR_GUARD` |
 
 All error paths guarantee correct resource cleanup with no memory leaks.

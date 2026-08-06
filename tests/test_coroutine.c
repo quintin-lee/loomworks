@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#include "ctpool/coroutine.h"
+#include "loomworks/coroutine.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,7 +30,7 @@ static void yield_coro_fn(void *arg)
 {
     int *counter = (int *)arg;
     __sync_fetch_and_add(counter, 1);
-    ctpool_coro_yield();
+    loom_coro_yield();
     __sync_fetch_and_add(counter, 1);
 }
 
@@ -38,7 +38,7 @@ static void nested_coro_fn(void *arg)
 {
     int *state = (int *)arg;
     *state = 1;
-    ctpool_coro_yield();
+    loom_coro_yield();
     *state = 2;
 }
 
@@ -46,238 +46,238 @@ static void multi_yield_coro_fn(void *arg)
 {
     int *counter = (int *)arg;
     __sync_fetch_and_add(counter, 1);  /* 1st resume */
-    ctpool_coro_yield();
+    loom_coro_yield();
     __sync_fetch_and_add(counter, 1);  /* 2nd resume */
-    ctpool_coro_yield();
+    loom_coro_yield();
     __sync_fetch_and_add(counter, 1);  /* 3rd resume */
 }
 
 /* ---------- Test: null args ---------- */
 static void test_null_args(void)
 {
-    ctpool_coro_result_t rc;
-    rc = ctpool_coro_create(NULL, NULL, 0, NULL);
-    ASSERT(rc == CTPPOOL_CORO_ERR_INVALID, "null fn + null out");
+    loom_coro_result_t rc;
+    rc = loom_coro_create(NULL, NULL, 0, NULL);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_INVALID, "null fn + null out");
 
-    rc = ctpool_coro_resume(NULL);
-    ASSERT(rc == CTPPOOL_CORO_ERR_INVALID, "null resume");
+    rc = loom_coro_resume(NULL);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_INVALID, "null resume");
 
-    rc = ctpool_coro_terminate(NULL);
-    ASSERT(rc == CTPPOOL_CORO_ERR_INVALID, "null terminate");
+    rc = loom_coro_terminate(NULL);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_INVALID, "null terminate");
 
-    ASSERT(ctpool_coro_state(NULL) == CTPPOOL_CORO_ERROR, "null state");
+    ASSERT(loom_coro_state(NULL) == LOOMWORKS_CORO_ERROR, "null state");
 
     void *s = NULL, *e = NULL;
-    rc = ctpool_coro_stack_info(NULL, &s, &e);
-    ASSERT(rc == CTPPOOL_CORO_ERR_INVALID, "null stack info");
+    rc = loom_coro_stack_info(NULL, &s, &e);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_INVALID, "null stack info");
 }
 
 /* ---------- Test: simple run to completion ---------- */
 static void test_simple_run(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_result_t rc = ctpool_coro_create(simple_coro_fn, &counter, 0, &coro);
-    ASSERT(rc == CTPPOOL_CORO_OK,                      "create coroutine");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_NEW, "state is NEW");
+    loom_coro_result_t rc = loom_coro_create(simple_coro_fn, &counter, 0, &coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK,                      "create coroutine");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_NEW, "state is NEW");
 
-    rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK,    "resume coroutine");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "state is DONE");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK,    "resume coroutine");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "state is DONE");
     ASSERT(counter == 1,             "counter incremented");
 
-    rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_ERR_RUNNING, "resume done coroutine fails");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_RUNNING, "resume done coroutine fails");
 
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
     ASSERT(coro == NULL, "destroy sets to null");
 }
 
 /* ---------- Test: yield and resume (single yield) ---------- */
 static void test_yield_resume(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_result_t rc;
-    ctpool_coro_create(yield_coro_fn, &counter, 0, &coro);
+    loom_coro_result_t rc;
+    loom_coro_create(yield_coro_fn, &counter, 0, &coro);
 
-    rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "first resume");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_SUSPENDED, "state SUSPENDED after yield");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "first resume");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "state SUSPENDED after yield");
     ASSERT(counter == 1, "counter is 1 after first yield");
 
     /* Second resume continues past second yield, function completes */
-    rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "second resume");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE,    "state DONE after function completes");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "second resume");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE,    "state DONE after function completes");
     ASSERT(counter == 2, "counter is 2 after completion");
 
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: multiple coroutines ---------- */
 static void test_multiple_coroutines(void)
 {
-    ctpool_coroutine_t *c1 = NULL, *c2 = NULL;
+    loom_coroutine_t *c1 = NULL, *c2 = NULL;
     int counter1 = 0, counter2 = 0;
 
-    ctpool_coro_create(simple_coro_fn, &counter1, 0, &c1);
-    ctpool_coro_create(simple_coro_fn, &counter2, 0, &c2);
+    loom_coro_create(simple_coro_fn, &counter1, 0, &c1);
+    loom_coro_create(simple_coro_fn, &counter2, 0, &c2);
 
-    ctpool_coro_resume(c1);
+    loom_coro_resume(c1);
     ASSERT(counter1 == 1,           "coro1 completed");
-    ASSERT(ctpool_coro_state(c1) == CTPPOOL_CORO_DONE, "coro1 DONE");
+    ASSERT(loom_coro_state(c1) == LOOMWORKS_CORO_DONE, "coro1 DONE");
 
-    ctpool_coro_resume(c2);
+    loom_coro_resume(c2);
     ASSERT(counter2 == 1,           "coro2 completed");
-    ASSERT(ctpool_coro_state(c2) == CTPPOOL_CORO_DONE, "coro2 DONE");
+    ASSERT(loom_coro_state(c2) == LOOMWORKS_CORO_DONE, "coro2 DONE");
 
-    ctpool_coro_destroy(&c1);
-    ctpool_coro_destroy(&c2);
+    loom_coro_destroy(&c1);
+    loom_coro_destroy(&c2);
 }
 
 /* ---------- Test: stack info ---------- */
 static void test_stack_info(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_create(simple_coro_fn, &counter, 0, &coro);
+    loom_coro_create(simple_coro_fn, &counter, 0, &coro);
 
     void *start = NULL, *end = NULL;
-    ctpool_coro_result_t rc = ctpool_coro_stack_info(coro, &start, &end);
-    ASSERT(rc == CTPPOOL_CORO_OK,   "stack info");
+    loom_coro_result_t rc = loom_coro_stack_info(coro, &start, &end);
+    ASSERT(rc == LOOMWORKS_CORO_OK,   "stack info");
     ASSERT(start != NULL,           "stack start not null");
     ASSERT(end   != NULL,           "stack end   not null");
     ASSERT((char *)end > (char *)start, "end > start");
 
-    ctpool_coro_resume(coro);
+    loom_coro_resume(coro);
     ASSERT(counter == 1, "counter incremented after resume");
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: terminate ---------- */
 static void test_terminate(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int state = 0;
-    ctpool_coro_create(nested_coro_fn, &state, 0, &coro);
+    loom_coro_create(nested_coro_fn, &state, 0, &coro);
 
-    ctpool_coro_resume(coro);
+    loom_coro_resume(coro);
     ASSERT(state == 1,                    "state is 1 after first resume");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_SUSPENDED, "state SUSPENDED");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "state SUSPENDED");
 
-    ctpool_coro_result_t rc = ctpool_coro_terminate(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK,       "terminate");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE,    "state DONE after terminate");
+    loom_coro_result_t rc = loom_coro_terminate(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK,       "terminate");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE,    "state DONE after terminate");
 
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: result string ---------- */
 static void test_result_str(void)
 {
-    ASSERT(ctpool_coro_result_str(CTPPOOL_CORO_OK)           != NULL, "result str OK");
-    ASSERT(ctpool_coro_result_str(CTPPOOL_CORO_ERR_ALLOC)    != NULL, "result str ALLOC");
-    ASSERT(ctpool_coro_result_str(CTPPOOL_CORO_ERR_CONTEXT)  != NULL, "result str CONTEXT");
-    ASSERT(ctpool_coro_result_str(CTPPOOL_CORO_ERR_GUARD)    != NULL, "result str GUARD");
-    ASSERT(ctpool_coro_result_str(CTPPOOL_CORO_ERR_INVALID)  != NULL, "result str INVALID");
-    ASSERT(ctpool_coro_result_str(CTPPOOL_CORO_ERR_RUNNING)  != NULL, "result str RUNNING");
-    ASSERT(ctpool_coro_result_str(99)                       != NULL, "result str unknown");
+    ASSERT(loom_coro_result_str(LOOMWORKS_CORO_OK)           != NULL, "result str OK");
+    ASSERT(loom_coro_result_str(LOOMWORKS_CORO_ERR_ALLOC)    != NULL, "result str ALLOC");
+    ASSERT(loom_coro_result_str(LOOMWORKS_CORO_ERR_CONTEXT)  != NULL, "result str CONTEXT");
+    ASSERT(loom_coro_result_str(LOOMWORKS_CORO_ERR_GUARD)    != NULL, "result str GUARD");
+    ASSERT(loom_coro_result_str(LOOMWORKS_CORO_ERR_INVALID)  != NULL, "result str INVALID");
+    ASSERT(loom_coro_result_str(LOOMWORKS_CORO_ERR_RUNNING)  != NULL, "result str RUNNING");
+    ASSERT(loom_coro_result_str(99)                       != NULL, "result str unknown");
 }
 
 /* ---------- Test: custom stack size ---------- */
 static void test_custom_stack_size(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_result_t rc = ctpool_coro_create(simple_coro_fn, &counter, 8192, &coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "create with 8KB stack");
-    ctpool_coro_resume(coro);
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "state DONE");
-    ctpool_coro_destroy(&coro);
+    loom_coro_result_t rc = loom_coro_create(simple_coro_fn, &counter, 8192, &coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "create with 8KB stack");
+    loom_coro_resume(coro);
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "state DONE");
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: destroy null ---------- */
 static void test_destroy_null(void)
 {
-    ctpool_coroutine_t *coro = NULL;
-    ctpool_coro_destroy(NULL);
-    ctpool_coro_destroy(&coro);
+    loom_coroutine_t *coro = NULL;
+    loom_coro_destroy(NULL);
+    loom_coro_destroy(&coro);
     ASSERT(coro == NULL, "destroy null is safe");
 }
 
 /* ---------- Test: multi yield/resume cycle ---------- */
 static void test_multi_yield_resume(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_result_t rc;
-    ctpool_coro_create(multi_yield_coro_fn, &counter, 0, &coro);
+    loom_coro_result_t rc;
+    loom_coro_create(multi_yield_coro_fn, &counter, 0, &coro);
 
     /* 1st resume: executes up to 1st yield */
-    rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "1st resume");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_SUSPENDED, "SUSPENDED after 1st yield");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "1st resume");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "SUSPENDED after 1st yield");
     ASSERT(counter == 1, "counter=1 after 1st yield");
 
     /* 2nd resume: executes remaining code, function completes */
-    rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "2nd resume");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE after 2nd resume");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "2nd resume");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after 2nd resume");
     ASSERT(counter == 3, "counter=3 after all increments");
 
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: terminate new (never resumed) coroutine ---------- */
 static void test_terminate_new(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_create(simple_coro_fn, &counter, 0, &coro);
+    loom_coro_create(simple_coro_fn, &counter, 0, &coro);
     /* Never resume — terminate immediately */
-    ctpool_coro_result_t rc = ctpool_coro_terminate(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "terminate new coro");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "state DONE after terminate new");
+    loom_coro_result_t rc = loom_coro_terminate(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "terminate new coro");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "state DONE after terminate new");
     ASSERT(counter == 0, "counter not incremented (never ran)");
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: double resume after yield ---------- */
 static void test_double_resume_after_yield(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_create(yield_coro_fn, &counter, 0, &coro);
+    loom_coro_create(yield_coro_fn, &counter, 0, &coro);
 
-    ctpool_coro_resume(coro);
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_SUSPENDED, "SUSPENDED after yield");
+    loom_coro_resume(coro);
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "SUSPENDED after yield");
 
-    ctpool_coro_resume(coro);
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE after second resume");
+    loom_coro_resume(coro);
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after second resume");
     ASSERT(counter == 2, "counter=2");
 
     /* Resume again — should fail */
-    ctpool_coro_result_t rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_ERR_RUNNING, "resume DONE coro fails");
+    loom_coro_result_t rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_RUNNING, "resume DONE coro fails");
 
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: terminate already-done coroutine ---------- */
 static void test_terminate_done(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_create(simple_coro_fn, &counter, 0, &coro);
-    ctpool_coro_resume(coro);
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE");
+    loom_coro_create(simple_coro_fn, &counter, 0, &coro);
+    loom_coro_resume(coro);
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE");
 
-    ctpool_coro_result_t rc = ctpool_coro_terminate(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "terminate already-done coro");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "still DONE");
+    loom_coro_result_t rc = loom_coro_terminate(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "terminate already-done coro");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "still DONE");
 
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: many sequential coroutines ---------- */
@@ -286,13 +286,13 @@ static void test_many_coroutines(void)
     const int N = 500;
     int counter = 0;
     for (int i = 0; i < N; i++) {
-        ctpool_coroutine_t *coro = NULL;
-        ctpool_coro_result_t rc = ctpool_coro_create(simple_coro_fn, &counter, 0, &coro);
-        ASSERT(rc == CTPPOOL_CORO_OK, "create coro");
-        rc = ctpool_coro_resume(coro);
-        ASSERT(rc == CTPPOOL_CORO_OK, "resume coro");
-        ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE");
-        ctpool_coro_destroy(&coro);
+        loom_coroutine_t *coro = NULL;
+        loom_coro_result_t rc = loom_coro_create(simple_coro_fn, &counter, 0, &coro);
+        ASSERT(rc == LOOMWORKS_CORO_OK, "create coro");
+        rc = loom_coro_resume(coro);
+        ASSERT(rc == LOOMWORKS_CORO_OK, "resume coro");
+        ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE");
+        loom_coro_destroy(&coro);
     }
     ASSERT(counter == N, "all coroutines completed");
 }
@@ -300,34 +300,34 @@ static void test_many_coroutines(void)
 /* ---------- Test: yield then terminate ---------- */
 static void test_yield_then_terminate(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int state = 0;
-    ctpool_coro_create(nested_coro_fn, &state, 0, &coro);
+    loom_coro_create(nested_coro_fn, &state, 0, &coro);
 
-    ctpool_coro_resume(coro);
+    loom_coro_resume(coro);
     ASSERT(state == 1, "state=1");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_SUSPENDED, "SUSPENDED");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "SUSPENDED");
 
     /* Terminate a suspended coroutine */
-    ctpool_coro_result_t rc = ctpool_coro_terminate(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "terminate suspended coro");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE after terminate");
+    loom_coro_result_t rc = loom_coro_terminate(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "terminate suspended coro");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after terminate");
     ASSERT(state == 1, "state still 1 (second part not executed)");
 
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ---------- Test: stack info after destroy ---------- */
 static void test_stack_info_after_destroy(void)
 {
-    ctpool_coroutine_t *coro = NULL;
-    ctpool_coro_create(simple_coro_fn, NULL, 0, &coro);
+    loom_coroutine_t *coro = NULL;
+    loom_coro_create(simple_coro_fn, NULL, 0, &coro);
     void *start = NULL, *end = NULL;
-    ctpool_coro_stack_info(coro, &start, &end);
+    loom_coro_stack_info(coro, &start, &end);
     /* Do not resume with NULL data — simple_coro_fn would SIGSEGV
        (address 0 is outside the mmap'd guard region, so the guard
        handler reinstalls the default handler and re-raises SIGSEGV). */
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
     /* start/end point to freed mmap region after destroy.
        We only assert that stack_info worked before destroy. */
     ASSERT(start != NULL, "stack start valid before destroy");
@@ -337,28 +337,28 @@ static void test_stack_info_after_destroy(void)
 /* ---------- Test: coro with NULL data ---------- */
 static void test_coro_null_data(void)
 {
-    ctpool_coroutine_t *coro = NULL;
-    ctpool_coro_result_t rc = ctpool_coro_create(simple_coro_fn, NULL, 0, &coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "create with NULL data");
+    loom_coroutine_t *coro = NULL;
+    loom_coro_result_t rc = loom_coro_create(simple_coro_fn, NULL, 0, &coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "create with NULL data");
     /* This will SIGSEGV when simple_coro_fn dereferences NULL — 
        but the test verifies the create/resume path reaches the entry point */
     /* We skip actual resume since NULL data causes segfault in simple_coro_fn */
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
     ASSERT(true, "create with NULL data accepted");
 }
 
 /* ---------- Test: custom small stack size ---------- */
 static void test_small_stack(void)
 {
-    ctpool_coroutine_t *coro = NULL;
+    loom_coroutine_t *coro = NULL;
     int counter = 0;
-    ctpool_coro_result_t rc = ctpool_coro_create(simple_coro_fn, &counter, 4096, &coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "create with 4KB stack");
-    rc = ctpool_coro_resume(coro);
-    ASSERT(rc == CTPPOOL_CORO_OK, "resume 4KB stack coro");
-    ASSERT(ctpool_coro_state(coro) == CTPPOOL_CORO_DONE, "DONE");
+    loom_coro_result_t rc = loom_coro_create(simple_coro_fn, &counter, 4096, &coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "create with 4KB stack");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "resume 4KB stack coro");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE");
     ASSERT(counter == 1, "counter=1");
-    ctpool_coro_destroy(&coro);
+    loom_coro_destroy(&coro);
 }
 
 /* ================================================================

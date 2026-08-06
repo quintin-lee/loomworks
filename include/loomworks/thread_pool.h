@@ -1,5 +1,5 @@
-#ifndef CTPPOOL_THREAD_POOL_H
-#define CTPPOOL_THREAD_POOL_H
+#ifndef LOOMWORKS_THREAD_POOL_H
+#define LOOMWORKS_THREAD_POOL_H
 
 /**
  * @file thread_pool.h
@@ -22,29 +22,29 @@ extern "C" {
 #endif
 
 /** Opaque thread pool handle. */
-typedef struct ctpool_thread_pool ctpool_thread_pool_t;
+typedef struct loom_thread_pool loom_thread_pool_t;
 
 /** Opaque future handle for deferred result retrieval. */
-typedef struct ctpool_future ctpool_future_t;
+typedef struct loom_future loom_future_t;
 
 /**
  * @brief Result codes for thread pool operations.
  */
 typedef enum {
-    CTPPOOL_OK = 0,          /**< Operation succeeded. */
-    CTPPOOL_ERR_ALLOC,       /**< Memory allocation failed. */
-    CTPPOOL_ERR_THREAD,      /**< Thread creation failed. */
-    CTPPOOL_ERR_INVALID,     /**< Invalid argument or handle. */
-    CTPPOOL_ERR_SHUTDOWN,    /**< Pool is shutting down or shut down. */
-    CTPPOOL_ERR_TIMEOUT,     /**< Operation timed out. */
-} ctpool_result_t;
+    LOOMWORKS_OK = 0,          /**< Operation succeeded. */
+    LOOMWORKS_ERR_ALLOC,       /**< Memory allocation failed. */
+    LOOMWORKS_ERR_THREAD,      /**< Thread creation failed. */
+    LOOMWORKS_ERR_INVALID,     /**< Invalid argument or handle. */
+    LOOMWORKS_ERR_SHUTDOWN,    /**< Pool is shutting down or shut down. */
+    LOOMWORKS_ERR_TIMEOUT,     /**< Operation timed out. */
+} loom_result_t;
 
 /**
  * @brief Task function signature.
  *
  * @param user_data  Opaque pointer passed at submission time.
  */
-typedef void (*ctpool_task_fn)(void *user_data);
+typedef void (*loom_task_fn)(void *user_data);
 
 /**
  * @brief Task function signature for tasks returning a result.
@@ -52,17 +52,17 @@ typedef void (*ctpool_task_fn)(void *user_data);
  * @param user_data  Opaque pointer passed at submission time.
  * @return           Pointer to result (caller owns the memory; pool does not free it).
  */
-typedef void * (*ctpool_task_fn_result)(void *user_data);
+typedef void * (*loom_task_fn_result)(void *user_data);
 
 /**
  * @brief Default stack size for worker threads.
  */
-#define CTPPOOL_DEFAULT_STACK_SIZE (128 * 1024)  /* 128 KiB */
+#define LOOMWORKS_DEFAULT_STACK_SIZE (128 * 1024)  /* 128 KiB */
 
 /**
  * @brief Default number of worker threads (0 = hardware_concurrency * 2, clamped).
  */
-#define CTPPOOL_DEFAULT_WORKER_COUNT 0
+#define LOOMWORKS_DEFAULT_WORKER_COUNT 0
 
 /**
  * @brief Thread pool configuration.
@@ -71,17 +71,17 @@ typedef struct {
     uint32_t worker_count;        /**< Number of worker threads (0 = auto). */
     size_t   stack_size;          /**< Stack size per worker (0 = default). */
     uint32_t queue_capacity;      /**< Max pending tasks before blocking submit (0 = unbounded). */
-} ctpool_pool_config_t;
+} loom_pool_config_t;
 
 /**
  * @brief Create a thread pool.
  *
  * @param config   Configuration for the pool (pass NULL for defaults).
  * @param pool     Output pointer for the created pool handle.
- * @return         CTPPOOL_OK on success, error code otherwise.
+ * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-ctpool_result_t ctpool_pool_create(const ctpool_pool_config_t *config,
-                                    ctpool_thread_pool_t **pool);
+loom_result_t loom_pool_create(const loom_pool_config_t *config,
+                                    loom_thread_pool_t **pool);
 
 /**
  * @brief Submit a fire-and-forget task to the pool.
@@ -92,10 +92,10 @@ ctpool_result_t ctpool_pool_create(const ctpool_pool_config_t *config,
  * @param pool     The pool handle.
  * @param fn       Task function.
  * @param data     Opaque user data passed to the task.
- * @return         CTPPOOL_OK on success, error code otherwise.
+ * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-ctpool_result_t ctpool_pool_submit(ctpool_thread_pool_t *pool,
-                                    ctpool_task_fn fn,
+loom_result_t loom_pool_submit(loom_thread_pool_t *pool,
+                                    loom_task_fn fn,
                                     void *data);
 
 /**
@@ -105,30 +105,30 @@ ctpool_result_t ctpool_pool_submit(ctpool_thread_pool_t *pool,
  * @param fn       Task function returning a result pointer.
  * @param data     Opaque user data passed to the task.
  * @param future   Output pointer for the future handle (caller must free it).
- * @return         CTPPOOL_OK on success, error code otherwise.
+ * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-ctpool_result_t ctpool_pool_submit_future(ctpool_thread_pool_t *pool,
-                                           ctpool_task_fn_result fn,
+loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
+                                           loom_task_fn_result fn,
                                            void *data,
-                                           ctpool_future_t **future);
+                                           loom_future_t **future);
 
 /**
  * @brief Wait for a future's result. Blocks until the task completes.
  *
  * @param future   The future handle.
  * @param result   Output pointer for the result (may be NULL).
- * @return         CTPPOOL_OK on success, error code otherwise.
+ * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-ctpool_result_t ctpool_future_wait(ctpool_future_t *future, void **result);
+loom_result_t loom_future_wait(loom_future_t *future, void **result);
 
 /**
  * @brief Destroy a future, freeing associated resources.
  *
- * Must be called after ctpool_future_wait() has returned.
+ * Must be called after loom_future_wait() has returned.
  *
  * @param future   The future handle (NULL-safe).
  */
-void ctpool_future_destroy(ctpool_future_t *future);
+void loom_future_destroy(loom_future_t *future);
 
 /**
  * @brief Gracefully shut down the pool, draining all pending tasks.
@@ -138,16 +138,16 @@ void ctpool_future_destroy(ctpool_future_t *future);
  *
  * @param pool  The pool handle.
  */
-void ctpool_pool_shutdown(ctpool_thread_pool_t *pool);
+void loom_pool_shutdown(loom_thread_pool_t *pool);
 
 /**
  * @brief Destroy the pool and release all resources.
  *
- * The pool must have been shut down first via ctpool_pool_shutdown().
+ * The pool must have been shut down first via loom_pool_shutdown().
  *
  * @param pool  Pointer to the pool handle (set to NULL on return).
  */
-void ctpool_pool_destroy(ctpool_thread_pool_t **pool);
+void loom_pool_destroy(loom_thread_pool_t **pool);
 
 /**
  * @brief Get the number of worker threads in the pool.
@@ -155,7 +155,7 @@ void ctpool_pool_destroy(ctpool_thread_pool_t **pool);
  * @param pool  The pool handle.
  * @return      Worker count, or 0 if pool is invalid.
  */
-uint32_t ctpool_pool_worker_count(const ctpool_thread_pool_t *pool);
+uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool);
 
 /**
  * @brief Get the number of pending tasks in the queue.
@@ -163,10 +163,10 @@ uint32_t ctpool_pool_worker_count(const ctpool_thread_pool_t *pool);
  * @param pool  The pool handle.
  * @return      Pending task count, or 0 if pool is invalid.
  */
-uint32_t ctpool_pool_pending_count(const ctpool_thread_pool_t *pool);
+uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* CTPPOOL_THREAD_POOL_H */
+#endif /* LOOMWORKS_THREAD_POOL_H */
