@@ -21,6 +21,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/thread_pool.h"
 #include "loomworks/metrics.h"
+#include "loomworks/coroutine.h"
 #include "thread_pool_internal.h"
 
 #include <errno.h>
@@ -187,6 +188,7 @@ static void *worker_entry(void *arg)
             pthread_mutex_unlock(&pool->lock);
             break;
         }
+        loom_coro_exit();
         loom_task_t *task = loom_dequeue_unlocked(pool);
         pthread_mutex_unlock(&pool->lock);
         if (task) {

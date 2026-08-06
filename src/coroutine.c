@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <pthread.h>
 
 /* ================================================================
  *  Globals
@@ -23,7 +24,13 @@ static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
 static _Thread_local jmp_buf           g_guard_jmp; /* longjmp target for guard violations */
+/* Linked list of all scheduler stacks for atexit cleanup. */
+typedef struct scheduler_stack_node {
+    char                        *stack;
+    struct scheduler_stack_node *next;
+} scheduler_stack_node_t;
 
+static scheduler_stack_node_t *g_scheduler_stacks = NULL;
 /* ================================================================
  *  Guard-page signal handler
  * ================================================================ */
@@ -165,6 +172,14 @@ static bool ensure_scheduler(void)
     g_scheduler.uc_stack.ss_flags = 0;
     g_scheduler.uc_link           = NULL;
     g_scheduler_inited            = true;
+
+    /* Track for cleanup. */
+    scheduler_stack_node_t *node = (scheduler_stack_node_t *)malloc(sizeof(*node));
+    if (node) {
+        node->stack  = g_scheduler_stack;
+        node->next   = g_scheduler_stacks;
+        g_scheduler_stacks = node;
+    }
     return true;
 }
 
@@ -325,6 +340,45 @@ loom_coro_result_t loom_coro_stack_info(const loom_coroutine_t *coro, void **sta
         *end = coro->stack_end;
     }
     return LOOMWORKS_CORO_OK;
+}
+
+void loom_coro_exit(void)
+{
+    /* Free the scheduler stack for this thread, if any.
+     * Also remove from the global list so coro_atexit doesn't double-free. */
+    char *stack = g_scheduler_stack;
+    if (stack) {
+        g_scheduler_stack = NULL;
+        /* Remove from linked list */
+        scheduler_stack_node_t **pp = &g_scheduler_stacks;
+        while (*pp) {
+            if ((*pp)->stack == stack) {
+                scheduler_stack_node_t *node = *pp;
+                *pp = node->next;
+                free(node);
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+        free(stack);
+    }
+}
+
+static void free_all_scheduler_stacks(void)
+{
+    scheduler_stack_node_t *cur = g_scheduler_stacks;
+    g_scheduler_stacks = NULL;
+    while (cur) {
+        scheduler_stack_node_t *next = cur->next;
+        free(cur->stack);
+        free(cur);
+        cur = next;
+    }
+}
+
+static __attribute__((destructor)) void coro_atexit(void)
+{
+    free_all_scheduler_stacks();
 }
 
 const char *loom_coro_result_str(loom_coro_result_t result)

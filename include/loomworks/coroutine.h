@@ -154,6 +154,15 @@ loom_coro_result_t loom_coro_stack_info(const loom_coroutine_t *coro, void **sta
  */
 const char *loom_coro_result_str(loom_coro_result_t result);
 
+/**
+ * @brief Clean up per-thread coroutine resources.
+ *
+ * Frees the scheduler stack for the calling thread.
+ * Call this from threads that create/use coroutines but are not
+ * managed by the coroutine runtime (e.g., pool worker threads).
+ */
+void loom_coro_exit(void);
+
 #ifdef __cplusplus
 }
 #endif
