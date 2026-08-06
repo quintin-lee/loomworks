@@ -279,7 +279,19 @@ Note: The scheduler stack (g_scheduler_stack) is intentionally not freed (proces
 
 ---
 
-## 6. Error Handling Strategy
+## 6. Documentation Index
+
+| Document | Description |
+|----------|-------------|
+| [API Reference](api-reference.md) | Complete public API with function signatures and parameters |
+| [FAQ](faq.md) | Frequently asked questions about usage and limitations |
+| [Migration Guide](migration.md) | How to migrate from ctpool to loomworks |
+| [Design Decisions](design-decisions.md) | Rationale behind key architectural choices |
+| [Contributing](contributing.md) | Coding standards and submission process |
+
+---
+
+## 7. Error Handling Strategy
 
 | Operation | Failure behavior |
 |-----------|-----------------|

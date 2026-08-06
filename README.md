@@ -52,8 +52,10 @@ loomworks/
 └── docs/
     ├── architecture.md
     ├── api-reference.md
+    ├── contributing.md
     ├── design-decisions.md
-    └── contributing.md
+    ├── faq.md
+    └── migration.md
 ```
 
 ## Build and Test
@@ -100,10 +102,7 @@ loom_pool_create(NULL, &pool);
 
 // Submit a fire-and-forget task
 int sum = 0;
-loom_pool_submit(pool, ^(void *arg) {
-    int *s = arg;
-    __sync_fetch_and_add(s, 1);
-}, &sum);
+loom_pool_submit(pool, simple_task, &sum);
 
 // Submit a task with a future result
 loom_future_t *fut = NULL;
@@ -114,6 +113,18 @@ loom_future_wait(fut, &result);
 // Shutdown and destroy
 loom_pool_shutdown(pool);
 loom_pool_destroy(&pool);
+
+// ---- Task functions ----
+
+void simple_task(void *arg) {
+    int *s = arg;
+    __sync_fetch_and_add(s, 1);
+}
+
+void *result_fn(void *arg) {
+    (void)arg;
+    return malloc(42);  /* caller must free */
+}
 ```
 
 ### Coroutine
@@ -170,6 +181,68 @@ typedef enum {
 } loom_coro_state_t;
 ```
 
+
+## FAQ
+
+**Q: Can I use loomworks as a shared library (.so)?**
+
+A: No. Coroutines use `_Thread_local` storage, which is incompatible with shared library linking on x86_64 Linux. Use static linking only (`libloomworks.a`). The CMake build still produces a `.so` for completeness, but linking it will fail at runtime.
+
+**Q: Can I resume a coroutine from a different thread than the one that created it?**
+
+A: No. Coroutines are bound to the thread that created them. `ucontext_t` is not thread-safe — calling `loom_coro_resume()` on a coroutine from a different thread than it was created on results in undefined behavior (typically SIGSEGV).
+
+**Q: What happens if a coroutine overflows its stack?**
+
+A: The library installs a SIGSEGV/SIGBUS handler that detects access to guard pages. When triggered, the coroutine is moved to the `ERROR` state and `loom_coro_resume()` returns `LOOMWORKS_CORO_ERR_GUARD`. The process does not crash.
+
+**Q: Is `loom_pool_shutdown()` idempotent?**
+
+A: Yes. Calling `loom_pool_shutdown()` multiple times on the same pool is safe — only the first call performs the drain and join. Subsequent calls are no-ops.
+
+**Q: What is the maximum number of worker threads?**
+
+A: When `worker_count` is set to 0 (auto), the pool creates `min(hardware_concurrency * 2, 64)` threads. The hard upper bound is 64.
+
+**Q: Does `loom_pool_submit()` block when the queue is full?**
+
+A: No. When `queue_capacity > 0` and the queue is full, `loom_pool_submit()` returns `LOOMWORKS_ERR_INVALID` immediately. The caller must retry or handle the error. Use `queue_capacity = 0` for an unbounded (potentially large) queue.
+
+**Q: How do I compile with AddressSanitizer?**
+
+A: Add `-fsanitize=address -fno-omit-frame-pointer` to your compiler flags. The library is fully compatible with ASan. Run `LD_PRELOAD=/usr/lib/libasan.so.8 ./build/test_integration` for leak-checked integration tests.
+
+
+## FAQ
+
+**Q: Can I use loomworks as a shared library (.so)?**
+
+A: No. Coroutines use `_Thread_local` storage, which is incompatible with shared library linking on x86_64 Linux. Use static linking only (`libloomworks.a`). The CMake build still produces a `.so` for completeness, but linking it will fail at runtime.
+
+**Q: Can I resume a coroutine from a different thread than the one that created it?**
+
+A: No. Coroutines are bound to the thread that created them. `ucontext_t` is not thread-safe — calling `loom_coro_resume()` on a coroutine from a different thread than it was created on results in undefined behavior (typically SIGSEGV).
+
+**Q: What happens if a coroutine overflows its stack?**
+
+A: The library installs a SIGSEGV/SIGBUS handler that detects access to guard pages. When triggered, the coroutine is moved to the `ERROR` state and `loom_coro_resume()` returns `LOOMWORKS_CORO_ERR_GUARD`. The process does not crash.
+
+**Q: Is `loom_pool_shutdown()` idempotent?**
+
+A: Yes. Calling `loom_pool_shutdown()` multiple times on the same pool is safe — only the first call performs the drain and join. Subsequent calls are no-ops.
+
+**Q: What is the maximum number of worker threads?**
+
+A: When `worker_count` is set to 0 (auto), the pool creates `min(hardware_concurrency * 2, 64)` threads. The hard upper bound is 64.
+
+**Q: Does `loom_pool_submit()` block when the queue is full?**
+
+A: No. When `queue_capacity > 0` and the queue is full, `loom_pool_submit()` returns `LOOMWORKS_ERR_INVALID` immediately. The caller must retry or handle the error. Use `queue_capacity = 0` for an unbounded (potentially large) queue.
+
+**Q: How do I compile with AddressSanitizer?**
+
+A: Add `-fsanitize=address -fno-omit-frame-pointer` to your compiler flags. The library is fully compatible with ASan. Run `LD_PRELOAD=/usr/lib/libasan.so.8 ./build/test_integration` for leak-checked integration tests.
+
 ## Design Constraints
 
 | Requirement | Implementation |
@@ -180,6 +253,21 @@ typedef enum {
 | System call robustness | All `pthread_*`/`malloc`/`mmap`/`mprotect` return values checked |
 | 64-bit compatible | `makecontext` args cast via `uintptr_t → unsigned long` |
 
+## Contributing
+
+See [docs/contributing.md](docs/contributing.md) for coding standards and the submission process.
+
+## FAQ
+
+See [docs/faq.md](docs/faq.md) for frequently asked questions.
+
+## Migration
+
+Migrating from ctpool? See [docs/migration.md](docs/migration.md).
+
 ## Notes
 
 - **Dynamic library (`.so`) is not supported.** Coroutines use `_Thread_local` storage; linking as a shared object produces TPOFF relocation errors. Static linking only (`libloomworks.a`).
+- **Signal handler safety:** The coroutine guard-page handler uses `longjmp`, which means `loom_coro_resume()` may return from a non-deterministic point. Do not rely on state after a guard-page error beyond calling `loom_coro_destroy()`.
+- **Scheduler stack residency:** Each thread allocates a 128 KiB scheduler stack on first coroutine use. This memory is intentionally never freed (reclaimed by the OS at thread exit) to avoid reallocation overhead.
+- **POSIX dependency:** Requires a POSIX-compliant platform with `ucontext(3)`, `mmap(2)`, and `pthread(3)`. Tested on Linux/x86_64. macOS and other POSIX platforms may work with minor adjustments.

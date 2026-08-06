@@ -145,7 +145,17 @@ Closes #42
 
 ---
 
-## 4. Code Review Checklist
+## 4. Documentation
+
+Every new feature or API change must be accompanied by documentation updates:
+
+- **README.md**: Add or update Quick Start examples if the public API changes
+- **docs/api-reference.md**: Update function signatures, parameter tables, and thread-safety matrix
+- **docs/faq.md**: Add FAQ entries for non-obvious behavior or common pitfalls
+- **docs/migration.md**: Update if any API rename or breaking change occurs
+- **CHANGELOG.md**: Add an entry under  with the change category
+
+## 5. Code Review Checklist
 
 Before submitting a PR, confirm:
 

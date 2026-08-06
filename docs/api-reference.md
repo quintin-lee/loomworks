@@ -205,7 +205,65 @@ const char *loom_coro_result_str(loom_coro_result_t result);
 
 ---
 
-## 4. Thread Safety
+## 4. Complete Usage Example
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <loomworks/loomworks.h>
+
+// Example: computing sum of squares in parallel
+void sum_squares_task(void *arg) {
+    int *total = (int *)arg;
+    __sync_fetch_and_add(total, 100);  // each task adds 100
+}
+
+int *compute_result(void *arg) {
+    (void)arg;
+    int *ptr = (int *)malloc(sizeof(int));
+    *ptr = 42;
+    return ptr;
+}
+
+int main(void) {
+    // Create pool
+    loom_pool_config_t cfg = { .worker_count = 4, .queue_capacity = 1000 };
+    loom_thread_pool_t *pool = NULL;
+    LOOMWORKS_CHECK(loom_pool_create(&cfg, &pool));
+
+    // Submit fire-and-forget tasks
+    int sum = 0;
+    for (int i = 0; i < 10; i++) {
+        LOOMWORKS_CHECK(loom_pool_submit(pool, sum_squares_task, &sum));
+    }
+
+    // Submit a future task
+    loom_future_t *fut = NULL;
+    LOOMWORKS_CHECK(loom_pool_submit_future(pool, compute_result, NULL, &fut));
+
+    // Wait for result
+    void *result = NULL;
+    LOOMWORKS_CHECK(loom_future_wait(fut, &result));
+    printf("future result: %d\n", *(int *)result);
+    free(result);
+
+    // Print stats
+    printf("pending tasks: %u\n", loom_pool_pending_count(pool));
+    printf("worker count: %u\n", loom_pool_worker_count(pool));
+
+    // Cleanup
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    return 0;
+}
+
+#define LOOMWORKS_CHECK(rc) do {     if ((rc) != LOOMWORKS_OK) {         fprintf(stderr, "loomworks error: %d\n", (int)(rc));         exit(1);     } } while (0)
+```
+
+---
+
+## 5. Thread Safety
+
 
 | API | Thread-safe | Notes |
 |-----|-------------|-------|

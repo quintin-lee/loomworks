@@ -154,6 +154,22 @@ makecontext(&ctx, entry, 1, (unsigned long)coro);  // May truncate on ILP32
 
 ---
 
+## 11. Future Work
+
+The following enhancements are planned for future releases:
+
+| Item | Description | Priority |
+|------|-------------|----------|
+| **Resizable worker pool** | Add `loom_pool_resize()` to adjust worker count at runtime | Medium |
+| **Task priority queue** | Support priority-based task scheduling (high/normal/low) | Low |
+| **Epoch-based reclamation** | Replace linked-list task queue with lock-free epoch-based structure | Low |
+| **Coroutine pooling** | Pre-allocate and reuse coroutine contexts to reduce mmap overhead | Medium |
+| **Windows support** | Port to Windows using SwitchToThread + VirtualAlloc | Low |
+| **Profiling hooks** | Add optional callbacks for task submission/duration metrics | Low |
+| **Valgrind integration** | Register coroutine stacks with Valgrind to eliminate false leaks | Medium |
+
+---
+
 ## 10. Cache-Line Alignment Strategy
 
 **Decision:** All locks, queue pointers use `__attribute__((aligned(64)))` or padding fields for separation.
