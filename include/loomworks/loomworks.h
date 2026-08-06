@@ -6,7 +6,7 @@
  * @brief Single-header convenience include for the loomworks library.
  */
 
-#include "loomworks/thread_pool.h"
 #include "loomworks/coroutine.h"
+#include "loomworks/thread_pool.h"
 
 #endif /* LOOMWORKS_H */

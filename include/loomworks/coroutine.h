@@ -19,8 +19,8 @@
  *   to PROT_NONE to catch stack overflows growing inward from either end.
  */
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,13 +44,13 @@ typedef enum {
  * @brief Result codes for coroutine operations.
  */
 typedef enum {
-    LOOMWORKS_CORO_OK = 0,        /**< Operation succeeded. */
-    LOOMWORKS_CORO_ERR_ALLOC,     /**< Memory allocation failed. */
-    LOOMWORKS_CORO_ERR_CONTEXT,   /**< Context creation failed. */
-    LOOMWORKS_CORO_ERR_MPROTECT,  /**< mprotect call failed. */
-    LOOMWORKS_CORO_ERR_INVALID,   /**< Invalid coroutine handle or state. */
-    LOOMWORKS_CORO_ERR_GUARD,     /**< Guard page violation detected. */
-    LOOMWORKS_CORO_ERR_RUNNING,   /**< Operation invalid in current state. */
+    LOOMWORKS_CORO_OK = 0,       /**< Operation succeeded. */
+    LOOMWORKS_CORO_ERR_ALLOC,    /**< Memory allocation failed. */
+    LOOMWORKS_CORO_ERR_CONTEXT,  /**< Context creation failed. */
+    LOOMWORKS_CORO_ERR_MPROTECT, /**< mprotect call failed. */
+    LOOMWORKS_CORO_ERR_INVALID,  /**< Invalid coroutine handle or state. */
+    LOOMWORKS_CORO_ERR_GUARD,    /**< Guard page violation detected. */
+    LOOMWORKS_CORO_ERR_RUNNING,  /**< Operation invalid in current state. */
 } loom_coro_result_t;
 
 /**
@@ -63,12 +63,12 @@ typedef void (*loom_coro_fn)(void *user_data);
 /**
  * @brief Default coroutine stack size.
  */
-#define LOOMWORKS_CORO_DEFAULT_STACK_SIZE (64 * 1024)  /* 64 KiB */
+#define LOOMWORKS_CORO_DEFAULT_STACK_SIZE ((size_t)(64 * 1024)) /* 64 KiB */
 
 /**
  * @brief Number of guard pages on each side of the stack.
  */
-#define LOOMWORKS_CORO_GUARD_PAGES_EACH 1
+#define LOOMWORKS_CORO_GUARD_PAGES_EACH 1u
 
 /**
  * @brief Create a new coroutine.
@@ -81,10 +81,8 @@ typedef void (*loom_coro_fn)(void *user_data);
  * @param coro     Output pointer for the created coroutine handle.
  * @return         LOOMWORKS_CORO_OK on success, error code otherwise.
  */
-loom_coro_result_t loom_coro_create(loom_coro_fn fn,
-                                         void *data,
-                                         size_t stack_size,
-                                         loom_coroutine_t **coro);
+loom_coro_result_t
+loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_t **coro);
 
 /**
  * @brief Start or resume a coroutine.
@@ -149,9 +147,7 @@ loom_coro_state_t loom_coro_state(const loom_coroutine_t *coro);
  * @param end        Output pointer for stack end address (exclusive).
  * @return           LOOMWORKS_CORO_OK on success.
  */
-loom_coro_result_t loom_coro_stack_info(const loom_coroutine_t *coro,
-                                             void **start,
-                                             void **end);
+loom_coro_result_t loom_coro_stack_info(const loom_coroutine_t *coro, void **start, void **end);
 
 /**
  * @brief Get a human-readable string for a result code.

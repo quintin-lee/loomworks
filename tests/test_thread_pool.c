@@ -1,25 +1,26 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/thread_pool.h"
 
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <unistd.h>
-#include <pthread.h>
 
 static int g_passes   = 0;
 static int g_failures = 0;
 
-#define ASSERT(expr, msg) do { \
-    if (!(expr)) { \
-        fprintf(stderr, "FAIL: %s at %s:%d\n", msg, __FILE__, __LINE__); \
-        g_failures++; \
-    } else { \
-        g_passes++; \
-    } \
-} while (0)
+#define ASSERT(expr, msg)                                                                          \
+    do {                                                                                           \
+        if (!(expr)) {                                                                             \
+            fprintf(stderr, "FAIL: %s at %s:%d\n", msg, __FILE__, __LINE__);                       \
+            g_failures++;                                                                          \
+        } else {                                                                                   \
+            g_passes++;                                                                            \
+        }                                                                                          \
+    } while (0)
 
 /* ---------- Helpers ---------- */
 static void simple_task(void *arg)
@@ -32,7 +33,9 @@ static void *result_task(void *arg)
 {
     (void)arg;
     int *val = (int *)malloc(sizeof(int));
-    if (val) *val = 42;
+    if (val) {
+        *val = 42;
+    }
     return (void *)val;
 }
 
@@ -45,19 +48,19 @@ static void no_data_task(void *arg)
 static void test_basic_create_destroy(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_result_t rc = loom_pool_create(NULL, &pool);
-    ASSERT(rc == LOOMWORKS_OK,               "create with defaults");
-    ASSERT(pool != NULL,                   "pool not null");
+    loom_result_t       rc   = loom_pool_create(NULL, &pool);
+    ASSERT(rc == LOOMWORKS_OK, "create with defaults");
+    ASSERT(pool != NULL, "pool not null");
     ASSERT(loom_pool_worker_count(pool) > 0, "worker count > 0");
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
-    ASSERT(pool == NULL,                   "destroy sets to null");
+    ASSERT(pool == NULL, "destroy sets to null");
 }
 
 /* ---------- Test: config parameters ---------- */
 static void test_config(void)
 {
-    loom_pool_config_t cfg = { .worker_count = 4, .stack_size = 65536, .queue_capacity = 1000 };
+    loom_pool_config_t  cfg  = {.worker_count = 4, .stack_size = 65536, .queue_capacity = 1000};
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create with config");
     ASSERT(loom_pool_worker_count(pool) == 4, "worker count = 4");
@@ -71,8 +74,8 @@ static void test_submit_n_tasks(void)
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
-    int counter = 0;
-    const int N = 1000;
+    int       counter = 0;
+    const int N       = 1000;
     for (int i = 0; i < N; i++) {
         ASSERT(loom_pool_submit(pool, simple_task, &counter) == LOOMWORKS_OK, "submit task");
     }
@@ -90,12 +93,14 @@ static void test_future_result(void)
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
     loom_future_t *future = NULL;
-    ASSERT(loom_pool_submit_future(pool, result_task, NULL, &future) == LOOMWORKS_OK, "submit future");
+    ASSERT(loom_pool_submit_future(pool, result_task, NULL, &future) == LOOMWORKS_OK,
+           "submit future");
     ASSERT(future != NULL, "future not null");
 
     void *result = NULL;
     ASSERT(loom_future_wait(future, &result) == LOOMWORKS_OK, "wait future");
     ASSERT(result != NULL, "result not null");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
     ASSERT(*(int *)result == 42, "result value is 42");
     free(result);
 
@@ -110,10 +115,11 @@ static void test_multiple_futures(void)
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
-    const int N = 50;
+    const int      N = 50;
     loom_future_t *futures[N];
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit_future(pool, result_task, NULL, &futures[i]) == LOOMWORKS_OK, "submit future");
+        ASSERT(loom_pool_submit_future(pool, result_task, NULL, &futures[i]) == LOOMWORKS_OK,
+               "submit future");
         ASSERT(futures[i] != NULL, "future not null");
     }
 
@@ -136,7 +142,7 @@ static void test_multiple_futures(void)
 static void test_pending_count(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t cfg = { .worker_count = 1, .queue_capacity = 0 };
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
     int dummy = 0;
@@ -153,12 +159,13 @@ static void test_pending_count(void)
 /* ---------- Test: invalid args ---------- */
 static void test_invalid_args(void)
 {
-    ASSERT(loom_pool_create(NULL, NULL)       != LOOMWORKS_OK, "null pool out");
+    ASSERT(loom_pool_create(NULL, NULL) != LOOMWORKS_OK, "null pool out");
     ASSERT(loom_pool_submit(NULL, simple_task, NULL) != LOOMWORKS_OK, "null pool submit");
-    ASSERT(loom_pool_submit_future(NULL, result_task, NULL, NULL) != LOOMWORKS_OK, "null pool future");
-    ASSERT(loom_future_wait(NULL, NULL)       != LOOMWORKS_OK, "null future wait");
+    ASSERT(loom_pool_submit_future(NULL, result_task, NULL, NULL) != LOOMWORKS_OK,
+           "null pool future");
+    ASSERT(loom_future_wait(NULL, NULL) != LOOMWORKS_OK, "null future wait");
     loom_future_destroy(NULL);
-    ASSERT(loom_pool_worker_count(NULL) == 0,  "null pool worker count");
+    ASSERT(loom_pool_worker_count(NULL) == 0, "null pool worker count");
     ASSERT(loom_pool_pending_count(NULL) == 0, "null pool pending count");
     ASSERT(true, "invalid args handled");
 }
@@ -173,7 +180,8 @@ static void test_submit_after_shutdown(void)
     /* Test submit error before shutdown (shutdown destroys the mutex) */
     ASSERT(loom_pool_submit(pool, simple_task, &dummy) == LOOMWORKS_OK, "submit before shutdown");
     loom_pool_shutdown(pool);
-    ASSERT(loom_pool_submit(pool, simple_task, &dummy) == LOOMWORKS_ERR_SHUTDOWN, "submit after shutdown");
+    ASSERT(loom_pool_submit(pool, simple_task, &dummy) == LOOMWORKS_ERR_SHUTDOWN,
+           "submit after shutdown");
 
     loom_pool_destroy(&pool);
 }
@@ -187,7 +195,7 @@ static void test_double_shutdown(void)
     int dummy = 0;
     loom_pool_submit(pool, simple_task, &dummy);
     loom_pool_shutdown(pool);
-    loom_pool_shutdown(pool);  /* should not crash */
+    loom_pool_shutdown(pool); /* should not crash */
     loom_pool_destroy(&pool);
     ASSERT(true, "double shutdown safe");
 }
@@ -195,8 +203,8 @@ static void test_double_shutdown(void)
 /* ---------- Test: concurrent submission ---------- */
 typedef struct {
     loom_thread_pool_t *pool;
-    int                   count;
-    int                  *counter;
+    int                 count;
+    int                *counter;
 } concurrent_arg_t;
 
 static void *concurrent_submit_worker(void *arg)
@@ -212,19 +220,19 @@ static void *concurrent_submit_worker(void *arg)
 static void test_concurrent_submit(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t cfg = { .worker_count = 4, .queue_capacity = 0 };
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
-    int counter  = 0;
-    const int N  = 10000;
-    const int T  = 4;
+    int       counter = 0;
+    const int N       = 10000;
+    const int T       = 4;
     pthread_t tid[4];
 
     for (int t = 0; t < T; t++) {
         concurrent_arg_t *s = (concurrent_arg_t *)malloc(sizeof(*s));
-        s->pool    = pool;
-        s->count   = N / T;
-        s->counter = &counter;
+        s->pool             = pool;
+        s->count            = N / T;
+        s->counter          = &counter;
         pthread_create(&tid[t], NULL, concurrent_submit_worker, s);
     }
     for (int t = 0; t < T; t++) {
@@ -240,7 +248,7 @@ static void test_concurrent_submit(void)
 /* ---------- Test: concurrent future submission ---------- */
 typedef struct {
     loom_thread_pool_t *pool;
-    int                   count;
+    int                 count;
 } future_submit_arg_t;
 
 static void *concurrent_future_submit_worker(void *arg)
@@ -252,7 +260,9 @@ static void *concurrent_future_submit_worker(void *arg)
         if (fut) {
             void *result = NULL;
             loom_future_wait(fut, &result);
-            if (result) free(result);
+            if (result) {
+                free(result);
+            }
             loom_future_destroy(fut);
         }
     }
@@ -263,7 +273,7 @@ static void *concurrent_future_submit_worker(void *arg)
 static void test_concurrent_future_submit(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t cfg = { .worker_count = 4, .queue_capacity = 0 };
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
     const int T = 4;
@@ -272,8 +282,8 @@ static void test_concurrent_future_submit(void)
 
     for (int t = 0; t < T; t++) {
         future_submit_arg_t *s = (future_submit_arg_t *)malloc(sizeof(*s));
-        s->pool  = pool;
-        s->count = N;
+        s->pool                = pool;
+        s->count               = N;
         pthread_create(&tid[t], NULL, concurrent_future_submit_worker, s);
     }
     for (int t = 0; t < T; t++) {
@@ -290,25 +300,31 @@ static void slow_task(void *arg)
 {
     (void)arg;
     /* Spend enough time that the queue stays full while we fill it */
-    int sink = 0; (void)sink;
-    for (int i = 0; i < 100000; i++) sink += i;
+    int sink = 0;
+    (void)sink;
+    for (int i = 0; i < 100000; i++) {
+        sink += i;
+    }
 }
 
 static void test_bounded_queue(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t cfg = { .worker_count = 1, .queue_capacity = 5 };
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 5};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create bounded pool");
 
     /* Submit more tasks than capacity.  The single slow worker keeps
        the queue full, so after the first 5 submissions the 6th must
        fail with LOOMWORKS_ERR_INVALID. */
-    int ok_count = 0;
+    int ok_count  = 0;
     int err_count = 0;
     for (int i = 0; i < 10; i++) {
         loom_result_t rc = loom_pool_submit(pool, slow_task, NULL);
-        if (rc == LOOMWORKS_OK) ok_count++;
-        else if (rc == LOOMWORKS_ERR_INVALID) err_count++;
+        if (rc == LOOMWORKS_OK) {
+            ok_count++;
+        } else if (rc == LOOMWORKS_ERR_INVALID) {
+            err_count++;
+        }
     }
     ASSERT(ok_count == 5, "exactly 5 submits succeed");
     ASSERT(err_count == 5, "remaining submits return ERR_INVALID");
@@ -337,8 +353,8 @@ static void test_no_data_task(void)
 static void test_destroy_null(void)
 {
     loom_thread_pool_t *p = NULL;
-    loom_pool_destroy(NULL);       /* null ptr-to-ptr is safe */
-    loom_pool_destroy(&p);         /* null pool is safe */
+    loom_pool_destroy(NULL); /* null ptr-to-ptr is safe */
+    loom_pool_destroy(&p);   /* null pool is safe */
     ASSERT(p == NULL, "destroy null leaves null");
 }
 

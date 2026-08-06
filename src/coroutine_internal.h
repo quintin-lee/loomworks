@@ -2,13 +2,13 @@
 #define LOOMWORKS_COROUTINE_INTERNAL_H
 
 #include "loomworks/coroutine.h"
-#include <ucontext.h>
 #include <stdbool.h>
+#include <ucontext.h>
 
 /* One cache line on modern x86-64.  Fields that are accessed by
  * different threads concurrently (e.g. the mutex, condition variables)
  * are aligned to avoid false sharing. */
-#define LOOMWORKS_CACHELINE_ALIGN  __attribute__((aligned(64)))
+#define LOOMWORKS_CACHELINE_ALIGN __attribute__((aligned(64)))
 
 /**
  * @brief Internal coroutine structure.
@@ -22,19 +22,19 @@
  * created on the same thread.
  */
 struct loom_coroutine {
-    loom_coro_state_t   state;        /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR). */
-    loom_coro_fn        entry_fn;     /**< User entry function. */
-    void                 *user_data;    /**< Opaque argument passed to entry_fn. */
-    size_t                stack_size;   /**< Requested stack size in bytes. */
+    loom_coro_state_t state;      /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR). */
+    loom_coro_fn      entry_fn;   /**< User entry function. */
+    void             *user_data;  /**< Opaque argument passed to entry_fn. */
+    size_t            stack_size; /**< Requested stack size in bytes. */
 
-    ucontext_t            ctx;          /**< Saved context for swapcontext(). */
+    ucontext_t ctx; /**< Saved context for swapcontext(). */
 
-    void                 *mmap_base;    /**< Base address from mmap(). */
-    size_t                mmap_size;    /**< Total size of the mmap region (includes guards). */
-    void                 *stack_start;  /**< Start of the usable (mprotect'd) region. */
-    void                 *stack_end;    /**< End of the usable region (exclusive). */
+    void  *mmap_base;   /**< Base address from mmap(). */
+    size_t mmap_size;   /**< Total size of the mmap region (includes guards). */
+    void  *stack_start; /**< Start of the usable (mprotect'd) region. */
+    void  *stack_end;   /**< End of the usable region (exclusive). */
 
-    uint64_t              padding[6];   /**< Pad to 64-byte cache-line boundary. */
+    uint64_t padding[6]; /**< Pad to 64-byte cache-line boundary. */
 };
 
 /**

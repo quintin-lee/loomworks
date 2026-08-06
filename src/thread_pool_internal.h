@@ -7,7 +7,7 @@
 
 /* One cache line on modern x86-64.  Hot fields (mutex, condvars) are
  * aligned to avoid false sharing between worker threads. */
-#define LOOMWORKS_CACHELINE_ALIGN  __attribute__((aligned(64)))
+#define LOOMWORKS_CACHELINE_ALIGN __attribute__((aligned(64)))
 
 /* Hard upper bound on queue_capacity to prevent unbounded allocation. */
 #define LOOMWORKS_MAX_QUEUE_CAPACITY (1024 * 1024)
@@ -22,9 +22,9 @@
  * tail of a singly-linked list.  Workers dequeue from the head.
  */
 typedef struct loom_task {
-    loom_task_fn         fn;        /**< Task function to execute. */
-    void                  *user_data; /**< Opaque argument passed to @p fn. */
-    struct loom_task    *next;      /**< Next node in the queue. */
+    loom_task_fn      fn;        /**< Task function to execute. */
+    void             *user_data; /**< Opaque argument passed to @p fn. */
+    struct loom_task *next;      /**< Next node in the queue. */
 } loom_task_t;
 
 /* ================================================================
@@ -38,9 +38,9 @@ typedef struct loom_task {
  * associated loom_future_t under its mutex.
  */
 typedef struct {
-    loom_task_fn_result fn;       /**< User function that returns a result. */
-    void                 *data;     /**< Opaque argument passed to @p fn. */
-    loom_future_t      *future;   /**< Future to signal when complete. */
+    loom_task_fn_result fn;     /**< User function that returns a result. */
+    void               *data;   /**< Opaque argument passed to @p fn. */
+    loom_future_t      *future; /**< Future to signal when complete. */
 } future_task_ctx_t;
 
 /* ================================================================
@@ -53,11 +53,11 @@ typedef struct {
  * @p ready is set by the worker that executed the task.
  */
 struct loom_future {
-    void        *result;      /**< Result pointer (caller must free). */
-    pthread_mutex_t mutex;    /**< Guards @p ready and @p result. */
-    pthread_cond_t  cond;     /**< Signalled when @p ready becomes true. */
-    bool          ready;      /**< true once the task has completed. */
-    bool          has_result; /**< true if result is non-NULL. */
+    void           *result;     /**< Result pointer (caller must free). */
+    pthread_mutex_t mutex;      /**< Guards @p ready and @p result. */
+    pthread_cond_t  cond;       /**< Signalled when @p ready becomes true. */
+    bool            ready;      /**< true once the task has completed. */
+    bool            has_result; /**< true if result is non-NULL. */
 };
 
 /* ================================================================
@@ -70,11 +70,11 @@ struct loom_future {
  * is reserved for future per-worker task affinity or load-balancing.
  */
 typedef struct loom_worker_ctx {
-    uint64_t padding[7];           /**< Pad to cache-line boundary. */
+    uint64_t     padding[7];      /**< Pad to cache-line boundary. */
     loom_task_t *task_queue_head; /**< Reserved for per-worker queues. */
     loom_task_t *task_queue_tail; /**< Reserved for per-worker queues. */
-    uint32_t       task_queue_len;  /**< Reserved for per-worker queues. */
-    uint64_t padding2[7];          /**< Pad to cache-line boundary. */
+    uint32_t     task_queue_len;  /**< Reserved for per-worker queues. */
+    uint64_t     padding2[7];     /**< Pad to cache-line boundary. */
 } loom_worker_ctx_t;
 
 /* ================================================================
@@ -91,23 +91,23 @@ typedef struct loom_worker_ctx {
  * pthread_join on every worker, making subsequent calls a no-op.
  */
 struct loom_thread_pool {
-    uint32_t                worker_count;   /**< Number of worker threads. */
-    size_t                  stack_size;     /**< Stack size per worker (bytes). */
-    uint32_t                queue_capacity; /**< Max pending tasks (0 = unbounded). */
+    uint32_t worker_count;   /**< Number of worker threads. */
+    size_t   stack_size;     /**< Stack size per worker (bytes). */
+    uint32_t queue_capacity; /**< Max pending tasks (0 = unbounded). */
 
-    pthread_mutex_t         lock LOOMWORKS_CACHELINE_ALIGN; /**< Guard queue + flags. */
-    pthread_cond_t          cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when task enqueued. */
-    pthread_cond_t          drain_cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when draining done. */
-    bool                    shutdown;       /**< true once shutdown() has been called. */
-    bool                    draining;       /**< true while workers are finishing tasks. */
-    bool                    joined;         /**< true once all threads have been joined. */
+    pthread_mutex_t lock      LOOMWORKS_CACHELINE_ALIGN; /**< Guard queue + flags. */
+    pthread_cond_t cond       LOOMWORKS_CACHELINE_ALIGN; /**< Signal when task enqueued. */
+    pthread_cond_t drain_cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when draining done. */
+    bool                      shutdown; /**< true once shutdown() has been called. */
+    bool                      draining; /**< true while workers are finishing tasks. */
+    bool                      joined;   /**< true once all threads have been joined. */
 
-    loom_task_t          *queue_head;     /**< Head of the FIFO task queue. */
-    loom_task_t          *queue_tail;     /**< Tail of the FIFO task queue. */
-    uint32_t                queue_len;      /**< Current number of pending tasks. */
+    loom_task_t *queue_head; /**< Head of the FIFO task queue. */
+    loom_task_t *queue_tail; /**< Tail of the FIFO task queue. */
+    uint32_t     queue_len;  /**< Current number of pending tasks. */
 
-    loom_worker_ctx_t   *workers;         /**< Per-worker context array. */
-    pthread_t              *threads;        /**< pthread_t array (one per worker). */
+    loom_worker_ctx_t *workers; /**< Per-worker context array. */
+    pthread_t         *threads; /**< pthread_t array (one per worker). */
 };
 
 /**

@@ -13,8 +13,8 @@
  *   - Pure C11 with POSIX threading
  */
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #ifdef __cplusplus
@@ -31,12 +31,12 @@ typedef struct loom_future loom_future_t;
  * @brief Result codes for thread pool operations.
  */
 typedef enum {
-    LOOMWORKS_OK = 0,          /**< Operation succeeded. */
-    LOOMWORKS_ERR_ALLOC,       /**< Memory allocation failed. */
-    LOOMWORKS_ERR_THREAD,      /**< Thread creation failed. */
-    LOOMWORKS_ERR_INVALID,     /**< Invalid argument or handle. */
-    LOOMWORKS_ERR_SHUTDOWN,    /**< Pool is shutting down or shut down. */
-    LOOMWORKS_ERR_TIMEOUT,     /**< Operation timed out. */
+    LOOMWORKS_OK = 0,       /**< Operation succeeded. */
+    LOOMWORKS_ERR_ALLOC,    /**< Memory allocation failed. */
+    LOOMWORKS_ERR_THREAD,   /**< Thread creation failed. */
+    LOOMWORKS_ERR_INVALID,  /**< Invalid argument or handle. */
+    LOOMWORKS_ERR_SHUTDOWN, /**< Pool is shutting down or shut down. */
+    LOOMWORKS_ERR_TIMEOUT,  /**< Operation timed out. */
 } loom_result_t;
 
 /**
@@ -52,12 +52,12 @@ typedef void (*loom_task_fn)(void *user_data);
  * @param user_data  Opaque pointer passed at submission time.
  * @return           Pointer to result (caller owns the memory; pool does not free it).
  */
-typedef void * (*loom_task_fn_result)(void *user_data);
+typedef void *(*loom_task_fn_result)(void *user_data);
 
 /**
  * @brief Default stack size for worker threads.
  */
-#define LOOMWORKS_DEFAULT_STACK_SIZE (128 * 1024)  /* 128 KiB */
+#define LOOMWORKS_DEFAULT_STACK_SIZE ((size_t)(128 * 1024)) /* 128 KiB */
 
 /**
  * @brief Default number of worker threads (0 = hardware_concurrency * 2, clamped).
@@ -68,9 +68,9 @@ typedef void * (*loom_task_fn_result)(void *user_data);
  * @brief Thread pool configuration.
  */
 typedef struct {
-    uint32_t worker_count;        /**< Number of worker threads (0 = auto). */
-    size_t   stack_size;          /**< Stack size per worker (0 = default). */
-    uint32_t queue_capacity;      /**< Max pending tasks before blocking submit (0 = unbounded). */
+    uint32_t worker_count;   /**< Number of worker threads (0 = auto). */
+    size_t   stack_size;     /**< Stack size per worker (0 = default). */
+    uint32_t queue_capacity; /**< Max pending tasks before blocking submit (0 = unbounded). */
 } loom_pool_config_t;
 
 /**
@@ -80,8 +80,7 @@ typedef struct {
  * @param pool     Output pointer for the created pool handle.
  * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-loom_result_t loom_pool_create(const loom_pool_config_t *config,
-                                    loom_thread_pool_t **pool);
+loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_pool_t **pool);
 
 /**
  * @brief Submit a fire-and-forget task to the pool.
@@ -94,9 +93,7 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config,
  * @param data     Opaque user data passed to the task.
  * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-loom_result_t loom_pool_submit(loom_thread_pool_t *pool,
-                                    loom_task_fn fn,
-                                    void *data);
+loom_result_t loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *data);
 
 /**
  * @brief Submit a task that returns a result, with a future for retrieval.
@@ -108,9 +105,9 @@ loom_result_t loom_pool_submit(loom_thread_pool_t *pool,
  * @return         LOOMWORKS_OK on success, error code otherwise.
  */
 loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
-                                           loom_task_fn_result fn,
-                                           void *data,
-                                           loom_future_t **future);
+                                      loom_task_fn_result fn,
+                                      void               *data,
+                                      loom_future_t     **future);
 
 /**
  * @brief Wait for a future's result. Blocks until the task completes.
