@@ -20,17 +20,34 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/thread_pool.h"
+#include "loomworks/metrics.h"
 #include "thread_pool_internal.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 /* ================================================================
+ *  Metrics helper — invoke callback if metrics is attached.
+ * ================================================================ */
+#define METRICS_CB(pool, event)                                                                    \
+    do {                                                                                           \
+        if ((pool)->metrics) {                                                                     \
+            loom_metric_fn _cb   = ((loom_metrics_t *)(pool)->metrics)->cb;                        \
+            void          *_data = ((loom_metrics_t *)(pool)->metrics)->user_data;                 \
+            if (_cb) {                                                                             \
+                _cb(event, pool, _data);                                                           \
+            }                                                                                      \
+        }                                                                                          \
+    } while (0)
+
+/* ================================================================
  *  Forward declarations
  * ================================================================ */
+
 static loom_result_t pool_init(loom_thread_pool_t *pool);
 static void          pool_destroy_internal(loom_thread_pool_t *pool);
 static void         *worker_entry(void *arg);
@@ -46,6 +63,16 @@ static void          future_task_wrapper(void *arg);
  *  stack_size == 0   → LOOMWORKS_DEFAULT_STACK_SIZE.
  *  queue_capacity > LOOMWORKS_MAX_QUEUE_CAPACITY → clamped down.
  * ================================================================ */
+static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
+{
+    if (!pool || !pool->metric_cb) {
+        return;
+    }
+    if (pool->metrics) {
+        loom_metrics_fire((loom_metrics_t *)pool->metrics, event);
+    }
+}
+
 static loom_result_t pool_init(loom_thread_pool_t *pool)
 {
     if (pool->worker_count == 0) {
@@ -78,12 +105,15 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         return LOOMWORKS_ERR_ALLOC;
     }
 
-    pool->shutdown   = false;
-    pool->draining   = false;
-    pool->joined     = false;
-    pool->queue_head = NULL;
-    pool->queue_tail = NULL;
-    pool->queue_len  = 0;
+    pool->shutdown         = false;
+    pool->draining         = false;
+    pool->joined           = false;
+    pool->queue_head       = NULL;
+    pool->queue_tail       = NULL;
+    pool->queue_len        = 0;
+    pool->metric_cb        = NULL;
+    pool->metric_user_data = NULL;
+    pool->metrics          = NULL;
 
     pool->workers = (loom_worker_ctx_t *)calloc(pool->worker_count, sizeof(loom_worker_ctx_t));
     if (!pool->workers) {
@@ -157,6 +187,7 @@ static void *worker_entry(void *arg)
             void        *data = task->user_data;
             task_destroy(task);
             fn(data);
+            metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
         }
     }
     return NULL;
@@ -342,6 +373,7 @@ loom_result_t loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *
     loom_enqueue_unlocked(pool, task);
     pthread_cond_signal(&pool->cond);
     pthread_mutex_unlock(&pool->lock);
+    metrics_fire(pool, LOOMWORKS_METRIC_SUBMITTED);
     return LOOMWORKS_OK;
 }
 
@@ -430,6 +462,7 @@ loom_pool_submit_priority(loom_thread_pool_t *pool, loom_task_fn fn, void *data,
     loom_enqueue_unlocked(pool, task);
     pthread_cond_signal(&pool->cond);
     pthread_mutex_unlock(&pool->lock);
+    metrics_fire(pool, LOOMWORKS_METRIC_SUBMITTED);
     return LOOMWORKS_OK;
 }
 
@@ -669,6 +702,7 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
             loom_task_t *to_free = cur;
             pthread_mutex_unlock(&pool->lock);
             task_destroy(to_free);
+            metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
             return LOOMWORKS_OK;
         }
         prev = cur;
@@ -703,12 +737,41 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
             task_destroy(cur);
             cur = next;
             cancelled++;
+            metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
         }
     }
     pthread_mutex_unlock(&pool->lock);
     if (count) {
         *count = cancelled;
     }
+}
+
+/* ================================================================
+ *  loom_pool_set_metrics_callback — register/unregister metrics callback.
+ * ================================================================ */
+void loom_pool_set_metrics_callback(loom_thread_pool_t *pool, loom_metric_fn cb, void *user_data)
+{
+    if (!pool) {
+        return;
+    }
+    union {
+        loom_metric_fn f;
+        void (*p)(void *, void *, void *);
+    } u;
+    u.f                    = cb;
+    pool->metric_cb        = u.p;
+    pool->metric_user_data = user_data;
+}
+
+/* ================================================================
+ *  loom_pool_set_metrics — attach/detach a metrics collector.
+ * ================================================================ */
+void loom_pool_set_metrics(loom_thread_pool_t *pool, loom_metrics_t *metrics)
+{
+    if (!pool) {
+        return;
+    }
+    pool->metrics = metrics;
 }
 
 /* ================================================================

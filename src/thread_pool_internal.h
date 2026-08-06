@@ -22,11 +22,11 @@
  * tail of a singly-linked list.  Workers dequeue from the head.
  */
 typedef struct loom_task {
-    loom_task_fn      fn;         /**< Task function to execute. */
-    void             *user_data;  /**< Opaque argument passed to @p fn. */
-    bool              cancelled;  /**< true if task was cancelled before execution. */
-    uint8_t           priority;   /**< Task priority (lower = higher). */
-    struct loom_task *next;       /**< Next node in the queue. */
+    loom_task_fn      fn;        /**< Task function to execute. */
+    void             *user_data; /**< Opaque argument passed to @p fn. */
+    bool              cancelled; /**< true if task was cancelled before execution. */
+    uint8_t           priority;  /**< Task priority (lower = higher). */
+    struct loom_task *next;      /**< Next node in the queue. */
 } loom_task_t;
 
 /* ================================================================
@@ -110,6 +110,10 @@ struct loom_thread_pool {
 
     loom_worker_ctx_t *workers; /**< Per-worker context array. */
     pthread_t         *threads; /**< pthread_t array (one per worker). */
+    void              *metrics; /**< Optional metrics collector (loom_metrics_t*). */
+    /* Inline metrics callback fields to avoid circular dependency */
+    void (*metric_cb)(void *, void *, void *);
+    void *metric_user_data;
 };
 
 /**

@@ -681,6 +681,93 @@ static void test_priority_future(void)
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
+#include "loomworks/metrics.h"
+
+/* ---------- Test: metrics callback ---------- */
+typedef struct {
+    int submit_count;
+    int complete_count;
+    int cancel_count;
+} metrics_test_ctx_t;
+
+static void
+metrics_test_callback(loom_metric_event_t event, const loom_thread_pool_t *pool, void *user_data)
+{
+    (void)pool;
+    metrics_test_ctx_t *ctx = (metrics_test_ctx_t *)user_data;
+    switch (event) {
+    case LOOMWORKS_METRIC_SUBMITTED:
+        ctx->submit_count++;
+        break;
+    case LOOMWORKS_METRIC_COMPLETED:
+        ctx->complete_count++;
+        break;
+    case LOOMWORKS_METRIC_CANCELLED:
+        ctx->cancel_count++;
+        break;
+    default:
+        break;
+    }
+}
+
+static void test_metrics_callback(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    metrics_test_ctx_t ctx     = {0, 0, 0};
+    loom_metrics_t    *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_test_callback, &ctx, &metrics) == LOOMWORKS_OK,
+           "create metrics");
+
+    /* Submit 4 tasks */
+    int counter = 0;
+    for (int i = 0; i < 4; i++) {
+        loom_pool_submit(pool, increment_task, &counter);
+    }
+    /* Submit 2 more and cancel them */
+    int counters[2];
+    for (int i = 0; i < 2; i++) {
+        counters[i] = 0;
+        loom_pool_submit(pool, increment_task, &counters[i]);
+    }
+    loom_pool_cancel_all(pool, NULL);
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    /* Read counters before destroy */
+    uint64_t submitted = loom_metrics_submitted(metrics);
+    uint64_t completed = loom_metrics_completed(metrics);
+    uint64_t cancelled = loom_metrics_cancelled(metrics);
+
+    loom_metrics_destroy(&metrics);
+
+    fprintf(stderr,
+            "DEBUG metrics_test: submit=%d complete=%d cancel=%d submitted=%llu completed=%llu "
+            "cancelled=%llu\n",
+            ctx.submit_count,
+            ctx.complete_count,
+            ctx.cancel_count,
+            (unsigned long long)submitted,
+            (unsigned long long)completed,
+            (unsigned long long)cancelled);
+    /* All 6 tasks were submitted */
+    ASSERT(ctx.submit_count == 6, "6 tasks submitted");
+    ASSERT(submitted > 0, "metrics submitted > 0");
+    /* Completed + cancelled should equal submitted */
+    ASSERT(completed + cancelled == submitted, "completed + cancelled == submitted");
+}
+
+static void test_metrics_null_safety(void)
+{
+    loom_metrics_destroy(NULL);
+    ASSERT(loom_metrics_submitted(NULL) == 0, "null metrics submitted");
+    ASSERT(loom_metrics_completed(NULL) == 0, "null metrics completed");
+    ASSERT(loom_metrics_cancelled(NULL) == 0, "null metrics cancelled");
+    ASSERT(true, "metrics null safety passed");
+}
 
 /* ================================================================
  *  Main
@@ -717,6 +804,8 @@ int main(void)
     test_task_group_submit_after_destroy();
     test_priority_ordering();
     test_priority_future();
+    test_metrics_callback();
+    test_metrics_null_safety();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

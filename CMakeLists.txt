@@ -52,6 +52,7 @@ add_library(loomworks_static STATIC
     src/thread_pool.c
     src/coroutine.c
     src/task_group.c
+    src/metrics.c
 )
 target_include_directories(loomworks_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -64,6 +65,7 @@ add_library(loomworks_shared SHARED
     src/thread_pool.c
     src/coroutine.c
     src/task_group.c
+    src/metrics.c
 )
 target_include_directories(loomworks_shared PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
