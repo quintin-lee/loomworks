@@ -378,6 +378,62 @@ loom_result_t loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *
 }
 
 /* ================================================================
+ *  loom_pool_submit_blocking — enqueue with backpressure.
+ *
+ *  Blocks until there is queue space or the pool shuts down.
+ *  Times out after 60 s with LOOMWORKS_ERR_TIMEOUT.
+ * ================================================================ */
+loom_result_t loom_pool_submit_blocking(loom_thread_pool_t *pool, loom_task_fn fn, void *data)
+{
+    if (!pool || !fn) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    pthread_mutex_lock(&pool->lock);
+    if (pool->shutdown || pool->draining) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
+    if (pool->queue_capacity == 0) {
+        /* Unbounded queue — just submit */
+        loom_task_t *task = task_create(fn, data, LOOMWORKS_PRIORITY_NORMAL);
+        if (!task) {
+            pthread_mutex_unlock(&pool->lock);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        loom_enqueue_unlocked(pool, task);
+        pthread_cond_signal(&pool->cond);
+        pthread_mutex_unlock(&pool->lock);
+        metrics_fire(pool, LOOMWORKS_METRIC_SUBMITTED);
+        return LOOMWORKS_OK;
+    }
+    /* Bounded queue — wait for space */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 60;
+    while (pool->queue_len >= pool->queue_capacity && !pool->shutdown) {
+        int rc = pthread_cond_timedwait(&pool->cond, &pool->lock, &deadline);
+        if (rc == ETIMEDOUT || pool->shutdown || pool->draining) {
+            pthread_mutex_unlock(&pool->lock);
+            return pool->shutdown ? LOOMWORKS_ERR_SHUTDOWN : LOOMWORKS_ERR_TIMEOUT;
+        }
+    }
+    if (pool->shutdown || pool->draining) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
+    loom_task_t *task = task_create(fn, data, LOOMWORKS_PRIORITY_NORMAL);
+    if (!task) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    loom_enqueue_unlocked(pool, task);
+    pthread_cond_signal(&pool->cond);
+    pthread_mutex_unlock(&pool->lock);
+    metrics_fire(pool, LOOMWORKS_METRIC_SUBMITTED);
+    return LOOMWORKS_OK;
+}
+
+/* ================================================================
  *  loom_pool_submit_future — enqueue a task whose result can be
  *  retrieved via a loom_future_t.
  *
@@ -466,6 +522,12 @@ loom_pool_submit_priority(loom_thread_pool_t *pool, loom_task_fn fn, void *data,
     return LOOMWORKS_OK;
 }
 
+/* ================================================================
+ *  loom_pool_submit_blocking — enqueue with backpressure.
+ *
+ *  Blocks until there is queue space or the pool shuts down.
+ *  Times out after 60 s with LOOMWORKS_ERR_TIMEOUT.
+ * ================================================================ */
 /* ================================================================
  *  loom_pool_submit_future_priority — enqueue a priority result task.
  *

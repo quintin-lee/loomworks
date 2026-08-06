@@ -107,6 +107,20 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
 loom_result_t loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *data);
 
 /**
+ * @brief Submit a fire-and-forget task, blocking if the queue is full.
+ *
+ * Same as loom_pool_submit() but blocks (with timeout) when the queue
+ * is at capacity instead of returning LOOMWORKS_ERR_INVALID.
+ * Times out after 60 seconds, returning LOOMWORKS_ERR_TIMEOUT.
+ *
+ * @param pool     The pool handle.
+ * @param fn       Task function.
+ * @param data     Opaque user data passed to the task.
+ * @return         LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_pool_submit_blocking(loom_thread_pool_t *pool, loom_task_fn fn, void *data);
+
+/**
  * @brief Submit a task that returns a result, with a future for retrieval.
  *
  * @param pool     The pool handle.

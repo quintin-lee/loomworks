@@ -95,6 +95,8 @@ add_executable(test_integration tests/test_integration.c)
 target_link_libraries(test_integration PRIVATE loomworks_static)
 add_test(NAME IntegrationTests COMMAND test_integration)
 
+add_subdirectory(examples)
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
