@@ -513,6 +513,120 @@ static void test_future_wait_timeout_expired(void)
 }
 
 /* ================================================================
+ *  Task Group Tests
+ * ================================================================ */
+#include "loomworks/task_group.h"
+
+static void test_task_group_create_destroy(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+    ASSERT(group != NULL, "group not null");
+    ASSERT(loom_task_group_pending_count(group) == 0, "empty group count");
+    loom_task_group_destroy(&group);
+    ASSERT(group == NULL, "destroy sets to null");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_task_group_submit(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+
+    int counter = 0;
+    for (int i = 0; i < 10; i++) {
+        ASSERT(loom_task_group_submit(group, increment_task, &counter) == LOOMWORKS_OK,
+               "submit via group");
+    }
+    ASSERT(loom_task_group_pending_count(group) == 10, "10 pending");
+
+    loom_task_group_wait(group);
+    ASSERT(counter == 10, "all tasks executed");
+
+    loom_task_group_destroy(&group);
+    loom_pool_destroy(&pool);
+}
+
+static void test_task_group_cancel(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+
+    int counters[10];
+    for (int i = 0; i < 10; i++) {
+        counters[i] = 0;
+        ASSERT(loom_task_group_submit(group, increment_task, &counters[i]) == LOOMWORKS_OK,
+               "submit task");
+    }
+    /* Cancel before they run */
+    loom_task_group_cancel(group);
+    ASSERT(loom_task_group_pending_count(group) == 0, "group empty after cancel");
+
+    loom_task_group_wait(group);
+    loom_task_group_destroy(&group);
+    loom_pool_destroy(&pool);
+}
+
+static void test_task_group_destroy_cancels(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+
+    int counter = 0;
+    for (int i = 0; i < 5; i++) {
+        ASSERT(loom_task_group_submit(group, increment_task, &counter) == LOOMWORKS_OK,
+               "submit task");
+    }
+    /* Destroy without waiting — should cancel pending tasks */
+    loom_task_group_destroy(&group);
+    ASSERT(group == NULL, "destroy sets to null");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    /* Counter should be 0 because all were cancelled */
+    ASSERT(counter == 0, "no tasks ran after destroy");
+}
+
+static void test_task_group_null_safety(void)
+{
+    loom_task_group_destroy(NULL);
+    loom_task_group_cancel(NULL);
+    loom_task_group_wait(NULL);
+    ASSERT(loom_task_group_pending_count(NULL) == 0, "null group returns 0");
+    ASSERT(true, "null safety passed");
+}
+
+static void test_task_group_submit_after_destroy(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+
+    loom_task_group_destroy(&group);
+
+    int counter = 0;
+    ASSERT(loom_task_group_submit(group, increment_task, &counter) == LOOMWORKS_ERR_INVALID,
+           "submit after destroy fails");
+    ASSERT(counter == 0, "no task ran");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ================================================================
  *  Main
  * ================================================================ */
 
@@ -539,6 +653,12 @@ int main(void)
     test_cancel_all();
     test_future_wait_timeout_ok();
     test_future_wait_timeout_expired();
+    test_task_group_create_destroy();
+    test_task_group_submit();
+    test_task_group_cancel();
+    test_task_group_destroy_cancels();
+    test_task_group_null_safety();
+    test_task_group_submit_after_destroy();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

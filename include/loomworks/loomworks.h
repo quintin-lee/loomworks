@@ -7,6 +7,7 @@
  */
 
 #include "loomworks/coroutine.h"
+#include "loomworks/task_group.h"
 #include "loomworks/thread_pool.h"
 
 #endif /* LOOMWORKS_H */
