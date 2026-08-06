@@ -7,7 +7,6 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 struct loom_metrics {
@@ -15,10 +14,10 @@ struct loom_metrics {
     loom_metric_fn      cb;
     void               *user_data;
     pthread_mutex_t     lock;
-    /* Atomically updated counters */
-    uint64_t submitted;
-    uint64_t completed;
-    uint64_t cancelled;
+    /* Thread-safe counters, updated via atomic ops in worker threads */
+    _Atomic uint64_t submitted;
+    _Atomic uint64_t completed;
+    _Atomic uint64_t cancelled;
 };
 
 loom_result_t
@@ -34,9 +33,9 @@ loom_metrics_create(loom_thread_pool_t *pool, loom_metric_fn cb, void *data, loo
     m->pool      = pool;
     m->cb        = cb;
     m->user_data = data;
-    m->submitted = 0;
-    m->completed = 0;
-    m->cancelled = 0;
+    atomic_store(&m->submitted, 0);
+    atomic_store(&m->completed, 0);
+    atomic_store(&m->cancelled, 0);
     /* Register callback on the pool via public API */
     if (pool) {
         loom_pool_set_metrics_callback(pool, cb, data);
@@ -71,7 +70,7 @@ uint64_t loom_metrics_submitted(const loom_metrics_t *metrics)
     if (!metrics) {
         return 0;
     }
-    return metrics->submitted;
+    return atomic_load(&metrics->submitted);
 }
 
 uint64_t loom_metrics_completed(const loom_metrics_t *metrics)
@@ -79,7 +78,7 @@ uint64_t loom_metrics_completed(const loom_metrics_t *metrics)
     if (!metrics) {
         return 0;
     }
-    return metrics->completed;
+    return atomic_load(&metrics->completed);
 }
 
 uint64_t loom_metrics_cancelled(const loom_metrics_t *metrics)
@@ -87,7 +86,7 @@ uint64_t loom_metrics_cancelled(const loom_metrics_t *metrics)
     if (!metrics) {
         return 0;
     }
-    return metrics->cancelled;
+    return atomic_load(&metrics->cancelled);
 }
 
 void loom_metrics_fire(loom_metrics_t *metrics, loom_metric_event_t event)
@@ -97,35 +96,17 @@ void loom_metrics_fire(loom_metrics_t *metrics, loom_metric_event_t event)
     }
     switch (event) {
     case LOOMWORKS_METRIC_SUBMITTED:
-        metrics->submitted++;
+        atomic_fetch_add(&metrics->submitted, 1);
         break;
     case LOOMWORKS_METRIC_COMPLETED:
-        metrics->completed++;
+        atomic_fetch_add(&metrics->completed, 1);
         break;
     case LOOMWORKS_METRIC_CANCELLED:
-        metrics->cancelled++;
+        atomic_fetch_add(&metrics->cancelled, 1);
         break;
     default:
         break;
     }
-    fprintf(stderr,
-            "DEBUG loom_metrics_fire: event=%d submitted=%llu completed=%llu cancelled=%llu\n",
-            (int)event,
-            (unsigned long long)metrics->submitted,
-            (unsigned long long)metrics->completed,
-            (unsigned long long)metrics->cancelled);
-    if (event == LOOMWORKS_METRIC_SUBMITTED) {
-        metrics->submitted++;
-    } else if (event == LOOMWORKS_METRIC_COMPLETED) {
-        metrics->completed++;
-    } else if (event == LOOMWORKS_METRIC_CANCELLED) {
-        metrics->cancelled++;
-    }
-    fprintf(stderr,
-            "DEBUG after: submitted=%llu completed=%llu cancelled=%llu\n",
-            (unsigned long long)metrics->submitted,
-            (unsigned long long)metrics->completed,
-            (unsigned long long)metrics->cancelled);
     if (metrics->cb) {
         metrics->cb(event, metrics->pool, metrics->user_data);
     }
