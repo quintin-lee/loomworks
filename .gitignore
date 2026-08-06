@@ -7,3 +7,5 @@ Testing/
 *.so
 *.so.*
 vgcore.*
+
+compile_commands.json
