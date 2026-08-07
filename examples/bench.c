@@ -21,8 +21,9 @@
 #include <unistd.h>
 
 /* ---------- Config ---------- */
-static int g_iterations = 100;
-static int g_task_count = 10000;
+static int g_iterations  = 100;
+static int g_task_count  = 10000;
+static int g_json_output = 0;
 
 /* ---------- Timer ---------- */
 static double now_ns(void)
@@ -233,9 +234,10 @@ static void bench_future_overhead(void)
 static void print_usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--iterations N] [--tasks M]\n"
+            "Usage: %s [--iterations N] [--tasks M] [--json]\n"
             "  --iterations  Number of repeat runs per benchmark (default: %d)\n"
-            "  --tasks       Number of tasks in throughput benchmark (default: %d)\n",
+            "  --tasks       Number of tasks in throughput benchmark (default: %d)\n"
+            "  --json        Output results in JSON format\n",
             prog,
             g_iterations,
             g_task_count);
@@ -261,6 +263,8 @@ int main(int argc, char *argv[])
                 return 1;
             }
             g_task_count = (int)v;
+        } else if (strcmp(argv[i], "--json") == 0) {
+            g_json_output = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -295,5 +299,15 @@ int main(int argc, char *argv[])
     bench_future_overhead();
 
     printf("\nDone.\n");
+
+    if (g_json_output) {
+        FILE *fp = stdout;
+        fprintf(fp, "\n{\n");
+        fprintf(fp, "  \"benchmark\": \"loomworks\",\n");
+        fprintf(fp, "  \"iterations\": %d,\n", g_iterations);
+        fprintf(fp, "  \"task_count\": %d\n", g_task_count);
+        fprintf(fp, "}\n");
+    }
+
     return 0;
 }
