@@ -222,17 +222,19 @@ static void *worker_entry(void *arg)
              * lock-protected); the task function runs outside the lock. */
             task_destroy(pool, task);
             pthread_mutex_unlock(&pool->lock);
-            struct timespec ts_start;
-            clock_gettime(CLOCK_MONOTONIC, &ts_start);
-            fn(data);
-            struct timespec ts_end;
-            clock_gettime(CLOCK_MONOTONIC, &ts_end);
-            uint64_t latency_ns = (uint64_t)(ts_end.tv_sec - ts_start.tv_sec) * 1000000000u +
-                                  (uint64_t)(ts_end.tv_nsec - ts_start.tv_nsec);
-            metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
             if (pool->metrics) {
+                struct timespec ts_start;
+                clock_gettime(CLOCK_MONOTONIC, &ts_start);
+                fn(data);
+                struct timespec ts_end;
+                clock_gettime(CLOCK_MONOTONIC, &ts_end);
+                uint64_t latency_ns = (uint64_t)(ts_end.tv_sec - ts_start.tv_sec) * 1000000000u +
+                                      (uint64_t)(ts_end.tv_nsec - ts_start.tv_nsec);
                 loom_metrics_record_latency((loom_metrics_t *)pool->metrics, latency_ns);
+            } else {
+                fn(data);
             }
+            metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
         }
     }
     return NULL;
