@@ -105,6 +105,25 @@ void loom_pc_shutdown(loom_pc_t *pc);
  */
 uint32_t loom_pc_pending_count(const loom_pc_t *pc);
 
+/**
+ * @brief Get the total number of items successfully enqueued.
+ *
+ * @param pc  The pipeline handle.
+ * @return    Submitted count, or 0 if pc is NULL.
+ */
+uint64_t loom_pc_submitted_count(const loom_pc_t *pc);
+
+/**
+ * @brief Get the total number of items actually dequeued by consumers.
+ *
+ * Incremented on every successful loom_pc_take(), so it measures real
+ * consumption.  Must be read before loom_pc_destroy().
+ *
+ * @param pc  The pipeline handle.
+ * @return    Taken count, or 0 if pc is NULL.
+ */
+uint64_t loom_pc_taken_count(const loom_pc_t *pc);
+
 #ifdef __cplusplus
 }
 #endif

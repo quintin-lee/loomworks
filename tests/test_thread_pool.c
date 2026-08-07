@@ -1541,7 +1541,7 @@ static void test_pipeline_basic(void)
 static void test_pipeline_single(void)
 {
     loom_pc_t *pc = NULL;
-    ASSERT(loom_pc_create(1, 10, &pc) == LOOMWORKS_OK, "create pipeline");
+    ASSERT(loom_pc_create(0, 10, &pc) == LOOMWORKS_OK, "create pipeline");
 
     int *item = (int *)malloc(sizeof(int));
     *item     = 42;
@@ -1604,7 +1604,7 @@ static void *pipeline_cons(void *arg)
 static void test_pipeline_multiprod_cons(void)
 {
     loom_pc_t *pc = NULL;
-    ASSERT(loom_pc_create(2, 0, &pc) == LOOMWORKS_OK, "create pipeline");
+    ASSERT(loom_pc_create(0, 0, &pc) == LOOMWORKS_OK, "create pipeline");
 
     int             total = 0;
     pthread_mutex_t lock  = PTHREAD_MUTEX_INITIALIZER;
@@ -1651,7 +1651,7 @@ static void test_pipeline_bounded(void)
 {
     loom_pc_t *pc = NULL;
     /* capacity=2, so only 2 items can be queued at a time */
-    ASSERT(loom_pc_create(1, 2, &pc) == LOOMWORKS_OK, "create bounded pipeline");
+    ASSERT(loom_pc_create(0, 2, &pc) == LOOMWORKS_OK, "create bounded pipeline");
 
     int *item1 = (int *)malloc(sizeof(int));
     int *item2 = (int *)malloc(sizeof(int));
@@ -1718,7 +1718,8 @@ static void test_pipeline_submit_after_shutdown(void)
 static void test_pipeline_pending_count(void)
 {
     loom_pc_t *pc = NULL;
-    ASSERT(loom_pc_create(1, 10, &pc) == LOOMWORKS_OK, "create pipeline");
+    ASSERT(loom_pc_create(0, 10, &pc) == LOOMWORKS_OK, "create pipeline");
+
     ASSERT(loom_pc_pending_count(pc) == 0, "pending count is 0 initially");
 
     int *a = (int *)malloc(sizeof(int));
@@ -1822,7 +1823,7 @@ static void *pipeline_stress_cons(void *arg)
 static void test_pipeline_stress(void)
 {
     loom_pc_t *pc = NULL;
-    ASSERT(loom_pc_create(4, 0, &pc) == LOOMWORKS_OK, "create pipeline");
+    ASSERT(loom_pc_create(0, 0, &pc) == LOOMWORKS_OK, "create pipeline");
 
     int             total = 0;
     pthread_mutex_t lock  = PTHREAD_MUTEX_INITIALIZER;
