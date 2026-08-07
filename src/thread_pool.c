@@ -54,7 +54,7 @@ static void          pool_destroy_internal(loom_thread_pool_t *pool);
 static void         *worker_entry(void *arg);
 static loom_task_t *
 task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority);
-static void task_destroy(loom_task_t *task);
+static void task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
 static void future_task_wrapper(void *arg);
 
 /* ================================================================
@@ -215,11 +215,13 @@ static void *worker_entry(void *arg)
         }
         loom_coro_exit();
         loom_task_t *task = loom_dequeue_unlocked(pool);
-        pthread_mutex_unlock(&pool->lock);
         if (task) {
             loom_task_fn fn   = task->fn;
             void        *data = task->user_data;
-            task_destroy(task);
+            /* Return the node to the pool under the lock (free-list is
+             * lock-protected); the task function runs outside the lock. */
+            task_destroy(pool, task);
+            pthread_mutex_unlock(&pool->lock);
             struct timespec ts_start;
             clock_gettime(CLOCK_MONOTONIC, &ts_start);
             fn(data);
@@ -242,9 +244,15 @@ static void *worker_entry(void *arg)
 static loom_task_t *
 task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority)
 {
-    loom_task_t *t = (loom_task_t *)malloc(sizeof(*t));
-    if (!t) {
-        return NULL;
+    loom_task_t *t = pool->free_list;
+    if (t) {
+        pool->free_list = t->next;
+        pool->free_list_len--;
+    } else {
+        t = (loom_task_t *)malloc(sizeof(*t));
+        if (!t) {
+            return NULL;
+        }
     }
     t->fn        = fn;
     t->user_data = data;
@@ -257,11 +265,18 @@ task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t prior
     return t;
 }
 
-static void task_destroy(loom_task_t *t)
+static void task_destroy(loom_thread_pool_t *pool, loom_task_t *t)
 {
-    if (t) {
-        free(t);
+    if (!t) {
+        return;
     }
+    if (pool && pool->free_list_len < LOOMWORKS_NODE_POOL_CAP) {
+        t->next         = pool->free_list;
+        pool->free_list = t;
+        pool->free_list_len++;
+        return;
+    }
+    free(t);
 }
 
 /* ================================================================
@@ -869,11 +884,11 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
                 }
                 pool->queue_len--;
                 loom_task_t *to_free = cur;
-                pthread_mutex_unlock(&pool->lock);
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);
                 }
-                task_destroy(to_free);
+                task_destroy(pool, to_free);
+                pthread_mutex_unlock(&pool->lock);
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
                 return LOOMWORKS_OK;
             }
@@ -923,11 +938,11 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
                 }
                 pool->queue_len--;
                 loom_task_t *to_free = cur;
-                pthread_mutex_unlock(&pool->lock);
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);
                 }
-                task_destroy(to_free);
+                task_destroy(pool, to_free);
+                pthread_mutex_unlock(&pool->lock);
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
                 return LOOMWORKS_OK;
             }
@@ -964,7 +979,7 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
                 if (cur->free_data && cur->user_data) {
                     free(cur->user_data);
                 }
-                task_destroy(cur);
+                task_destroy(pool, cur);
                 cur = next;
                 cancelled++;
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
