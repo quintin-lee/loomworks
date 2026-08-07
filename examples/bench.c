@@ -25,6 +25,12 @@ static int g_iterations  = 100;
 static int g_task_count  = 10000;
 static int g_json_output = 0;
 
+/* JSON result capture (populated by each bench when g_json_output) */
+static double g_submit_latency_avg_ns = 0.0;
+static double g_throughput_tps        = 0.0;
+static double g_queue_depth_tps[4]    = {0.0, 0.0, 0.0, 0.0};
+static int    g_queue_depths[4]       = {1000, 10000, 50000, 100000};
+
 /* ---------- Timer ---------- */
 static double now_ns(void)
 {
@@ -75,6 +81,7 @@ static void bench_submit_latency(void)
 
     double avg = total / g_iterations;
     printf("  submit_latency:   avg=%.1f ns  min=%.1f ns  max=%.1f ns\n", avg, min_t, max_t);
+    g_submit_latency_avg_ns = avg;
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
@@ -104,6 +111,7 @@ static void bench_throughput(void)
            g_task_count,
            elapsed_ms,
            tps);
+    g_throughput_tps = tps;
 
     loom_pool_destroy(&pool);
 }
@@ -187,6 +195,43 @@ static void bench_bounded_queue(void)
     }
 }
 
+/* ---------- Benchmark 6: queue_depth ----------
+ * Single worker + N noop tasks => the queue is effectively N deep.
+ * An O(n) enqueue degrades throughput as N grows; the bucketized
+ * queue stays flat.  This is the acceptance metric for the queue
+ * refactor.  Runs only in JSON mode (used by the CI compare step).
+ * ---------- */
+static void bench_queue_depth(void)
+{
+    if (!g_json_output) {
+        printf("  (run with --json to collect queue_depth data)\n");
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        int                 d    = g_queue_depths[i];
+        double              best = 1e18;
+        for (int r = 0; r < 3; r++) {
+            loom_thread_pool_t *pool = NULL;
+            loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+            loom_pool_create(&cfg, &pool);
+
+            double t0 = now_ns();
+            for (int j = 0; j < d; j++) {
+                loom_pool_submit(pool, noop_task, NULL, NULL);
+            }
+            loom_pool_shutdown(pool);
+            double t1         = now_ns();
+            double elapsed_ms = (t1 - t0) / 1e6;
+            if (elapsed_ms < best) {
+                best = elapsed_ms;
+            }
+
+            loom_pool_destroy(&pool);
+        }
+        g_queue_depth_tps[i] = (double)d / (best / 1000.0);
+    }
+}
+
 /* ---------- Benchmark 5: future_overhead ----------
  * Compare fire-and-forget (submit) vs future-based (submit_future
  * + future_wait) submission latency.
@@ -227,6 +272,7 @@ static void bench_future_overhead(void)
            fut_avg / ff_avg);
 
     loom_pool_destroy(&pool_ff);
+    loom_pool_shutdown(pool_fut);
     loom_pool_destroy(&pool_fut);
 }
 
@@ -237,7 +283,7 @@ static void print_usage(const char *prog)
             "Usage: %s [--iterations N] [--tasks M] [--json]\n"
             "  --iterations  Number of repeat runs per benchmark (default: %d)\n"
             "  --tasks       Number of tasks in throughput benchmark (default: %d)\n"
-            "  --json        Output results in JSON format\n",
+            "  --json        Output results in JSON format (adds queue_depth scenario)\n",
             prog,
             g_iterations,
             g_task_count);
@@ -298,15 +344,25 @@ int main(int argc, char *argv[])
     fflush(stdout);
     bench_future_overhead();
 
+    printf("\n[6/6] queue_depth\n");
+    fflush(stdout);
+    bench_queue_depth();
+
     printf("\nDone.\n");
 
     if (g_json_output) {
-        FILE *fp = stdout;
-        fprintf(fp, "\n{\n");
-        fprintf(fp, "  \"benchmark\": \"loomworks\",\n");
-        fprintf(fp, "  \"iterations\": %d,\n", g_iterations);
-        fprintf(fp, "  \"task_count\": %d\n", g_task_count);
-        fprintf(fp, "}\n");
+        printf("\n{\n");
+        printf("  \"benchmark\": \"loomworks\",\n");
+        printf("  \"iterations\": %d,\n", g_iterations);
+        printf("  \"task_count\": %d,\n", g_task_count);
+        printf("  \"submit_latency_avg_ns\": %.1f,\n", g_submit_latency_avg_ns);
+        printf("  \"throughput_tps\": %.0f,\n", g_throughput_tps);
+        printf("  \"queue_depths\": [%d, %d, %d, %d],\n",
+               g_queue_depths[0], g_queue_depths[1], g_queue_depths[2], g_queue_depths[3]);
+        printf("  \"queue_depth_tps\": [%.0f, %.0f, %.0f, %.0f]\n",
+               g_queue_depth_tps[0], g_queue_depth_tps[1], g_queue_depth_tps[2],
+               g_queue_depth_tps[3]);
+        printf("}\n");
     }
 
     return 0;
