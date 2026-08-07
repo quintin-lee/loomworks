@@ -59,11 +59,9 @@ void loom_metrics_destroy(loom_metrics_t **metrics)
         return;
     }
     loom_metrics_t *m = *metrics;
-    /* Clear callback on the pool via public API */
-    if (m->pool) {
-        loom_pool_set_metrics(m->pool, NULL);
-        loom_pool_set_metrics_callback(m->pool, NULL, NULL);
-    }
+    /* Clear pool reference first so subsequent cleanup calls
+     * see a NULL pool and skip the UAF-prone API calls. */
+    m->pool = NULL;
     pthread_mutex_destroy(&m->lock);
     free(m);
     *metrics = NULL;
