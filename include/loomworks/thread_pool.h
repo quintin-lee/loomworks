@@ -220,6 +220,16 @@ uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool);
 uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool);
 
 /**
+ * @brief Wake all worker threads blocked on the pool condition variable.
+ *
+ * Use this when external state changes require workers to re-check conditions
+ * (e.g., pipeline shutdown signals the backing pool).  Safe to call on any valid pool.
+ *
+ * @param pool  The pool handle.
+ */
+void loom_pool_broadcast(loom_thread_pool_t *pool);
+
+/**
  * @brief Cancel a task that is still in the queue (not yet started).
  *
  * Searches the pending queue for a task whose user_data pointer matches

@@ -119,7 +119,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->next_task_id, 1, memory_order_relaxed);
 
     pool->max_worker_count = pool->worker_count;
-    pool->threads = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
+    pool->threads          = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
     if (!pool->threads) {
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
@@ -176,7 +176,7 @@ typedef struct {
 
 static void *worker_entry(void *arg)
 {
-    worker_arg_t     *wa  = (worker_arg_t *)arg;
+    worker_arg_t       *wa   = (worker_arg_t *)arg;
     loom_thread_pool_t *pool = wa->pool;
     uint32_t            idx  = wa->index;
     free(wa);
@@ -364,9 +364,9 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
             pool_destroy_internal(p);
             return LOOMWORKS_ERR_ALLOC;
         }
-        wa->pool = p;
+        wa->pool  = p;
         wa->index = i;
-        int rc2 = pthread_create(&p->threads[i], NULL, worker_entry, wa);
+        int rc2   = pthread_create(&p->threads[i], NULL, worker_entry, wa);
         if (rc2 != 0) {
             fprintf(stderr, "loomworks: pthread_create failed: %s\n", strerror(rc2));
             p->shutdown = true;
@@ -989,7 +989,6 @@ void loom_pool_destroy(loom_thread_pool_t **pool)
     *pool = NULL;
 }
 
-
 /* ================================================================
  *  loom_pool_resize — dynamically adjust the number of worker threads.
  *
@@ -1018,13 +1017,12 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
     }
     if (count > pool->max_worker_count) {
         /* Need to grow the threads array. */
-        pthread_t *new_threads = (pthread_t *)realloc(pool->threads,
-                                                       count * sizeof(pthread_t));
+        pthread_t *new_threads = (pthread_t *)realloc(pool->threads, count * sizeof(pthread_t));
         if (!new_threads) {
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
         }
-        pool->threads      = new_threads;
+        pool->threads          = new_threads;
         pool->max_worker_count = count;
     }
     uint32_t old_count = pool->worker_count;
@@ -1039,9 +1037,9 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 pthread_mutex_unlock(&pool->lock);
                 return LOOMWORKS_ERR_ALLOC;
             }
-            wa->pool = pool;
+            wa->pool  = pool;
             wa->index = i;
-            int rc = pthread_create(&pool->threads[i], NULL, worker_entry, wa);
+            int rc    = pthread_create(&pool->threads[i], NULL, worker_entry, wa);
             if (rc != 0) {
                 free(wa);
                 pool->worker_count = old_count;
@@ -1085,4 +1083,19 @@ uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool)
     uint32_t n = pool->queue_len;
     pthread_mutex_unlock((pthread_mutex_t *)&pool->lock);
     return n;
+}
+
+/* ================================================================
+ *  loom_pool_broadcast — wake all workers blocked on pool->cond.
+ *
+ *  Safe to call from any thread; acquires the lock briefly.
+ * ================================================================ */
+void loom_pool_broadcast(loom_thread_pool_t *pool)
+{
+    if (!pool) {
+        return;
+    }
+    pthread_mutex_lock(&pool->lock);
+    pthread_cond_broadcast(&pool->cond);
+    pthread_mutex_unlock(&pool->lock);
 }

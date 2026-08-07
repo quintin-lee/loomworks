@@ -55,6 +55,7 @@ add_library(loomworks_static STATIC
     src/coroutine.c
     src/task_group.c
     src/metrics.c
+    src/pipeline.c
 )
 target_include_directories(loomworks_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -68,6 +69,7 @@ add_library(loomworks_shared SHARED
     src/coroutine.c
     src/task_group.c
     src/metrics.c
+    src/pipeline.c
 )
 target_include_directories(loomworks_shared PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -96,6 +98,9 @@ add_test(NAME CoroutineTests COMMAND test_coroutine)
 add_executable(test_integration tests/test_integration.c)
 target_link_libraries(test_integration PRIVATE loomworks_static)
 add_test(NAME IntegrationTests COMMAND test_integration)
+
+add_executable(example_pipeline examples/pipeline_demo.c)
+target_link_libraries(example_pipeline PRIVATE loomworks_static)
 
 add_subdirectory(examples)
 

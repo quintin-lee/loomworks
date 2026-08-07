@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "loomworks/pipeline.h"
 #include "loomworks/thread_pool.h"
 
 #include <pthread.h>
@@ -1525,6 +1526,351 @@ static void test_concurrent_cancel_submit_race(void)
     ASSERT(true, "concurrent cancel-submit race completed without crash");
 }
 
+/* ---------- Test: basic pipeline create/destroy ---------- */
+static void test_pipeline_basic(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(2, 0, &pc) == LOOMWORKS_OK, "create pipeline");
+    ASSERT(pc != NULL, "pipeline not null");
+    loom_pc_shutdown(pc);
+    loom_pc_destroy(&pc);
+    ASSERT(pc == NULL, "destroy sets to null");
+}
+
+/* ---------- Test: pipeline single producer single consumer ---------- */
+static void test_pipeline_single(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(1, 10, &pc) == LOOMWORKS_OK, "create pipeline");
+
+    int *item = (int *)malloc(sizeof(int));
+    *item     = 42;
+    ASSERT(loom_pc_submit(pc, item) == LOOMWORKS_OK, "submit item");
+
+    void *taken = NULL;
+    ASSERT(loom_pc_take(pc, &taken) == LOOMWORKS_OK, "take item");
+    ASSERT(taken != NULL, "item not null");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    ASSERT(*(int *)taken == 42, "item value correct");
+    free(taken);
+
+    loom_pc_shutdown(pc);
+    /* Consumer should get sentinel */
+    ASSERT(loom_pc_take(pc, &taken) == LOOMWORKS_ERR_SHUTDOWN, "shutdown sentinel");
+    ASSERT(taken == NULL, "sentinel item is NULL");
+
+    loom_pc_destroy(&pc);
+}
+
+/* ---------- Test: pipeline multi-producer multi-consumer ---------- */
+typedef struct {
+    loom_pc_t *pc;
+    int        pid;
+} prod_arg_t;
+
+typedef struct {
+    loom_pc_t       *pc;
+    int             *total;
+    pthread_mutex_t *lock;
+} cons_arg_t;
+
+static void *pipeline_prod(void *arg)
+{
+    prod_arg_t *pa = (prod_arg_t *)arg;
+    for (int i = 0; i < 50; i++) {
+        int *item = (int *)malloc(sizeof(int));
+        if (item) {
+            *item = pa->pid * 100 + i;
+            loom_pc_submit(pa->pc, item);
+        }
+    }
+    return NULL;
+}
+
+static void *pipeline_cons(void *arg)
+{
+    cons_arg_t *ca = (cons_arg_t *)arg;
+    void       *item;
+    while (loom_pc_take(ca->pc, &item) == LOOMWORKS_OK) {
+        int *val = (int *)item;
+        pthread_mutex_lock(ca->lock);
+        *ca->total += *val;
+        pthread_mutex_unlock(ca->lock);
+        free(val);
+    }
+    return NULL;
+}
+
+static void test_pipeline_multiprod_cons(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(2, 0, &pc) == LOOMWORKS_OK, "create pipeline");
+
+    int             total = 0;
+    pthread_mutex_t lock  = PTHREAD_MUTEX_INITIALIZER;
+
+    prod_arg_t pargs[2];
+    pthread_t  producers[2];
+    for (int p = 0; p < 2; p++) {
+        pargs[p].pc  = pc;
+        pargs[p].pid = p;
+        pthread_create(&producers[p], NULL, pipeline_prod, &pargs[p]);
+    }
+    for (int i = 0; i < 2; i++) {
+        pthread_join(producers[i], NULL);
+    }
+
+    cons_arg_t cargs[2];
+    pthread_t  consumers[2];
+    for (int c = 0; c < 2; c++) {
+        cargs[c].pc    = pc;
+        cargs[c].total = &total;
+        cargs[c].lock  = &lock;
+        pthread_create(&consumers[c], NULL, pipeline_cons, &cargs[c]);
+    }
+
+    loom_pc_shutdown(pc);
+    for (int i = 0; i < 2; i++) {
+        pthread_join(consumers[i], NULL);
+    }
+
+    long expected = 0;
+    for (int p = 0; p < 2; p++) {
+        for (int i = 0; i < 50; i++) {
+            expected += (long)p * 100 + i;
+        }
+    }
+    ASSERT(total == (int)expected, "multiproducer totals match");
+
+    pthread_mutex_destroy(&lock);
+    loom_pc_destroy(&pc);
+}
+
+/* ---------- Test: pipeline bounded queue ---------- */
+static void test_pipeline_bounded(void)
+{
+    loom_pc_t *pc = NULL;
+    /* capacity=2, so only 2 items can be queued at a time */
+    ASSERT(loom_pc_create(1, 2, &pc) == LOOMWORKS_OK, "create bounded pipeline");
+
+    int *item1 = (int *)malloc(sizeof(int));
+    int *item2 = (int *)malloc(sizeof(int));
+    int *item3 = (int *)malloc(sizeof(int));
+    ASSERT(item1 != NULL && item2 != NULL && item3 != NULL, "bounded items alloc");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    *item1 = 1;
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    *item2 = 2;
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    *item3 = 3;
+
+    /* Submit first 2 items (capacity=2) — should succeed immediately */
+    ASSERT(loom_pc_submit(pc, item1) == LOOMWORKS_OK, "submit item1");
+    ASSERT(loom_pc_submit(pc, item2) == LOOMWORKS_OK, "submit item2");
+
+    /* Queue is full — 3rd submit should block until consumer takes one */
+    void *taken = NULL;
+    ASSERT(loom_pc_take(pc, &taken) == LOOMWORKS_OK, "take item1");
+    ASSERT(taken != NULL, "taken item not null");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    ASSERT(*(int *)taken == 1, "taken item1 value correct");
+    free(taken);
+
+    /* Now queue has space, submit should succeed */
+    ASSERT(loom_pc_submit(pc, item3) == LOOMWORKS_OK, "submit item3 after take");
+
+    loom_pc_shutdown(pc);
+    /* Drain remaining */
+    while (loom_pc_take(pc, &taken) != LOOMWORKS_ERR_SHUTDOWN) {
+        if (taken) {
+            free(taken);
+        }
+    }
+    /* item1 was taken and freed above; item2 and item3 drained by shutdown+loop. */
+    loom_pc_destroy(&pc);
+    ASSERT(true, "bounded pipeline test completed");
+}
+
+/* ---------- Test: pipeline null safety ---------- */
+static void test_pipeline_null_safety(void)
+{
+    ASSERT(loom_pc_create(0, 0, NULL) != LOOMWORKS_OK, "create with null output fails");
+    loom_pc_destroy(NULL);
+    loom_pc_shutdown(NULL);
+    ASSERT(loom_pc_submit(NULL, NULL) == LOOMWORKS_ERR_INVALID, "submit null pc");
+    ASSERT(loom_pc_take(NULL, NULL) == LOOMWORKS_ERR_INVALID, "take null pc");
+    ASSERT(loom_pc_pending_count(NULL) == 0, "pending_count null pc returns 0");
+    ASSERT(true, "null safety passed");
+}
+
+/* ---------- Test: pipeline submit after shutdown ---------- */
+static void test_pipeline_submit_after_shutdown(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(1, 10, &pc) == LOOMWORKS_OK, "create pipeline");
+    loom_pc_shutdown(pc);
+    int val = 42;
+    ASSERT(loom_pc_submit(pc, &val) == LOOMWORKS_ERR_SHUTDOWN, "submit after shutdown fails");
+    loom_pc_destroy(&pc);
+}
+
+/* ---------- Test: pipeline pending count ---------- */
+static void test_pipeline_pending_count(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(1, 10, &pc) == LOOMWORKS_OK, "create pipeline");
+    ASSERT(loom_pc_pending_count(pc) == 0, "pending count is 0 initially");
+
+    int *a = (int *)malloc(sizeof(int));
+    int *b = (int *)malloc(sizeof(int));
+    ASSERT(a != NULL && b != NULL, "pending alloc");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    *a = 10;
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    *b = 20;
+
+    ASSERT(loom_pc_submit(pc, a) == LOOMWORKS_OK, "submit a");
+    ASSERT(loom_pc_pending_count(pc) == 1, "pending count is 1");
+    ASSERT(loom_pc_submit(pc, b) == LOOMWORKS_OK, "submit b");
+    ASSERT(loom_pc_pending_count(pc) == 2, "pending count is 2");
+
+    void *taken = NULL;
+    ASSERT(loom_pc_take(pc, &taken) == LOOMWORKS_OK, "take a");
+    ASSERT(loom_pc_pending_count(pc) == 1, "pending count is 1 after take");
+    free(taken);
+
+    loom_pc_shutdown(pc);
+    while (loom_pc_take(pc, &taken) != LOOMWORKS_ERR_SHUTDOWN) {
+        if (taken) free(taken);
+    }
+    ASSERT(loom_pc_pending_count(pc) == 0, "pending count is 0 after drain");
+    loom_pc_destroy(&pc);
+}
+
+/* ---------- Test: pipeline shutdown while consumers waiting ---------- */
+static void test_pipeline_shutdown_waiting(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(2, 0, &pc) == LOOMWORKS_OK, "create pipeline");
+
+    /* Shutdown immediately — no items in queue, consumers should get sentinel */
+    loom_pc_shutdown(pc);
+
+    void *taken = NULL;
+    /* Both takes should return shutdown sentinel */
+    ASSERT(loom_pc_take(pc, &taken) == LOOMWORKS_ERR_SHUTDOWN, "first take gets shutdown");
+    ASSERT(taken == NULL, "shutdown item is NULL");
+    ASSERT(loom_pc_take(pc, &taken) == LOOMWORKS_ERR_SHUTDOWN, "second take gets shutdown");
+    ASSERT(taken == NULL, "shutdown item is NULL");
+
+    loom_pc_destroy(&pc);
+}
+
+/* ---------- Test: pipeline submit after destruction is safe ---------- */
+static void test_pipeline_destroy_then_submit(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(1, 10, &pc) == LOOMWORKS_OK, "create pipeline");
+    loom_pc_destroy(&pc);
+    /* After destroy, pc is NULL — operations should be safe (no-op or error) */
+    ASSERT(pc == NULL, "destroy nullifies handle");
+    ASSERT(loom_pc_submit(pc, NULL) == LOOMWORKS_ERR_INVALID, "submit after destroy fails");
+    ASSERT(loom_pc_take(pc, NULL) == LOOMWORKS_ERR_INVALID, "take after destroy fails");
+    ASSERT(loom_pc_pending_count(pc) == 0, "pending_count after destroy returns 0");
+}
+
+/* ---------- Test: pipeline stress concurrent produce/consume ---------- */
+/* Helper for stress test: producer function */
+typedef struct {
+    loom_pc_t *pc;
+    int        tid;
+} stress_prod_arg_t;
+
+static void *pipeline_stress_prod(void *arg)
+{
+    stress_prod_arg_t *a = (stress_prod_arg_t *)arg;
+    for (int j = 0; j < 500; j++) {
+        int *item = (int *)malloc(sizeof(int));
+        if (item) {
+            *item = a->tid * 500 + j;
+            loom_pc_submit(a->pc, item);
+        }
+    }
+    return NULL;
+}
+
+/* Helper for stress test: consumer function */
+typedef struct {
+    loom_pc_t *pc;
+    int       *total;
+    pthread_mutex_t *lock;
+} stress_cons_arg_t;
+
+static void *pipeline_stress_cons(void *arg)
+{
+    stress_cons_arg_t *a = (stress_cons_arg_t *)arg;
+    void              *item;
+    while (loom_pc_take(a->pc, &item) == LOOMWORKS_OK) {
+        pthread_mutex_lock(a->lock);
+        *a->total += *(int *)item;
+        pthread_mutex_unlock(a->lock);
+        free(item);
+    }
+    return NULL;
+}
+
+static void test_pipeline_stress(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(4, 0, &pc) == LOOMWORKS_OK, "create pipeline");
+
+    int             total = 0;
+    pthread_mutex_t lock  = PTHREAD_MUTEX_INITIALIZER;
+    const int       PROD  = 4;
+    const int       CONS  = 4;
+
+    stress_prod_arg_t  *pargs  = (stress_prod_arg_t *)malloc(sizeof(stress_prod_arg_t)  * (uint32_t)PROD);
+    stress_cons_arg_t  *cargs  = (stress_cons_arg_t *)malloc(sizeof(stress_cons_arg_t)  * (uint32_t)CONS);
+    pthread_t          *producers = (pthread_t *)malloc(sizeof(pthread_t) * (uint32_t)PROD);
+    pthread_t          *consumers = (pthread_t *)malloc(sizeof(pthread_t) * (uint32_t)CONS);
+    ASSERT(pargs && cargs && producers && consumers, "stress alloc");
+
+    for (int i = 0; i < PROD; i++) {
+        pargs[i].pc  = pc;
+        pargs[i].tid = i;
+        pthread_create(&producers[i], NULL, pipeline_stress_prod, &pargs[i]);
+    }
+    for (int i = 0; i < PROD; i++) {
+        pthread_join(producers[i], NULL);
+    }
+
+    for (int i = 0; i < CONS; i++) {
+        cargs[i].pc     = pc;
+        cargs[i].total  = &total;
+        cargs[i].lock   = &lock;
+        pthread_create(&consumers[i], NULL, pipeline_stress_cons, &cargs[i]);
+    }
+
+    loom_pc_shutdown(pc);
+    for (int i = 0; i < CONS; i++) {
+        pthread_join(consumers[i], NULL);
+    }
+
+    long expected = 0;
+    for (int p = 0; p < PROD; p++) {
+        for (int j = 0; j < 500; j++) {
+            expected += (long)p * 500 + j;
+        }
+    }
+    ASSERT(total == (int)expected, "stress totals match");
+    free(pargs);
+    free(cargs);
+    free(producers);
+    free(consumers);
+    loom_pc_destroy(&pc);
+    pthread_mutex_destroy(&lock);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -1532,7 +1878,6 @@ static void test_concurrent_cancel_submit_race(void)
 int main(void)
 {
     printf("=== Thread Pool Tests ===\n");
-
     test_basic_create_destroy();
     test_config();
     test_submit_n_tasks();
@@ -1564,6 +1909,16 @@ int main(void)
     test_future_no_cancel_after_complete();
     test_task_group_cancel_propagation();
     test_concurrent_cancel_submit_race();
+    test_pipeline_basic();
+    test_pipeline_single();
+    test_pipeline_multiprod_cons();
+    test_pipeline_bounded();
+    test_pipeline_null_safety();
+    test_pipeline_submit_after_shutdown();
+    test_pipeline_pending_count();
+    test_pipeline_shutdown_waiting();
+    test_pipeline_destroy_then_submit();
+    test_pipeline_stress();
     test_priority_ordering();
     test_priority_future();
     test_metrics_callback();
