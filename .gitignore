@@ -9,3 +9,8 @@ Testing/
 vgcore.*
 
 compile_commands.json
+
+.cache/
+.omo/
+
+docs/superpowers/plans/
