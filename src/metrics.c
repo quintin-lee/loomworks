@@ -18,6 +18,8 @@ struct loom_metrics {
     _Atomic uint64_t submitted;
     _Atomic uint64_t completed;
     _Atomic uint64_t cancelled;
+    _Atomic uint64_t started;
+    _Atomic uint64_t failed;
     _Atomic uint64_t latency_sum_ns;
     _Atomic uint64_t latency_max_ns;
 };
@@ -107,6 +109,54 @@ uint64_t loom_metrics_latency_max_ns(const loom_metrics_t *metrics)
     return atomic_load(&metrics->latency_max_ns);
 }
 
+uint64_t loom_metrics_started(const loom_metrics_t *metrics)
+{
+    if (!metrics) {
+        return 0;
+    }
+    return atomic_load(&metrics->started);
+}
+
+uint64_t loom_metrics_failed(const loom_metrics_t *metrics)
+{
+    if (!metrics) {
+        return 0;
+    }
+    return atomic_load(&metrics->failed);
+}
+
+uint64_t loom_metrics_avg_latency_ns(const loom_metrics_t *metrics)
+{
+    if (!metrics) {
+        return 0;
+    }
+    uint64_t completed = atomic_load(&metrics->completed);
+    if (completed == 0) {
+        return 0;
+    }
+    return atomic_load(&metrics->latency_sum_ns) / completed;
+}
+
+loom_result_t
+loom_metrics_snapshot(const loom_metrics_t *metrics, loom_metrics_snapshot_t *out)
+{
+    if (!metrics || !out) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast) */
+    loom_metrics_t *m = (loom_metrics_t *)metrics;
+    pthread_mutex_lock(&m->lock);
+    out->submitted      = atomic_load(&m->submitted);
+    out->started        = atomic_load(&m->started);
+    out->completed      = atomic_load(&m->completed);
+    out->cancelled      = atomic_load(&m->cancelled);
+    out->failed         = atomic_load(&m->failed);
+    out->latency_sum_ns = atomic_load(&m->latency_sum_ns);
+    out->latency_max_ns = atomic_load(&m->latency_max_ns);
+    pthread_mutex_unlock(&m->lock);
+    return LOOMWORKS_OK;
+}
+
 void loom_metrics_record_latency(loom_metrics_t *metrics, uint64_t latency_ns)
 {
     if (!metrics) {
@@ -133,6 +183,12 @@ void loom_metrics_fire(loom_metrics_t *metrics, loom_metric_event_t event)
         break;
     case LOOMWORKS_METRIC_CANCELLED:
         atomic_fetch_add(&metrics->cancelled, 1);
+        break;
+    case LOOMWORKS_METRIC_STARTED:
+        atomic_fetch_add(&metrics->started, 1);
+        break;
+    case LOOMWORKS_METRIC_FAILED:
+        atomic_fetch_add(&metrics->failed, 1);
         break;
     default:
         break;

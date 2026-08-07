@@ -917,6 +917,46 @@ static void test_pool_health(void)
     loom_pool_destroy(&pool);
 }
 
+static void test_metrics_monitoring(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+    loom_metrics_t *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
+
+    int counter = 0;
+    for (int i = 0; i < 100; i++) {
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit");
+    }
+    loom_pool_shutdown(pool);
+
+    uint64_t started   = loom_metrics_started(metrics);
+    uint64_t completed = loom_metrics_completed(metrics);
+    ASSERT(started == 100, "started == 100");
+    ASSERT(completed == 100, "completed == 100");
+    ASSERT(loom_metrics_failed(metrics) == 0, "failed == 0");
+    ASSERT(loom_metrics_avg_latency_ns(metrics) > 0, "avg latency > 0");
+
+    loom_metrics_snapshot_t snap;
+    ASSERT(loom_metrics_snapshot(metrics, &snap) == LOOMWORKS_OK, "snapshot ok");
+    ASSERT(snap.submitted == 100, "snap submitted");
+    ASSERT(snap.started == 100, "snap started");
+    ASSERT(snap.completed == 100, "snap completed");
+    ASSERT(snap.cancelled == 0, "snap cancelled");
+    ASSERT(snap.failed == 0, "snap failed");
+    ASSERT(snap.latency_sum_ns == loom_metrics_latency_sum_ns(metrics), "snap sum matches");
+    ASSERT(snap.latency_max_ns == loom_metrics_latency_max_ns(metrics), "snap max matches");
+
+    ASSERT(loom_metrics_snapshot(NULL, &snap) == LOOMWORKS_ERR_INVALID, "snapshot null metrics");
+    ASSERT(loom_metrics_snapshot(metrics, NULL) == LOOMWORKS_ERR_INVALID, "snapshot null out");
+    ASSERT(loom_metrics_started(NULL) == 0, "null started");
+    ASSERT(loom_metrics_failed(NULL) == 0, "null failed");
+    ASSERT(loom_metrics_avg_latency_ns(NULL) == 0, "null avg");
+
+    loom_metrics_destroy(&metrics);
+    loom_pool_destroy(&pool);
+}
+
 /* ---------- Test: submit APIs return task IDs ---------- */
 static void test_submit_returns_task_id(void)
 {
@@ -2083,6 +2123,7 @@ int main(void)
     test_metrics_null_safety();
     test_metrics_latency();
     test_pool_health();
+    test_metrics_monitoring();
     test_submit_returns_task_id();
     test_task_id_uniqueness();
     test_cancel_by_id_not_found();

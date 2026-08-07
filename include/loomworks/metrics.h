@@ -79,6 +79,21 @@ uint64_t loom_metrics_completed(const loom_metrics_t *metrics);
 uint64_t loom_metrics_cancelled(const loom_metrics_t *metrics);
 
 /**
+ * @brief Get the number of started tasks (fires when a worker begins a task).
+ */
+uint64_t loom_metrics_started(const loom_metrics_t *metrics);
+
+/**
+ * @brief Get the number of failed tasks (reserved; always 0 for now).
+ */
+uint64_t loom_metrics_failed(const loom_metrics_t *metrics);
+
+/**
+ * @brief Get the average task execution latency in nanoseconds (0 when none completed).
+ */
+uint64_t loom_metrics_avg_latency_ns(const loom_metrics_t *metrics);
+
+/**
  * @brief Get the total task execution latency sum in nanoseconds.
  */
 uint64_t loom_metrics_latency_sum_ns(const loom_metrics_t *metrics);
@@ -87,6 +102,30 @@ uint64_t loom_metrics_latency_sum_ns(const loom_metrics_t *metrics);
  * @brief Get the maximum task execution latency in nanoseconds.
  */
 uint64_t loom_metrics_latency_max_ns(const loom_metrics_t *metrics);
+
+/**
+ * @brief Consistent cross-section of all metrics counters.
+ *
+ * Read with a single lock acquisition; all fields are mutually consistent.
+ */
+typedef struct {
+    uint64_t submitted;      /**< Tasks submitted. */
+    uint64_t started;        /**< Tasks that began execution. */
+    uint64_t completed;      /**< Tasks finished successfully. */
+    uint64_t cancelled;      /**< Tasks cancelled before execution. */
+    uint64_t failed;         /**< Tasks that failed (reserved). */
+    uint64_t latency_sum_ns; /**< Sum of execution latencies. */
+    uint64_t latency_max_ns; /**< Maximum execution latency. */
+} loom_metrics_snapshot_t;
+
+/**
+ * @brief Read a consistent snapshot of all counters.
+ *
+ * @param metrics  The metrics handle.
+ * @param out      Output snapshot.
+ * @return         LOOMWORKS_OK on success, LOOMWORKS_ERR_INVALID on NULL args.
+ */
+loom_result_t loom_metrics_snapshot(const loom_metrics_t *metrics, loom_metrics_snapshot_t *out);
 
 /**
  * @brief Record task execution latency in nanoseconds.
