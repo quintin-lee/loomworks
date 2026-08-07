@@ -28,6 +28,7 @@ typedef struct loom_task {
     uint64_t          task_id;   /**< Unique task identifier (assigned on submission). */
     uint8_t           priority;  /**< Task priority (lower = higher). */
     struct loom_task *next;      /**< Next node in the queue. */
+    bool              free_data; /**< true if user_data should be freed in task_destroy. */
 } loom_task_t;
 
 /* ================================================================

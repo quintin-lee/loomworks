@@ -235,6 +235,7 @@ task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t prior
         (uint64_t)atomic_fetch_add_explicit(&pool->next_task_id, 1, memory_order_relaxed) + 1;
     t->priority  = priority;
     t->cancelled = false;
+    t->free_data = false;
     t->next      = NULL;
     return t;
 }
@@ -548,6 +549,9 @@ loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
         return LOOMWORKS_ERR_INVALID;
     }
     loom_task_t *task = task_create(pool, future_task_wrapper, ctx, LOOMWORKS_PRIORITY_NORMAL);
+    if (task) {
+        task->free_data = true;
+    }
     if (!task) {
         pthread_mutex_unlock(&pool->lock);
         pthread_mutex_destroy(&fut->mutex);
@@ -669,6 +673,9 @@ loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
         return LOOMWORKS_ERR_INVALID;
     }
     loom_task_t *task = task_create(pool, future_task_wrapper, ctx, priority);
+    if (task) {
+        task->free_data = true;
+    }
     if (!task) {
         pthread_mutex_unlock(&pool->lock);
         pthread_mutex_destroy(&fut->mutex);
@@ -848,6 +855,9 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
             pool->queue_len--;
             loom_task_t *to_free = cur;
             pthread_mutex_unlock(&pool->lock);
+            if (to_free->free_data && to_free->user_data) {
+                free(to_free->user_data);
+            }
             task_destroy(to_free);
             metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
             return LOOMWORKS_OK;
@@ -894,6 +904,9 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
             pool->queue_len--;
             loom_task_t *to_free = cur;
             pthread_mutex_unlock(&pool->lock);
+            if (to_free->free_data && to_free->user_data) {
+                free(to_free->user_data);
+            }
             task_destroy(to_free);
             metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
             return LOOMWORKS_OK;
@@ -927,6 +940,9 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
         pool->queue_len  = 0;
         while (cur) {
             loom_task_t *next = cur->next;
+            if (cur->free_data && cur->user_data) {
+                free(cur->user_data);
+            }
             task_destroy(cur);
             cur = next;
             cancelled++;
