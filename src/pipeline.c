@@ -323,10 +323,22 @@ loom_result_t loom_pc_take(loom_pc_t *pc, void **item)
 
     /* Wait for delivery */
     pthread_mutex_lock(&w->lock);
+    /* Re-check shutdown: it may have been set between queue_lock unlock
+     * (above) and our own lock acquisition.  Without this, the consumer
+     * misses the sentinel and blocks forever. */
+    if (pc->shutdown && pc->queue_len == 0) {
+        w->done        = true;
+        w->item_out[0] = NULL;
+        pthread_cond_signal(&w->cond);
+        pthread_mutex_unlock(&w->lock);
+        pc_waiter_destroy(w);
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
     while (!w->done) {
         pthread_cond_wait(&w->cond, &w->lock);
     }
     pthread_mutex_unlock(&w->lock);
+    pc_waiter_destroy(w);
 
     if (*item == NULL && pc->shutdown) {
         /* Sentinel — no more items */
