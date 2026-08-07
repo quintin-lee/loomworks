@@ -13,7 +13,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__has_include) && __has_include(<valgrind/valgrind.h>)
 #include <valgrind/valgrind.h>
+#endif
 
 /* ================================================================
  *  Globals
@@ -129,7 +131,12 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
     size_t usable_sz     = usable_pg * ps;
     c->stack_start       = (char *)base + offset;
     c->stack_end         = (char *)base + offset + usable_sz;
+#ifdef VALGRIND_STACK_REGISTER
     c->valgrind_stack_id = (uintptr_t)VALGRIND_STACK_REGISTER(c->stack_start, c->stack_end);
+#else
+    (void)c->stack_start;
+    (void)c->stack_end;
+#endif
 
     if (mprotect(c->stack_start, usable_sz, PROT_READ | PROT_WRITE) != 0) {
         munmap(base, total_sz);
@@ -142,7 +149,9 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
 static void deallocate_stack(loom_coroutine_t *c)
 {
     if (c->mmap_base != NULL) {
+#ifdef VALGRIND_STACK_DEREGISTER
         VALGRIND_STACK_DEREGISTER((unsigned)c->valgrind_stack_id);
+#endif
         munmap(c->mmap_base, c->mmap_size);
         c->mmap_base = NULL;
         c->mmap_size = 0;
