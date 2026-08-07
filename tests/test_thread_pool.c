@@ -1375,6 +1375,115 @@ static void test_task_group_future_with_task_id(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: future cancel — cancel task before it runs ---------- */
+static void test_future_cancel_pending(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    /* Fill the queue with a slow task so the future task stays queued */
+    ASSERT(loom_pool_submit(pool, slow_task, NULL, NULL) == LOOMWORKS_OK, "submit slow task");
+
+    /* Give the worker time to pick up the slow task */
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+
+    /* Submit a future task */
+    loom_future_t *fut     = NULL;
+    uint64_t       task_id = 0;
+    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut, &task_id) == LOOMWORKS_OK,
+           "submit future");
+    ASSERT(fut != NULL, "future not null");
+    ASSERT(task_id > 0, "task_id returned");
+
+    /* Cancel the future's task while it's still queued */
+    ASSERT(loom_pool_cancel_by_id(pool, task_id) == LOOMWORKS_OK, "cancel future task");
+
+    /* The future should never complete — wait with a short timeout */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 200000000; /* 200ms */
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000;
+    }
+    loom_result_t rc = loom_future_wait_timeout(fut, NULL, &deadline);
+    ASSERT(rc == LOOMWORKS_ERR_TIMEOUT, "future times out when cancelled");
+
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: future not cancelled after task completes ---------- */
+static void test_future_no_cancel_after_complete(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_future_t *fut     = NULL;
+    uint64_t       task_id = 0;
+    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut, &task_id) == LOOMWORKS_OK,
+           "submit future");
+
+    /* Wait for completion */
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_OK, "wait future");
+    ASSERT(result != NULL, "result not null");
+    free(result);
+
+    /* Canceling after completion should fail */
+    ASSERT(loom_pool_cancel_by_id(pool, task_id) == LOOMWORKS_ERR_INVALID,
+           "cancel completed task fails");
+
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancellation propagation through task group ---------- */
+static void test_task_group_cancel_propagation(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+
+    /* Fill queue with slow task */
+    ASSERT(loom_task_group_submit(group, slow_task, NULL, NULL) == LOOMWORKS_OK, "submit slow");
+
+    struct timespec ts = {0, 50000000};
+    nanosleep(&ts, NULL);
+
+    /* Submit future task via group */
+    loom_future_t *fut     = NULL;
+    uint64_t       task_id = 0;
+    ASSERT(loom_task_group_submit_future(group, fast_result_task, NULL, &fut, &task_id) ==
+               LOOMWORKS_OK,
+           "submit future via group");
+    ASSERT(task_id > 0, "task_id returned from group");
+
+    /* Cancel via task group */
+    loom_task_group_cancel(group);
+
+    /* Future should never complete */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 200000000;
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000;
+    }
+    loom_result_t rc = loom_future_wait_timeout(fut, NULL, &deadline);
+    ASSERT(rc == LOOMWORKS_ERR_TIMEOUT, "group-cancelled future times out");
+
+    loom_future_destroy(fut);
+    loom_task_group_destroy(&group);
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -1410,6 +1519,9 @@ int main(void)
     test_task_group_submit_after_destroy();
     test_task_group_with_task_id();
     test_task_group_future_with_task_id();
+    test_future_cancel_pending();
+    test_future_no_cancel_after_complete();
+    test_task_group_cancel_propagation();
     test_priority_ordering();
     test_priority_future();
     test_metrics_callback();
