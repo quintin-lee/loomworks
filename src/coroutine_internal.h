@@ -34,7 +34,8 @@ struct loom_coroutine {
     void  *stack_start; /**< Start of the usable (mprotect'd) region. */
     void  *stack_end;   /**< End of the usable region (exclusive). */
 
-    uint64_t padding[6]; /**< Pad to 64-byte cache-line boundary. */
+    uintptr_t valgrind_stack_id; /**< Valgrind stack registration ID. */
+    uint64_t  padding[5];        /**< Pad to 64-byte cache-line boundary. */
 };
 
 /**

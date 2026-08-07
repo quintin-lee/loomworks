@@ -13,7 +13,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <pthread.h>
+#include <valgrind/valgrind.h>
 
 /* ================================================================
  *  Globals
@@ -125,10 +125,11 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
     c->mmap_size = total_sz;
 
     /* The usable region starts after the bottom guard pages. */
-    size_t offset    = guard_nb * ps;
-    size_t usable_sz = usable_pg * ps;
-    c->stack_start   = (char *)base + offset;
-    c->stack_end     = (char *)base + offset + usable_sz;
+    size_t offset        = guard_nb * ps;
+    size_t usable_sz     = usable_pg * ps;
+    c->stack_start       = (char *)base + offset;
+    c->stack_end         = (char *)base + offset + usable_sz;
+    c->valgrind_stack_id = (uintptr_t)VALGRIND_STACK_REGISTER(c->stack_start, c->stack_end);
 
     if (mprotect(c->stack_start, usable_sz, PROT_READ | PROT_WRITE) != 0) {
         munmap(base, total_sz);
@@ -141,12 +142,14 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
 static void deallocate_stack(loom_coroutine_t *c)
 {
     if (c->mmap_base != NULL) {
+        VALGRIND_STACK_DEREGISTER((unsigned)c->valgrind_stack_id);
         munmap(c->mmap_base, c->mmap_size);
         c->mmap_base = NULL;
         c->mmap_size = 0;
     }
-    c->stack_start = NULL;
-    c->stack_end   = NULL;
+    c->stack_start       = NULL;
+    c->stack_end         = NULL;
+    c->valgrind_stack_id = 0;
 }
 
 /* ================================================================
@@ -176,8 +179,8 @@ static bool ensure_scheduler(void)
     /* Track for cleanup. */
     scheduler_stack_node_t *node = (scheduler_stack_node_t *)malloc(sizeof(*node));
     if (node) {
-        node->stack  = g_scheduler_stack;
-        node->next   = g_scheduler_stacks;
+        node->stack        = g_scheduler_stack;
+        node->next         = g_scheduler_stacks;
         g_scheduler_stacks = node;
     }
     return true;
@@ -354,7 +357,7 @@ void loom_coro_exit(void)
         while (*pp) {
             if ((*pp)->stack == stack) {
                 scheduler_stack_node_t *node = *pp;
-                *pp = node->next;
+                *pp                          = node->next;
                 free(node);
                 break;
             }
@@ -367,7 +370,7 @@ void loom_coro_exit(void)
 static void free_all_scheduler_stacks(void)
 {
     scheduler_stack_node_t *cur = g_scheduler_stacks;
-    g_scheduler_stacks = NULL;
+    g_scheduler_stacks          = NULL;
     while (cur) {
         scheduler_stack_node_t *next = cur->next;
         free(cur->stack);
