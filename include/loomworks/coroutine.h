@@ -163,6 +163,19 @@ const char *loom_coro_result_str(loom_coro_result_t result);
  */
 void loom_coro_exit(void);
 
+/**
+ * @brief Install the SIGSEGV/SIGBUS guard-page handler.
+ *
+ * Idempotent: safe to call multiple times.  Automatically invoked
+ * by loom_coro_resume() so manual calls are rarely needed.
+ */
+void loom_coro_install_guard_handler(void);
+
+/**
+ * @brief Remove the guard-page handler and restore SIGSEGV/SIGBUS defaults.
+ */
+void loom_coro_uninstall_guard_handler(void);
+
 #ifdef __cplusplus
 }
 #endif
