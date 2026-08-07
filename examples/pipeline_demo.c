@@ -57,19 +57,41 @@ int main(void)
     uint64_t submitted = loom_pc_submitted_count(pc);
     printf("Submitted %llu items.\n", (unsigned long long)submitted);
 
+    struct timespec t_start, t_now;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+
     /* Signal shutdown — internal consumers drain remaining items
      * and then exit.  Destroy cleans up the internal pool. */
     loom_pc_shutdown(pc);
 
-    /* Wait until consumers truly drained everything: taken_count tracks
-     * every item actually dequeued by loom_pc_take(). */
+    /* Monitor: report drain progress every 50 items until consumers
+     * truly drained everything (taken_count tracks every item actually
+     * dequeued by loom_pc_take()). */
+    uint64_t next_report = 50;
     while (loom_pc_taken_count(pc) < submitted) {
+        uint64_t taken = loom_pc_taken_count(pc);
+        if (taken >= next_report) {
+            printf("  [monitor] drained %llu/%llu, pending %u\n",
+                   (unsigned long long)taken,
+                   (unsigned long long)submitted,
+                   loom_pc_pending_count(pc));
+            next_report += 50;
+        }
         struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000000}; /* 1 ms */
         nanosleep(&ts, NULL);
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &t_now);
+    double elapsed = (double)(t_now.tv_sec - t_start.tv_sec) +
+                     (double)(t_now.tv_nsec - t_start.tv_nsec) / 1e9;
+
+    uint32_t pending = loom_pc_pending_count(pc);
     uint64_t consumed = loom_pc_taken_count(pc);
     loom_pc_destroy(&pc);
+
+    printf("  [monitor] pending %u, elapsed %.3f s, throughput %.0f items/s\n",
+           pending, elapsed,
+           elapsed > 0.0 ? (double)consumed / elapsed : 0.0);
 
     if (consumed == submitted && consumed == (uint64_t)total_submitted) {
         printf("Consumed %llu items. PASS.\n", (unsigned long long)consumed);
