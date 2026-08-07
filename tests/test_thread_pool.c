@@ -889,6 +889,34 @@ static void test_metrics_latency(void)
     (void)max_ns;
 }
 
+static void test_pool_health(void)
+{
+    loom_pool_config_t cfg  = {.worker_count = 4, .queue_capacity = 0};
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    ASSERT(loom_pool_active_count(pool) == 0, "active 0 initially");
+    ASSERT(loom_pool_idle_count(pool) == 4, "idle == 4 initially");
+    ASSERT(loom_pool_utilization(pool) == 0.0, "util 0 initially");
+
+    int counter = 0;
+    for (int i = 0; i < 200; i++) {
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit");
+        uint32_t active = loom_pool_active_count(pool);
+        ASSERT(active <= 4, "active <= worker_count");
+        ASSERT(loom_pool_idle_count(pool) == 4 - active, "idle == worker_count - active");
+        double u = loom_pool_utilization(pool);
+        ASSERT(u >= 0.0 && u <= 1.0, "util in [0,1]");
+    }
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_active_count(pool) == 0, "active 0 after shutdown");
+
+    ASSERT(loom_pool_active_count(NULL) == 0, "null active");
+    ASSERT(loom_pool_idle_count(NULL) == 0, "null idle");
+    ASSERT(loom_pool_utilization(NULL) == 0.0, "null util");
+    loom_pool_destroy(&pool);
+}
+
 /* ---------- Test: submit APIs return task IDs ---------- */
 static void test_submit_returns_task_id(void)
 {
@@ -2054,6 +2082,7 @@ int main(void)
     test_metrics_callback();
     test_metrics_null_safety();
     test_metrics_latency();
+    test_pool_health();
     test_submit_returns_task_id();
     test_task_id_uniqueness();
     test_cancel_by_id_not_found();

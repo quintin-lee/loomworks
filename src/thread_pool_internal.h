@@ -108,6 +108,8 @@ struct loom_thread_pool {
     loom_task_t *free_list;         /**< Pooled task nodes (reused, cap bounded). */
     uint32_t     free_list_len;     /**< Number of nodes currently on free_list. */
 
+    _Atomic uint32_t active_workers; /**< Workers currently executing a task. */
+
     pthread_t       *threads;          /**< pthread_t array (one per worker). */
     uint32_t         max_worker_count; /**< Max capacity of threads array. */
     _Atomic uint64_t next_task_id;     /**< Monotonically increasing task ID counter. */

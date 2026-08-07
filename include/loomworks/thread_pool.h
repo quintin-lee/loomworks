@@ -220,6 +220,30 @@ uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool);
 uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool);
 
 /**
+ * @brief Get the number of workers currently executing a task.
+ *
+ * @param pool  The pool handle.
+ * @return      Active worker count, or 0 if pool is invalid.
+ */
+uint32_t loom_pool_active_count(const loom_thread_pool_t *pool);
+
+/**
+ * @brief Get the number of idle workers (worker_count - active).
+ *
+ * @param pool  The pool handle.
+ * @return      Idle worker count, or 0 if pool is invalid.
+ */
+uint32_t loom_pool_idle_count(const loom_thread_pool_t *pool);
+
+/**
+ * @brief Get pool utilization as active / worker_count (0.0 when worker_count == 0).
+ *
+ * @param pool  The pool handle.
+ * @return      Utilization in [0.0, 1.0], or 0.0 if pool is invalid.
+ */
+double loom_pool_utilization(const loom_thread_pool_t *pool);
+
+/**
  * @brief Wake all worker threads blocked on the pool condition variable.
  *
  * Use this when external state changes require workers to re-check conditions

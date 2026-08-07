@@ -121,6 +121,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     pool->queue_len        = 0;
     pool->free_list        = NULL;
     pool->free_list_len    = 0;
+    pool->active_workers   = 0;
     pool->metric_cb        = NULL;
     pool->metric_user_data = NULL;
     pool->metrics          = NULL;
@@ -226,6 +227,8 @@ static void *worker_entry(void *arg)
         }
         pthread_mutex_unlock(&pool->lock);
         if (task) {
+            atomic_fetch_add(&pool->active_workers, 1);
+            metrics_fire(pool, LOOMWORKS_METRIC_STARTED);
             if (pool->metrics) {
                 struct timespec ts_start;
                 clock_gettime(CLOCK_MONOTONIC, &ts_start);
@@ -239,6 +242,7 @@ static void *worker_entry(void *arg)
                 fn(data);
             }
             metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
+            atomic_fetch_sub(&pool->active_workers, 1);
         }
     }
     return NULL;
@@ -1147,6 +1151,48 @@ uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool)
     uint32_t n = pool->queue_len;
     pthread_mutex_unlock((pthread_mutex_t *)&pool->lock);
     return n;
+}
+
+/* ================================================================
+ *  loom_pool_active_count — number of workers executing a task.
+ *
+ *  Lock-free (relaxed atomic load); may lag briefly.  Returns 0
+ *  when @p pool is NULL.
+ * ================================================================ */
+uint32_t loom_pool_active_count(const loom_thread_pool_t *pool)
+{
+    if (!pool) {
+        return 0;
+    }
+    return atomic_load(&pool->active_workers);
+}
+
+/* ================================================================
+ *  loom_pool_idle_count — number of idle workers (worker_count - active).
+ *
+ *  Returns 0 when @p pool is NULL.
+ * ================================================================ */
+uint32_t loom_pool_idle_count(const loom_thread_pool_t *pool)
+{
+    if (!pool) {
+        return 0;
+    }
+    uint32_t wc     = pool->worker_count;
+    uint32_t active = atomic_load(&pool->active_workers);
+    return active >= wc ? 0 : wc - active;
+}
+
+/* ================================================================
+ *  loom_pool_utilization — active / worker_count in [0.0, 1.0].
+ *
+ *  Returns 0.0 when @p pool is NULL or has no workers.
+ * ================================================================ */
+double loom_pool_utilization(const loom_thread_pool_t *pool)
+{
+    if (!pool || pool->worker_count == 0) {
+        return 0.0;
+    }
+    return (double)atomic_load(&pool->active_workers) / (double)pool->worker_count;
 }
 
 /* ================================================================
