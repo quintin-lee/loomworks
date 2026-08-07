@@ -122,7 +122,7 @@ loom_result_t loom_task_group_submit(loom_task_group_t *group, loom_task_fn fn, 
         pthread_mutex_unlock(&group->lock);
         return LOOMWORKS_ERR_INVALID;
     }
-    loom_result_t rc = loom_pool_submit(group->pool, fn, data);
+    loom_result_t rc = loom_pool_submit(group->pool, fn, data, NULL);
     if (rc == LOOMWORKS_OK && data != NULL) {
         /* Track the submission so we can cancel it later. */
         task_group_node_t *node = task_group_node_create(data);
@@ -156,7 +156,7 @@ loom_result_t loom_task_group_submit_future(loom_task_group_t  *group,
         pthread_mutex_unlock(&group->lock);
         return LOOMWORKS_ERR_INVALID;
     }
-    loom_result_t rc = loom_pool_submit_future(group->pool, fn, data, future);
+    loom_result_t rc = loom_pool_submit_future(group->pool, fn, data, future, NULL);
     if (rc == LOOMWORKS_OK && data != NULL && future) {
         task_group_node_t *node = task_group_node_create(data);
         if (node) {

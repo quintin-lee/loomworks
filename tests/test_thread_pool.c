@@ -76,7 +76,7 @@ static void test_submit_n_tasks(void)
     int       counter = 0;
     const int N       = 1000;
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit(pool, simple_task, &counter) == LOOMWORKS_OK, "submit task");
+        ASSERT(loom_pool_submit(pool, simple_task, &counter, NULL) == LOOMWORKS_OK, "submit task");
     }
 
     loom_pool_shutdown(pool);
@@ -92,7 +92,7 @@ static void test_future_result(void)
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
     loom_future_t *future = NULL;
-    ASSERT(loom_pool_submit_future(pool, result_task, NULL, &future) == LOOMWORKS_OK,
+    ASSERT(loom_pool_submit_future(pool, result_task, NULL, &future, NULL) == LOOMWORKS_OK,
            "submit future");
     ASSERT(future != NULL, "future not null");
 
@@ -118,7 +118,7 @@ static void test_multiple_futures(void)
     const int      N = 50;
     loom_future_t *futures[N];
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit_future(pool, result_task, NULL, &futures[i]) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit_future(pool, result_task, NULL, &futures[i], NULL) == LOOMWORKS_OK,
                "submit future");
         ASSERT(futures[i] != NULL, "future not null");
     }
@@ -147,7 +147,7 @@ static void test_pending_count(void)
 
     int dummy = 0;
     for (int i = 0; i < 10; i++) {
-        loom_pool_submit(pool, simple_task, &dummy);
+        loom_pool_submit(pool, simple_task, &dummy, NULL);
     }
     (void)loom_pool_pending_count(pool);
 
@@ -160,8 +160,8 @@ static void test_pending_count(void)
 static void test_invalid_args(void)
 {
     ASSERT(loom_pool_create(NULL, NULL) != LOOMWORKS_OK, "null pool out");
-    ASSERT(loom_pool_submit(NULL, simple_task, NULL) != LOOMWORKS_OK, "null pool submit");
-    ASSERT(loom_pool_submit_future(NULL, result_task, NULL, NULL) != LOOMWORKS_OK,
+    ASSERT(loom_pool_submit(NULL, simple_task, NULL, NULL) != LOOMWORKS_OK, "null pool submit");
+    ASSERT(loom_pool_submit_future(NULL, result_task, NULL, NULL, NULL) != LOOMWORKS_OK,
            "null pool future");
     ASSERT(loom_future_wait(NULL, NULL) != LOOMWORKS_OK, "null future wait");
     loom_future_destroy(NULL);
@@ -178,9 +178,10 @@ static void test_submit_after_shutdown(void)
 
     int dummy = 0;
     /* Test submit error before shutdown (shutdown destroys the mutex) */
-    ASSERT(loom_pool_submit(pool, simple_task, &dummy) == LOOMWORKS_OK, "submit before shutdown");
+    ASSERT(loom_pool_submit(pool, simple_task, &dummy, NULL) == LOOMWORKS_OK,
+           "submit before shutdown");
     loom_pool_shutdown(pool);
-    ASSERT(loom_pool_submit(pool, simple_task, &dummy) == LOOMWORKS_ERR_SHUTDOWN,
+    ASSERT(loom_pool_submit(pool, simple_task, &dummy, NULL) == LOOMWORKS_ERR_SHUTDOWN,
            "submit after shutdown");
 
     loom_pool_destroy(&pool);
@@ -193,7 +194,7 @@ static void test_double_shutdown(void)
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
     int dummy = 0;
-    loom_pool_submit(pool, simple_task, &dummy);
+    loom_pool_submit(pool, simple_task, &dummy, NULL);
     loom_pool_shutdown(pool);
     loom_pool_shutdown(pool); /* should not crash */
     loom_pool_destroy(&pool);
@@ -211,7 +212,7 @@ static void *concurrent_submit_worker(void *arg)
 {
     concurrent_arg_t *s = (concurrent_arg_t *)arg;
     for (int i = 0; i < s->count; i++) {
-        loom_pool_submit(s->pool, simple_task, s->counter);
+        loom_pool_submit(s->pool, simple_task, s->counter, NULL);
     }
     free(s);
     return NULL;
@@ -256,7 +257,7 @@ static void *concurrent_future_submit_worker(void *arg)
     future_submit_arg_t *s = (future_submit_arg_t *)arg;
     for (int i = 0; i < s->count; i++) {
         loom_future_t *fut = NULL;
-        loom_pool_submit_future(s->pool, result_task, NULL, &fut);
+        loom_pool_submit_future(s->pool, result_task, NULL, &fut, NULL);
         if (fut) {
             void *result = NULL;
             loom_future_wait(fut, &result);
@@ -322,7 +323,7 @@ static void test_bounded_queue(void)
     int ok_count  = 0;
     int err_count = 0;
     for (int i = 0; i < 10; i++) {
-        loom_result_t rc = loom_pool_submit(pool, slow_task, NULL);
+        loom_result_t rc = loom_pool_submit(pool, slow_task, NULL, NULL);
         if (rc == LOOMWORKS_OK) {
             ok_count++;
         } else if (rc == LOOMWORKS_ERR_INVALID) {
@@ -348,7 +349,8 @@ static void test_no_data_task(void)
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
     for (int i = 0; i < 100; i++) {
-        ASSERT(loom_pool_submit(pool, no_data_task, NULL) == LOOMWORKS_OK, "submit no-data task");
+        ASSERT(loom_pool_submit(pool, no_data_task, NULL, NULL) == LOOMWORKS_OK,
+               "submit no-data task");
     }
 
     loom_pool_shutdown(pool);
@@ -373,7 +375,8 @@ static void test_future_wait_completed(void)
 
     /* Submit a fast task and wait immediately */
     loom_future_t *fut = NULL;
-    ASSERT(loom_pool_submit_future(pool, result_task, NULL, &fut) == LOOMWORKS_OK, "submit future");
+    ASSERT(loom_pool_submit_future(pool, result_task, NULL, &fut, NULL) == LOOMWORKS_OK,
+           "submit future");
 
     /* Wait should succeed even if task already completed */
     void *result = NULL;
@@ -410,7 +413,6 @@ static void *slow_result_task(void *arg)
     return NULL;
 }
 
-
 /* ---------- Test: cancel pending task ---------- */
 static void test_cancel(void)
 {
@@ -421,7 +423,7 @@ static void test_cancel(void)
      * Due to timing, the task may be running or still queued.
      * We verify the final outcome, not the exact cancel return value. */
     int counter = 0;
-    ASSERT(loom_pool_submit(pool, increment_task, &counter) == LOOMWORKS_OK, "submit inc");
+    ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit inc");
 
     /* Try to cancel — result depends on timing */
     loom_result_t rc = loom_pool_cancel(pool, &counter);
@@ -444,9 +446,9 @@ static void test_cancel_all(void)
     int counters[10];
     for (int i = 0; i < 10; i++) {
         counters[i] = 0;
-        ASSERT(loom_pool_submit(pool, increment_task, &counters[i]) == LOOMWORKS_OK, "submit task");
+        ASSERT(loom_pool_submit(pool, increment_task, &counters[i], NULL) == LOOMWORKS_OK,
+               "submit task");
     }
-
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
@@ -459,7 +461,7 @@ static void test_future_wait_timeout_ok(void)
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
     loom_future_t *fut = NULL;
-    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut) == LOOMWORKS_OK,
+    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut, NULL) == LOOMWORKS_OK,
            "submit future");
 
     struct timespec deadline;
@@ -486,7 +488,7 @@ static void test_future_wait_timeout_expired(void)
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
     loom_future_t *fut = NULL;
-    ASSERT(loom_pool_submit_future(pool, slow_result_task, NULL, &fut) == LOOMWORKS_OK,
+    ASSERT(loom_pool_submit_future(pool, slow_result_task, NULL, &fut, NULL) == LOOMWORKS_OK,
            "submit slow future");
 
     /* Deadline in the past */
@@ -577,8 +579,7 @@ static void test_task_group_destroy_cancels(void)
      * is still running when destroy is called.  Destroy cancels only
      * the queued tasks; the running one is expected to complete. */
     for (int i = 0; i < 5; i++) {
-        ASSERT(loom_task_group_submit(group, slow_task, NULL) == LOOMWORKS_OK,
-               "submit task");
+        ASSERT(loom_task_group_submit(group, slow_task, NULL) == LOOMWORKS_OK, "submit task");
     }
     /* Destroy without waiting — cancels pending queued tasks */
     loom_task_group_destroy(&group);
@@ -627,17 +628,17 @@ static void test_priority_ordering(void)
 
     /* Submit tasks in reverse priority order: low, normal, high, realtime */
     int order[4] = {0, 0, 0, 0};
-    ASSERT(loom_pool_submit_priority(pool, increment_task, &order[0], LOOMWORKS_PRIORITY_LOW) ==
-               LOOMWORKS_OK,
+    ASSERT(loom_pool_submit_priority(
+               pool, increment_task, &order[0], LOOMWORKS_PRIORITY_LOW, NULL) == LOOMWORKS_OK,
            "submit low");
-    ASSERT(loom_pool_submit_priority(pool, increment_task, &order[1], LOOMWORKS_PRIORITY_NORMAL) ==
-               LOOMWORKS_OK,
+    ASSERT(loom_pool_submit_priority(
+               pool, increment_task, &order[1], LOOMWORKS_PRIORITY_NORMAL, NULL) == LOOMWORKS_OK,
            "submit normal");
-    ASSERT(loom_pool_submit_priority(pool, increment_task, &order[2], LOOMWORKS_PRIORITY_HIGH) ==
-               LOOMWORKS_OK,
+    ASSERT(loom_pool_submit_priority(
+               pool, increment_task, &order[2], LOOMWORKS_PRIORITY_HIGH, NULL) == LOOMWORKS_OK,
            "submit high");
     ASSERT(loom_pool_submit_priority(
-               pool, increment_task, &order[3], LOOMWORKS_PRIORITY_REALTIME) == LOOMWORKS_OK,
+               pool, increment_task, &order[3], LOOMWORKS_PRIORITY_REALTIME, NULL) == LOOMWORKS_OK,
            "submit realtime");
 
     loom_pool_shutdown(pool);
@@ -659,7 +660,7 @@ static void test_priority_future(void)
 
     loom_future_t *fut = NULL;
     ASSERT(loom_pool_submit_future_priority(
-               pool, fast_result_task, NULL, LOOMWORKS_PRIORITY_HIGH, &fut) == LOOMWORKS_OK,
+               pool, fast_result_task, NULL, LOOMWORKS_PRIORITY_HIGH, &fut, NULL) == LOOMWORKS_OK,
            "submit priority future");
     ASSERT(fut != NULL, "future not null");
 
@@ -716,22 +717,22 @@ static void test_metrics_callback(void)
     /* Submit 4 tasks */
     int counter = 0;
     for (int i = 0; i < 4; i++) {
-        loom_pool_submit(pool, increment_task, &counter);
+        loom_pool_submit(pool, increment_task, &counter, NULL);
     }
     /* Submit 2 more and cancel them */
     int counters[2];
     for (int i = 0; i < 2; i++) {
         counters[i] = 0;
-        loom_pool_submit(pool, increment_task, &counters[i]);
+        loom_pool_submit(pool, increment_task, &counters[i], NULL);
     }
     loom_pool_cancel_all(pool, NULL);
 
     loom_pool_shutdown(pool);
 
     /* Read counters before destroy */
-    uint64_t submitted  = loom_metrics_submitted(metrics);
-    uint64_t completed  = loom_metrics_completed(metrics);
-    uint64_t cancelled  = loom_metrics_cancelled(metrics);
+    uint64_t submitted = loom_metrics_submitted(metrics);
+    uint64_t completed = loom_metrics_completed(metrics);
+    uint64_t cancelled = loom_metrics_cancelled(metrics);
 
     loom_metrics_destroy(&metrics);
     loom_pool_destroy(&pool);

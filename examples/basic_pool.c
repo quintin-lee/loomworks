@@ -34,13 +34,13 @@ int main(void)
 
     /* Fire-and-forget tasks */
     for (int i = 0; i < 5; i++) {
-        loom_pool_submit(pool, say_hello, &i);
+        loom_pool_submit(pool, say_hello, &i, NULL);
     }
 
     /* Future-based task */
     int n = 100;
     loom_future_t *fut = NULL;
-    if (loom_pool_submit_future(pool, compute, &n, &fut) == LOOMWORKS_OK) {
+    if (loom_pool_submit_future(pool, compute, &n, &fut, NULL) == LOOMWORKS_OK) {
         void *result = NULL;
         loom_future_wait(fut, &result);
         if (result) {

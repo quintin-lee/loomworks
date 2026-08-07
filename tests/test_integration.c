@@ -64,7 +64,7 @@ static void test_stress_pool(void)
     const int N       = 50000;
     int       counter = 0;
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit(pool, pool_task, &counter) == LOOMWORKS_OK, "submit task");
+        ASSERT(loom_pool_submit(pool, pool_task, &counter, NULL) == LOOMWORKS_OK, "submit task");
     }
 
     loom_pool_shutdown(pool);
@@ -117,7 +117,8 @@ static void test_pool_coro_interop(void)
         interop_arg_t *ia = (interop_arg_t *)malloc(sizeof(*ia));
         ia->counter       = &counter;
         ia->pool          = pool;
-        ASSERT(loom_pool_submit(pool, interop_task, ia) == LOOMWORKS_OK, "submit interop task");
+        ASSERT(loom_pool_submit(pool, interop_task, ia, NULL) == LOOMWORKS_OK,
+               "submit interop task");
     }
 
     loom_pool_shutdown(pool);
@@ -166,7 +167,7 @@ static void test_future_in_pool(void)
 
     for (int i = 0; i < N; i++) {
         loom_future_t *fut = NULL;
-        ASSERT(loom_pool_submit_future(pool, pool_result_task, NULL, &fut) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit_future(pool, pool_result_task, NULL, &fut, NULL) == LOOMWORKS_OK,
                "submit future");
         if (fut) {
             void *res = NULL;
@@ -216,7 +217,7 @@ static void test_pool_many_futures(void)
 
     loom_future_t *futures[N];
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit_future(pool, pool_result_task, NULL, &futures[i]) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit_future(pool, pool_result_task, NULL, &futures[i], NULL) == LOOMWORKS_OK,
                "submit future");
     }
 
@@ -292,7 +293,7 @@ static void test_bounded_queue_concurrent(void)
     const int N       = 100;
 
     for (int i = 0; i < N; i++) {
-        loom_result_t rc = loom_pool_submit(pool, pool_task, &counter);
+        loom_result_t rc = loom_pool_submit(pool, pool_task, &counter, NULL);
         if (rc != LOOMWORKS_OK) {
             /* Queue full — that's expected with capacity 20 and 4 workers */
             ASSERT(rc == LOOMWORKS_ERR_INVALID, "full queue returns ERR_INVALID");
@@ -317,7 +318,7 @@ static void test_yield_in_pool(void)
         interop_arg_t *ia = (interop_arg_t *)malloc(sizeof(*ia));
         ia->counter       = &counter;
         ia->pool          = pool;
-        loom_pool_submit(pool, interop_task, ia);
+        loom_pool_submit(pool, interop_task, ia, NULL);
     }
 
     loom_pool_shutdown(pool);
@@ -343,13 +344,15 @@ static void test_large_stack_coroutines(void)
     ASSERT(counter == N, "large stack coroutines completed");
 }
 
-
 /* ---------- Test: concurrent metrics accuracy ---------- */
-static void noop_task(void *arg) { (void)arg; }
+static void noop_task(void *arg)
+{
+    (void)arg;
+}
 static void test_metrics_concurrent(void)
 {
-    loom_thread_pool_t *pool  = NULL;
-    loom_pool_config_t  cfg   = {.worker_count = 8, .queue_capacity = 0};
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 8, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create metrics pool");
 
     loom_metrics_t *metrics = NULL;
@@ -358,7 +361,7 @@ static void test_metrics_concurrent(void)
 
     const int N = 10000;
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit(pool, noop_task, NULL) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit(pool, noop_task, NULL, NULL) == LOOMWORKS_OK,
                "submit during metrics stress");
     }
 
