@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expanded Notes section in README.md with signal handler and scheduler details
 - Complete usage example in docs/api-reference.md
 - Future work section in docs/design-decisions.md
+- `--queue-depth` benchmark scenario with JSON output (`examples/bench`)
+- `tools/bench_compare.py` — A/B queue-depth regression comparator
+- CI performance gate (`perf.yml`) — compares queue-depth throughput against base ref at a 15% regression threshold
 
 ### Changed
 - All API prefixes: `ctpool_` -> `loom_`, `CTPPOOL_` -> `LOOMWORKS_`
@@ -24,9 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Main header: `ctpool.h` -> `loomworks.h`
 - CMake project name: `ctpool` -> `loomworks`
 - Library output: `libctpool.a` -> `libloomworks.a`
+- Task queue redesigned from O(n) single linked list to O(1) per-priority FIFO buckets with a 256-bit occupancy bitmap (enqueue and dequeue now constant time)
+- Task nodes pooled on a bounded free-list (`LOOMWORKS_NODE_POOL_CAP`) to cut alloc/free churn on submit/drain
+- `clock_gettime` calls in the worker loop now lazy: only invoked when metrics collection is enabled (zero overhead otherwise)
 
 ### Fixed
 - Fixed misleading blocks syntax (`^()`) in README examples; replaced with standard C function pointers
+- `bench_future_overhead` hung at shutdown: future pool destroyed without a prior `loom_pool_shutdown` (contract violation); now shuts down before destroy
 
 ---
 

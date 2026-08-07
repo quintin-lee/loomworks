@@ -37,14 +37,16 @@ The two subsystems share the same API conventions (opaque pointers, result codes
         ┌───────────────────┼───────────────────┐
         ▼                   ▼                   ▼
 ┌───────────────┐  ┌───────────────┐  ┌────────────────┐
-│  lock + cond  │  │  linked list  │  │  worker[]     │
-│  (cache line 0)│ │  (queue head) │  │  (per-index   │
+│  lock + cond  │  │ 256 priority  │  │  worker[]     │
+│  (cache line 0)│ │  buckets       │  │  (per-index   │
 ├───────────────┤  ├───────────────┤  │   worker_ctx) │
-│  drain_cond   │  │  (queue tail) │  ├───────────────┤
-│ (cache line 2)│  │  (queue_len)  │  │  task_queue_* │
-└───────────────┘  └───────────────┘  │  [cache line  │
-                                       │   3,4...]      │
-                                       └───────────────┘
+│  drain_cond   │  │  256-bit      │  ├───────────────┤
+│ (cache line 2)│  │  occupancy    │  │  task_queue_* │
+└───────────────┘  │  bitmap       │  │  [cache line  │
+                   ├───────────────┤  │   3,4...]      │
+                   │  free_list    │  └───────────────┘
+                   │  (node pool)  │
+                   └───────────────┘
 ```
 
 ### 2.2 Cache-Line Layout
@@ -59,9 +61,14 @@ struct loom_thread_pool {
     bool            draining;
 
     // ── Queue (frequently read/written, independent cache line) ──
-    loom_task_t  *queue_head;                                      // cache line 3
-    loom_task_t  *queue_tail;
-    uint32_t        queue_len;
+    loom_task_t  *buckets_head[256];  // per-priority FIFO bucket heads
+    loom_task_t  *buckets_tail[256];  // per-priority FIFO bucket tails
+    uint64_t       nonempty_bits[4];  // 256-bit occupancy bitmap
+    uint32_t       queue_len;
+
+    // ── Node pool (reuses task nodes to cut alloc/free churn) ──
+    loom_task_t  *free_list;          // pooled task nodes (LIFO)
+    uint32_t       free_list_len;     // bounded by LOOMWORKS_NODE_POOL_CAP
 
     // ── Worker array (each worker独占 its own cache line) ──
     loom_worker_ctx_t workers[];
@@ -82,9 +89,17 @@ struct loom_worker_ctx {
 submit() ──► task_create() ──► enqueue() ──► worker dequeue()
     │              │                  │                │
     ▼              ▼                  ▼                ▼
-  User call    malloc alloc      lock+insert        lock+remove
-                                           call fn(data)
-                                           free task node
+  User call    pool pop or      lock + append    lock + ctz pop
+              malloc alloc     to priority      lowest non-empty
+                               bucket (O(1))    bucket (O(1))
+                                                    │
+                                                    ▼
+                                               call fn(data)
+                                                    │
+                                                    ▼
+                                              task_destroy()
+                                              free-list push
+                                              or free node
 ```
 
 ### 2.4 Shutdown Flow
@@ -209,7 +224,7 @@ guard_handler(sig, info, uctx)
 - **Condition variables**:
   - `cond` — workers block waiting for new tasks; main thread signals after submit
   - `drain_cond` — main thread waits after shutdown for all workers to join
-- **Lock-free queue ops**: `loom_enqueue_unlocked()` / `loom_dequeue_unlocked()` must be called while holding the lock
+- **Lock-free queue ops**: `loom_enqueue_unlocked()` / `loom_dequeue_unlocked()` must be called while holding the lock; both are O(1) (bucket tail append / bitmap `ctz` pop)
 
 ### 4.2 Coroutines
 
@@ -242,7 +257,7 @@ loom_pool_create()
   └─ pthread_mutex_init / pthread_cond_init × 3
 
 loom_pool_submit()
-  └─ malloc(sizeof(loom_task_t))               ← per-task node
+  └─ loom_task_create(): pop from pool free_list (if any), else malloc(sizeof(loom_task_t))
 
 loom_pool_submit_future()
   ├─ calloc(1, sizeof(loom_future_t))          ← future structure
@@ -251,7 +266,7 @@ loom_pool_submit_future()
   └─ malloc(sizeof(future_task_ctx_t))            ← task wrapper context
 
 loom_pool_destroy()
-  ├─ Traverse and free all task nodes in queue
+  ├─ Traverse and free all task nodes in buckets + free_list
   ├─ pthread_cond_destroy × 2
   ├─ pthread_mutex_destroy
   ├─ free(threads)

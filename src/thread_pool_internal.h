@@ -17,13 +17,14 @@
 #define LOOMWORKS_NODE_POOL_CAP 4096
 
 /* ================================================================
- *  Task node — singly-linked list element in the pool queue.
+ *  Task node — element of a per-priority FIFO bucket in the queue.
  * ================================================================ */
 /**
  * @brief Internal task queue node.
  *
  * Each pending task is wrapped in a loom_task_t and appended to the
- * tail of a singly-linked list.  Workers dequeue from the head.
+ * tail of its priority bucket (buckets_tail[priority]).  Workers
+ * dequeue from the head of the lowest non-empty bucket.
  */
 typedef struct loom_task {
     loom_task_fn      fn;        /**< Task function to execute. */
