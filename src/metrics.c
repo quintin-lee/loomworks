@@ -18,6 +18,8 @@ struct loom_metrics {
     _Atomic uint64_t submitted;
     _Atomic uint64_t completed;
     _Atomic uint64_t cancelled;
+    _Atomic uint64_t latency_sum_ns;
+    _Atomic uint64_t latency_max_ns;
 };
 
 loom_result_t
@@ -36,6 +38,8 @@ loom_metrics_create(loom_thread_pool_t *pool, loom_metric_fn cb, void *data, loo
     atomic_store(&m->submitted, 0);
     atomic_store(&m->completed, 0);
     atomic_store(&m->cancelled, 0);
+    atomic_store(&m->latency_sum_ns, 0);
+    atomic_store(&m->latency_max_ns, 0);
     /* Register callback on the pool via public API */
     if (pool) {
         loom_pool_set_metrics_callback(pool, cb, data);
@@ -87,6 +91,34 @@ uint64_t loom_metrics_cancelled(const loom_metrics_t *metrics)
         return 0;
     }
     return atomic_load(&metrics->cancelled);
+}
+
+uint64_t loom_metrics_latency_sum_ns(const loom_metrics_t *metrics)
+{
+    if (!metrics) {
+        return 0;
+    }
+    return atomic_load(&metrics->latency_sum_ns);
+}
+
+uint64_t loom_metrics_latency_max_ns(const loom_metrics_t *metrics)
+{
+    if (!metrics) {
+        return 0;
+    }
+    return atomic_load(&metrics->latency_max_ns);
+}
+
+void loom_metrics_record_latency(loom_metrics_t *metrics, uint64_t latency_ns)
+{
+    if (!metrics) {
+        return;
+    }
+    atomic_fetch_add(&metrics->latency_sum_ns, latency_ns);
+    uint64_t old_max = atomic_load(&metrics->latency_max_ns);
+    while (latency_ns > old_max &&
+           !atomic_compare_exchange_weak(&metrics->latency_max_ns, &old_max, latency_ns))
+        ;
 }
 
 void loom_metrics_fire(loom_metrics_t *metrics, loom_metric_event_t event)

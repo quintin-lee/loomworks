@@ -22,6 +22,7 @@ extern "C" {
  */
 typedef enum {
     LOOMWORKS_METRIC_SUBMITTED, /**< A task was submitted. */
+    LOOMWORKS_METRIC_STARTED,   /**< A task started executing. */
     LOOMWORKS_METRIC_COMPLETED, /**< A task finished successfully. */
     LOOMWORKS_METRIC_CANCELLED, /**< A task was cancelled before execution. */
     LOOMWORKS_METRIC_FAILED,    /**< A task raised an exception (reserved). */
@@ -76,6 +77,23 @@ uint64_t loom_metrics_completed(const loom_metrics_t *metrics);
  * @brief Get the number of cancelled tasks.
  */
 uint64_t loom_metrics_cancelled(const loom_metrics_t *metrics);
+
+/**
+ * @brief Get the total task execution latency sum in nanoseconds.
+ */
+uint64_t loom_metrics_latency_sum_ns(const loom_metrics_t *metrics);
+
+/**
+ * @brief Get the maximum task execution latency in nanoseconds.
+ */
+uint64_t loom_metrics_latency_max_ns(const loom_metrics_t *metrics);
+
+/**
+ * @brief Record task execution latency in nanoseconds.
+ *
+ * Thread-safe; called from worker threads after task completion.
+ */
+void loom_metrics_record_latency(loom_metrics_t *metrics, uint64_t latency_ns);
 
 /**
  * @brief Register a metrics callback on the pool.

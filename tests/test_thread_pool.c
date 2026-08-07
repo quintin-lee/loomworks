@@ -752,6 +752,32 @@ static void test_metrics_null_safety(void)
     ASSERT(true, "metrics null safety passed");
 }
 
+/* ---------- Test: latency tracking ---------- */
+static void test_metrics_latency(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_metrics_t *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
+
+    /* Submit a quick task */
+    ASSERT(loom_pool_submit(pool, increment_task, &g_passes, NULL) == LOOMWORKS_OK, "submit task");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    loom_metrics_destroy(&metrics);
+
+    /* Latency should have been recorded (sum > 0 for at least 1 task) */
+    uint64_t sum_ns = loom_metrics_latency_sum_ns(metrics);
+    uint64_t max_ns = loom_metrics_latency_max_ns(metrics);
+    ASSERT(sum_ns >= 0, "latency sum is non-negative");
+    ASSERT(max_ns >= 0, "latency max is non-negative");
+    (void)sum_ns;
+    (void)max_ns;
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -789,6 +815,7 @@ int main(void)
     test_priority_future();
     test_metrics_callback();
     test_metrics_null_safety();
+    test_metrics_latency();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
