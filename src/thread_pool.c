@@ -118,7 +118,8 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     pool->metrics          = NULL;
     atomic_store_explicit(&pool->next_task_id, 1, memory_order_relaxed);
 
-    pool->threads = (pthread_t *)calloc(pool->worker_count, sizeof(pthread_t));
+    pool->max_worker_count = pool->worker_count;
+    pool->threads = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
     if (!pool->threads) {
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
@@ -168,11 +169,24 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
  *    2. Otherwise dequeue one task (under lock), run it outside the
  *       lock to maximise concurrency.
  * ================================================================ */
+typedef struct {
+    loom_thread_pool_t *pool;
+    uint32_t            index;
+} worker_arg_t;
+
 static void *worker_entry(void *arg)
 {
-    loom_thread_pool_t *pool = (loom_thread_pool_t *)arg;
+    worker_arg_t     *wa  = (worker_arg_t *)arg;
+    loom_thread_pool_t *pool = wa->pool;
+    uint32_t            idx  = wa->index;
+    free(wa);
     while (1) {
         pthread_mutex_lock(&pool->lock);
+        /* If resized down, exit when our index is beyond the new count. */
+        if (idx >= pool->worker_count && !pool->shutdown) {
+            pthread_mutex_unlock(&pool->lock);
+            break;
+        }
         /* Spin until work arrives or shutdown is signalled. */
         while (pool->queue_len == 0 && !pool->shutdown) {
             pthread_cond_wait(&pool->cond, &pool->lock);
@@ -340,7 +354,19 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
         return rc;
     }
     for (uint32_t i = 0; i < p->worker_count; i++) {
-        int rc2 = pthread_create(&p->threads[i], NULL, worker_entry, p);
+        worker_arg_t *wa = (worker_arg_t *)malloc(sizeof(*wa));
+        if (!wa) {
+            p->shutdown = true;
+            pthread_cond_broadcast(&p->cond);
+            for (uint32_t j = 0; j < i; j++) {
+                pthread_join(p->threads[j], NULL);
+            }
+            pool_destroy_internal(p);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        wa->pool = p;
+        wa->index = i;
+        int rc2 = pthread_create(&p->threads[i], NULL, worker_entry, wa);
         if (rc2 != 0) {
             fprintf(stderr, "loomworks: pthread_create failed: %s\n", strerror(rc2));
             p->shutdown = true;
@@ -779,7 +805,7 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
     pool->draining = true;
     pthread_cond_broadcast(&pool->cond);
     pthread_mutex_unlock(&pool->lock);
-    for (uint32_t i = 0; i < pool->worker_count; i++) {
+    for (uint32_t i = 0; i < pool->max_worker_count; i++) {
         pthread_join(pool->threads[i], NULL);
     }
     pthread_mutex_lock(&pool->lock);
@@ -961,6 +987,74 @@ void loom_pool_destroy(loom_thread_pool_t **pool)
     }
     pool_destroy_internal(*pool);
     *pool = NULL;
+}
+
+
+/* ================================================================
+ *  loom_pool_resize — dynamically adjust the number of worker threads.
+ *
+ *  Growing: new threads are created and appended to the pool.
+ *  Shrinking: excess threads (beyond the new count) exit when idle.
+ *            Workers currently executing tasks are NOT interrupted.
+ *
+ *  Must not be called after loom_pool_shutdown().
+ *
+ *  @param pool     The pool handle.
+ *  @param count    New number of worker threads.
+ *  @return         LOOMWORKS_OK on success, error code otherwise.
+ * ================================================================ */
+loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
+{
+    if (!pool) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    if (count == pool->worker_count) {
+        return LOOMWORKS_OK;
+    }
+    pthread_mutex_lock(&pool->lock);
+    if (pool->shutdown) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
+    if (count > pool->max_worker_count) {
+        /* Need to grow the threads array. */
+        pthread_t *new_threads = (pthread_t *)realloc(pool->threads,
+                                                       count * sizeof(pthread_t));
+        if (!new_threads) {
+            pthread_mutex_unlock(&pool->lock);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        pool->threads      = new_threads;
+        pool->max_worker_count = count;
+    }
+    uint32_t old_count = pool->worker_count;
+    pool->worker_count = count;
+    if (count > old_count) {
+        /* Start new worker threads. */
+        for (uint32_t i = old_count; i < count; i++) {
+            worker_arg_t *wa = (worker_arg_t *)malloc(sizeof(*wa));
+            if (!wa) {
+                /* Roll back: restore old count and break. */
+                pool->worker_count = old_count;
+                pthread_mutex_unlock(&pool->lock);
+                return LOOMWORKS_ERR_ALLOC;
+            }
+            wa->pool = pool;
+            wa->index = i;
+            int rc = pthread_create(&pool->threads[i], NULL, worker_entry, wa);
+            if (rc != 0) {
+                free(wa);
+                pool->worker_count = old_count;
+                pthread_mutex_unlock(&pool->lock);
+                fprintf(stderr, "loomworks: pthread_create failed: %s\n", strerror(rc));
+                return LOOMWORKS_ERR_THREAD;
+            }
+        }
+    }
+    /* Broadcast to wake idle workers so they can re-check worker_count. */
+    pthread_cond_broadcast(&pool->cond);
+    pthread_mutex_unlock(&pool->lock);
+    return LOOMWORKS_OK;
 }
 
 /* ================================================================

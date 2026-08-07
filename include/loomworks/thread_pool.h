@@ -245,6 +245,20 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data);
  * @return         LOOMWORKS_OK if cancelled, LOOMWORKS_ERR_INVALID if not found.
  */
 loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id);
+
+/**
+ * @brief Dynamically resize the pool to @p count worker threads.
+ *
+ * Growing adds new threads; shrinking stops excess idle workers.
+ * Workers currently executing tasks are NOT interrupted.
+ * Must not be called after loom_pool_shutdown().
+ *
+ * @param pool  The pool handle.
+ * @param count New number of worker threads.
+ * @return      LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count);
+
 /**
  * @brief Cancel all tasks currently waiting in the queue.
  *

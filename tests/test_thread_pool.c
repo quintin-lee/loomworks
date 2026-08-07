@@ -1186,6 +1186,67 @@ static void test_submit_blocking_null_safety(void)
     loom_pool_destroy(&pool);
 }
 
+
+/* ---------- Test: loom_pool_resize grow ---------- */
+static void test_resize_grow(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_pool_worker_count(pool) == 2, "initial worker count = 2");
+
+    /* Grow to 4 workers */
+    ASSERT(loom_pool_resize(pool, 4) == LOOMWORKS_OK, "resize to 4");
+    ASSERT(loom_pool_worker_count(pool) == 4, "worker count = 4 after grow");
+
+    /* Verify new workers are functional */
+    int counter = 0;
+    for (int i = 0; i < 100; i++) {
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit task");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(counter == 100, "all tasks executed after grow");
+}
+
+/* ---------- Test: loom_pool_resize shrink ---------- */
+static void test_resize_shrink(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_pool_worker_count(pool) == 4, "initial worker count = 4");
+
+    /* Shrink to 2 workers */
+    ASSERT(loom_pool_resize(pool, 2) == LOOMWORKS_OK, "resize to 2");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count = 2 after shrink");
+
+    /* Submit tasks — should still complete with fewer workers */
+    int counter = 0;
+    for (int i = 0; i < 50; i++) {
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit task");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(counter == 50, "all tasks executed after shrink");
+}
+
+/* ---------- Test: loom_pool_resize after shutdown ---------- */
+static void test_resize_after_shutdown(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_resize(pool, 4) == LOOMWORKS_ERR_SHUTDOWN, "resize after shutdown fails");
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: loom_pool_resize null safety ---------- */
+static void test_resize_null_safety(void)
+{
+    ASSERT(loom_pool_resize(NULL, 4) == LOOMWORKS_ERR_INVALID, "resize null pool");
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -1242,6 +1303,10 @@ int main(void)
     test_submit_blocking_with_id();
     test_submit_blocking_after_shutdown();
     test_submit_blocking_null_safety();
+    test_resize_grow();
+    test_resize_shrink();
+    test_resize_after_shutdown();
+    test_resize_null_safety();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

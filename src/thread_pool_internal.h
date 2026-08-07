@@ -96,6 +96,7 @@ struct loom_thread_pool {
     uint32_t     queue_len;  /**< Current number of pending tasks. */
 
     pthread_t       *threads;      /**< pthread_t array (one per worker). */
+    uint32_t         max_worker_count; /**< Max capacity of threads array. */
     _Atomic uint64_t next_task_id; /**< Monotonically increasing task ID counter. */
     void            *metrics;      /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback fields to avoid circular dependency */
