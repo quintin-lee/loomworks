@@ -160,12 +160,13 @@ The following enhancements are planned for future releases:
 
 | Item | Description | Priority |
 |------|-------------|----------|
-| **Resizable worker pool** | Add `loom_pool_resize()` to adjust worker count at runtime | Medium |
-| **Task priority queue** | Support priority-based task scheduling (high/normal/low) | Low |
-| **Epoch-based reclamation** | Replace linked-list task queue with lock-free epoch-based structure | Low |
+| **Task priority queue** | Bucketized per-priority FIFO queue (256 buckets + occupancy bitmap), O(1) enqueue/dequeue — **DONE (2026-08-08)** | — |
+| **Profiling hooks** | Metrics API: submitted/started/completed/cancelled/failed counters, latency, snapshot — **DONE (2026-08-08)** | — |
+| **Pool runtime health** | `loom_pool_active_count` / `idle_count` / `utilization` — **DONE (2026-08-08)** | — |
+| **Resizable worker pool** | `loom_pool_resize()` implemented and tested — **DONE** | — |
+| **Epoch-based reclamation** | Superseded by the bucketized O(1) queue + bounded node pool (no linked-list tail scan to reclaim) — **CLOSED (2026-08-08)** | — |
 | **Coroutine pooling** | Pre-allocate and reuse coroutine contexts to reduce mmap overhead | Medium |
 | **Windows support** | Port to Windows using SwitchToThread + VirtualAlloc | Low |
-| **Profiling hooks** | Add optional callbacks for task submission/duration metrics | Low |
 | **Valgrind integration** | Register coroutine stacks with Valgrind to eliminate false leaks | Medium |
 
 ---

@@ -79,11 +79,17 @@ void            loom_future_destroy(loom_future_t *future);
 void loom_pool_shutdown(loom_thread_pool_t *pool);
 uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool);
 uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool);
+uint32_t loom_pool_active_count(const loom_thread_pool_t *pool);
+uint32_t loom_pool_idle_count(const loom_thread_pool_t *pool);
+double loom_pool_utilization(const loom_thread_pool_t *pool);
 ```
 
 - `shutdown()`: Blocks until all submitted tasks complete, then joins all worker threads
 - `worker_count()`: Returns the actual number of worker threads created (including auto-computed value)
 - `pending_count()`: Returns the current number of tasks waiting in the queue (may be inaccurate due to concurrent operations)
+- `active_count()`: Returns the number of workers currently executing a task (lock-free, may lag briefly)
+- `idle_count()`: Returns `worker_count - active_count`, clamped at 0
+- `utilization()`: Returns `active_count / worker_count` in `[0.0, 1.0]`
 
 ### 1.5 Configuration Structure
 
@@ -94,6 +100,28 @@ typedef struct {
     uint32_t queue_capacity;   /* 0 = unbounded, max 1M */
 } loom_pool_config_t;
 ```
+
+### 1.6 Metrics API
+
+```c
+loom_result_t loom_metrics_create(loom_thread_pool_t *pool, loom_metric_fn cb, void *data, loom_metrics_t **out);
+void loom_metrics_destroy(loom_metrics_t **metrics);
+uint64_t loom_metrics_submitted(const loom_metrics_t *metrics);
+uint64_t loom_metrics_started(const loom_metrics_t *metrics);
+uint64_t loom_metrics_completed(const loom_metrics_t *metrics);
+uint64_t loom_metrics_cancelled(const loom_metrics_t *metrics);
+uint64_t loom_metrics_failed(const loom_metrics_t *metrics);
+uint64_t loom_metrics_latency_sum_ns(const loom_metrics_t *metrics);
+uint64_t loom_metrics_latency_max_ns(const loom_metrics_t *metrics);
+uint64_t loom_metrics_avg_latency_ns(const loom_metrics_t *metrics);
+loom_result_t loom_metrics_snapshot(const loom_metrics_t *metrics, loom_metrics_snapshot_t *out);
+```
+
+- `create()`: Attach a metrics collector to a pool; optional per-event callback
+- `started()`: Tasks that began execution (fires when a worker picks up a task)
+- `failed()`: Tasks that failed (reserved; always 0 for now)
+- `avg_latency_ns()`: `latency_sum / completed`, or 0 when nothing completed
+- `snapshot()`: Read all counters under a single lock acquisition into a `loom_metrics_snapshot_t` (mutually consistent fields: `submitted`, `started`, `completed`, `cancelled`, `failed`, `latency_sum_ns`, `latency_max_ns`)
 
 ---
 
