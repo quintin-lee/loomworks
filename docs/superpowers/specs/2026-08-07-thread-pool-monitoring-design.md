@@ -1,7 +1,7 @@
 # Thread Pool Monitoring Improvements — Design
 
 **Date:** 2026-08-07
-**Status:** Approved (Approach C)
+**Status:** Approved (Approach C) — scope amended 2026-08-08 (add Future Work table cleanup)
 **Library:** loomworks (C11 thread pool + pipeline library)
 
 ## 1. Motivation
@@ -145,6 +145,10 @@ the racy multi-`atomic_load` cross-section. No new lock required.
 - `examples/monitor_demo.c` — new example
 - `CMakeLists.txt` — register target
 - `docs/api-reference.md` — update
+- `docs/design-decisions.md` — refresh stale Future Work table (Section 11): mark
+  "Task priority queue" and "Profiling hooks" done; note "Epoch-based reclamation"
+  superseded by the bucketized O(1) queue + node pool (landed 2026-08-08);
+  keep resizable pool / coroutine pooling / Windows / Valgrind as open items
 
 ## 8. Out of scope (YAGNI)
 
