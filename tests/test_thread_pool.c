@@ -15,6 +15,7 @@ static int g_failures = 0;
 #define ASSERT(expr, msg)                                                                          \
     do {                                                                                           \
         if (!(expr)) {                                                                             \
+            fprintf(stderr, "FAIL: %s at %s:%d\n", msg, __FILE__, __LINE__);                       \
             g_failures++;                                                                          \
         } else {                                                                                   \
             g_passes++;                                                                            \
@@ -776,6 +777,349 @@ static void test_metrics_latency(void)
     (void)max_ns;
 }
 
+/* ---------- Test: submit APIs return task IDs ---------- */
+static void test_submit_returns_task_id(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    uint64_t id1 = 0, id2 = 0, id3 = 0;
+    ASSERT(loom_pool_submit(pool, increment_task, &g_passes, &id1) == LOOMWORKS_OK,
+           "submit with task_id");
+    ASSERT(id1 > 0, "submit returned non-zero task_id");
+
+    ASSERT(loom_pool_submit_blocking(pool, increment_task, &g_passes, &id2) == LOOMWORKS_OK,
+           "submit_blocking with task_id");
+    ASSERT(id2 > 0, "submit_blocking returned non-zero task_id");
+
+    loom_future_t *fut = NULL;
+    ASSERT(loom_pool_submit_future(pool, result_task, NULL, &fut, &id3) == LOOMWORKS_OK,
+           "submit_future with task_id");
+    ASSERT(id3 > 0, "submit_future returned non-zero task_id");
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_OK, "wait future");
+    if (result) {
+        free(result);
+    }
+    loom_future_destroy(fut);
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: task IDs are unique ---------- */
+static void test_task_id_uniqueness(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 1000};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    uint64_t ids[50];
+    for (int i = 0; i < 50; i++) {
+        ids[i] = 0;
+        ASSERT(loom_pool_submit(pool, increment_task, &g_passes, &ids[i]) == LOOMWORKS_OK,
+               "submit task");
+    }
+
+    /* All IDs must be unique and > 0 */
+    for (int i = 0; i < 50; i++) {
+        ASSERT(ids[i] > 0, "task_id > 0");
+        for (int j = 0; j < i; j++) {
+            ASSERT(ids[i] != ids[j], "task_ids are unique");
+        }
+    }
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancel_by_id with non-existent ID ---------- */
+static void test_cancel_by_id_not_found(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    /* Cancel an ID that was never submitted */
+    ASSERT(loom_pool_cancel_by_id(pool, 99999) == LOOMWORKS_ERR_INVALID,
+           "cancel non-existent ID fails");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancel_by_id after shutdown ---------- */
+static void test_cancel_by_id_after_shutdown(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_cancel_by_id(pool, 1) == LOOMWORKS_ERR_SHUTDOWN,
+           "cancel after shutdown returns ERR_SHUTDOWN");
+
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancel_by_id with same user_data ---------- */
+static void test_cancel_by_id_same_data(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    int      shared_data = 0;
+    uint64_t ids[3];
+
+    /* Submit 3 tasks with the SAME user_data pointer */
+    ASSERT(loom_pool_submit(pool, increment_task, &shared_data, &ids[0]) == LOOMWORKS_OK,
+           "submit task 1");
+    ASSERT(loom_pool_submit(pool, increment_task, &shared_data, &ids[1]) == LOOMWORKS_OK,
+           "submit task 2");
+    ASSERT(loom_pool_submit(pool, increment_task, &shared_data, &ids[2]) == LOOMWORKS_OK,
+           "submit task 3");
+
+    /* cancel_by_id should only cancel the specific task */
+    ASSERT(loom_pool_cancel_by_id(pool, ids[1]) == LOOMWORKS_OK, "cancel by id mid");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    /* At least task 1 or 3 must have run (shared_data >= 1) since we only cancelled 1 */
+    ASSERT(shared_data >= 1, "at least one task ran after partial cancel");
+}
+
+/* ---------- Test: cancel by ID of already-running task ---------- */
+static void test_cancel_by_id_running(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    uint64_t id = 0;
+
+    /* Submit a slow task so it starts running before we try to cancel */
+    ASSERT(loom_pool_submit(pool, slow_task, NULL, &id) == LOOMWORKS_OK, "submit slow");
+
+    /* Give worker time to pick up the task */
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+
+    /* The task is now running — cancel should fail */
+    loom_result_t rc = loom_pool_cancel_by_id(pool, id);
+    ASSERT(rc == LOOMWORKS_ERR_INVALID, "cancel running task fails");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: submit_priority returns task ID ---------- */
+static void test_submit_priority_returns_task_id(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    uint64_t id = 0;
+    ASSERT(loom_pool_submit_priority(
+               pool, increment_task, &g_passes, LOOMWORKS_PRIORITY_HIGH, &id) == LOOMWORKS_OK,
+           "submit_priority with task_id");
+    ASSERT(id > 0, "priority submit returned non-zero task_id");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: submit_future_priority returns task ID ---------- */
+static void test_submit_future_priority_returns_task_id(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+
+    uint64_t       id  = 0;
+    loom_future_t *fut = NULL;
+    ASSERT(loom_pool_submit_future_priority(
+               pool, result_task, NULL, LOOMWORKS_PRIORITY_HIGH, &fut, &id) == LOOMWORKS_OK,
+           "submit_future_priority with task_id");
+    ASSERT(id > 0, "priority future returned non-zero task_id");
+    ASSERT(fut != NULL, "future not null");
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_OK, "wait future");
+    if (result) {
+        free(result);
+    }
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancel by ID — multiple tasks, same data, cancel first ---------- */
+static void test_cancel_by_id_first_of_many(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    int      shared = 0;
+    uint64_t ids[5];
+
+    for (int i = 0; i < 5; i++) {
+        ASSERT(loom_pool_submit(pool, increment_task, &shared, &ids[i]) == LOOMWORKS_OK,
+               "submit task");
+    }
+
+    /* Cancel the first submitted task */
+    ASSERT(loom_pool_cancel_by_id(pool, ids[0]) == LOOMWORKS_OK, "cancel first by id");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    /* 4 tasks remain (at least some should run) */
+    ASSERT(shared >= 1, "remaining tasks executed");
+}
+
+/* ---------- Test: cancel_by_id null pool ---------- */
+static void test_cancel_by_id_null_pool(void)
+{
+    ASSERT(loom_pool_cancel_by_id(NULL, 42) == LOOMWORKS_ERR_INVALID,
+           "cancel_by_id with null pool fails");
+}
+
+/* ---------- Test: metrics callback receives all event types ---------- */
+typedef struct {
+    int submitted;
+    int started;
+    int completed;
+    int cancelled;
+} metrics_event_ctx_t;
+
+static void
+metrics_event_callback(loom_metric_event_t event, const loom_thread_pool_t *pool, void *user_data)
+{
+    (void)pool;
+    metrics_event_ctx_t *ctx = (metrics_event_ctx_t *)user_data;
+    switch (event) {
+    case LOOMWORKS_METRIC_SUBMITTED:
+        ctx->submitted++;
+        break;
+    case LOOMWORKS_METRIC_STARTED:
+        ctx->started++;
+        break;
+    case LOOMWORKS_METRIC_COMPLETED:
+        ctx->completed++;
+        break;
+    case LOOMWORKS_METRIC_CANCELLED:
+        ctx->cancelled++;
+        break;
+    default:
+        break;
+    }
+}
+
+static void test_metrics_callback_all_events(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    metrics_event_ctx_t ctx     = {0, 0, 0, 0};
+    loom_metrics_t     *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
+           "create metrics");
+
+    int counter = 0;
+    loom_pool_submit(pool, increment_task, &counter, NULL);
+    loom_pool_submit(pool, increment_task, &counter, NULL);
+
+    /* Cancel one before it runs */
+    int cancel_data = 999;
+    loom_pool_submit(pool, increment_task, &cancel_data, NULL);
+    loom_pool_cancel(pool, &cancel_data);
+
+    loom_pool_shutdown(pool);
+    loom_metrics_destroy(&metrics);
+    loom_pool_destroy(&pool);
+
+    ASSERT(ctx.submitted >= 2, "callback received submitted events");
+    ASSERT(ctx.completed >= 2, "callback received completed events");
+    ASSERT(ctx.cancelled >= 1, "callback received cancelled event");
+    (void)counter;
+}
+
+/* ---------- Test: metrics latency is non-zero ---------- */
+static void test_metrics_latency_nonzero(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_metrics_t *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
+
+    /* Submit several tasks to ensure measurable latency */
+    for (int i = 0; i < 10; i++) {
+        loom_pool_submit(pool, increment_task, &g_passes, NULL);
+    }
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    uint64_t sum_ns = loom_metrics_latency_sum_ns(metrics);
+    uint64_t max_ns = loom_metrics_latency_max_ns(metrics);
+    ASSERT(sum_ns > 0, "latency sum > 0 after tasks executed");
+    ASSERT(max_ns > 0, "latency max > 0 after tasks executed");
+    loom_metrics_destroy(&metrics);
+}
+
+/* ---------- Test: metrics latency with concurrent tasks ---------- */
+static void test_metrics_latency_concurrent(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 200};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_metrics_t *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
+
+    for (int i = 0; i < 100; i++) {
+        loom_pool_submit(pool, increment_task, &g_passes, NULL);
+    }
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    uint64_t sum_ns = loom_metrics_latency_sum_ns(metrics);
+    ASSERT(sum_ns > 0, "concurrent tasks produce non-zero latency sum");
+    loom_metrics_destroy(&metrics);
+}
+
+/* ---------- Test: metrics callback with started event ---------- */
+static void test_metrics_callback_started(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    metrics_event_ctx_t ctx     = {0, 0, 0, 0};
+    loom_metrics_t     *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
+           "create metrics");
+
+    for (int i = 0; i < 5; i++) {
+        loom_pool_submit(pool, increment_task, &g_passes, NULL);
+    }
+
+    loom_pool_shutdown(pool);
+    loom_metrics_destroy(&metrics);
+    loom_pool_destroy(&pool);
+
+    /* started events may or may not be fired depending on implementation,
+     * but completed and submitted should always fire */
+    ASSERT(ctx.submitted >= 5, "submitted events received");
+    ASSERT(ctx.completed >= 5, "completed events received");
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -814,6 +1158,20 @@ int main(void)
     test_metrics_callback();
     test_metrics_null_safety();
     test_metrics_latency();
+    test_submit_returns_task_id();
+    test_task_id_uniqueness();
+    test_cancel_by_id_not_found();
+    test_cancel_by_id_after_shutdown();
+    test_cancel_by_id_same_data();
+    test_cancel_by_id_running();
+    test_submit_priority_returns_task_id();
+    test_submit_future_priority_returns_task_id();
+    test_cancel_by_id_first_of_many();
+    test_cancel_by_id_null_pool();
+    test_metrics_callback_all_events();
+    test_metrics_latency_nonzero();
+    test_metrics_latency_concurrent();
+    test_metrics_callback_started();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

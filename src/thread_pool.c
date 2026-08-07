@@ -421,6 +421,9 @@ loom_pool_submit_blocking(loom_thread_pool_t *pool, loom_task_fn fn, void *data,
             return LOOMWORKS_ERR_ALLOC;
         }
         loom_enqueue_unlocked(pool, task);
+        if (task_id) {
+            *task_id = task->task_id;
+        }
         pthread_cond_signal(&pool->cond);
         pthread_mutex_unlock(&pool->lock);
         metrics_fire(pool, LOOMWORKS_METRIC_SUBMITTED);
