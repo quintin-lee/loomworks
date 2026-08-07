@@ -30,6 +30,28 @@ static void simple_task(void *arg)
     __sync_fetch_and_add(counter, 1);
 }
 
+/* ---------- Bucket/queue regression helpers ---------- */
+static int g_exec_order[128];
+static int g_exec_count;
+
+static void record_exec(void *arg)
+{
+    int idx = (int)(intptr_t)arg;
+    g_exec_order[g_exec_count++] = idx;
+}
+
+static volatile int g_gate_started = 0;
+static volatile int g_gate_release = 0;
+
+static void gate_task(void *arg)
+{
+    (void)arg;
+    g_gate_started = 1;
+    while (!g_gate_release) {
+        /* spin: occupy the only worker so later tasks stay queued */
+    }
+}
+
 static void *result_task(void *arg)
 {
     (void)arg;
@@ -617,6 +639,95 @@ static void test_task_group_submit_after_destroy(void)
            "submit after destroy fails");
     ASSERT(counter == 0, "no task ran");
 
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: bucket priority edges (full uint8 range) ---------- */
+static void test_bucket_priority_edges(void)
+{
+    g_exec_count = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create single-worker pool");
+
+    struct {
+        uint8_t prio;
+        int     slot;
+    } seq[] = {
+        {255, 0}, {0, 1}, {5, 2}, {254, 3}, {1, 4}, {10, 5},
+    };
+    for (int i = 0; i < 6; i++) {
+        ASSERT(loom_pool_submit_priority(
+                   pool, record_exec,
+                   /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+                   (void *)(intptr_t)seq[i].slot, seq[i].prio, NULL) == LOOMWORKS_OK,
+               "submit priority edge");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    /* Priorities 0,1,5,10,254,255 must run in ascending numeric order. */
+    int expected[6] = {1, 4, 2, 5, 3, 0};
+    ASSERT(g_exec_count == 6, "all 6 edge tasks executed");
+    for (int i = 0; i < 6; i++) {
+        ASSERT(g_exec_order[i] == expected[i], "priority edge execution order");
+    }
+}
+
+/* ---------- Test: FIFO preserved within a priority ---------- */
+static void test_bucket_fifo_within_priority(void)
+{
+    g_exec_count = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create single-worker pool");
+
+    const int N = 100;
+    for (int i = 0; i < N; i++) {
+        ASSERT(loom_pool_submit(pool, record_exec,
+                                /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+                                (void *)(intptr_t)i, NULL) == LOOMWORKS_OK,
+               "submit FIFO task");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    ASSERT(g_exec_count == N, "all FIFO tasks executed");
+    for (int i = 0; i < N; i++) {
+        ASSERT(g_exec_order[i] == i, "FIFO order preserved");
+    }
+}
+
+/* ---------- Test: cancel_all across multiple buckets ---------- */
+static void test_bucket_cancel_all(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create single-worker pool");
+
+    /* Occupy the only worker so every subsequent task stays queued. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "submit gate task");
+    while (!g_gate_started) {
+        /* wait until the worker is inside the gate */
+    }
+
+    uint8_t prios[] = {0, 5, 10, 200, 255};
+    for (int i = 0; i < 5; i++) {
+        for (int j = 0; j < 4; j++) {
+            ASSERT(loom_pool_submit_priority(
+                       pool, simple_task, NULL, prios[i], NULL) == LOOMWORKS_OK,
+                   "submit cross-bucket cancel task");
+        }
+    }
+    uint32_t cancelled = 0;
+    loom_pool_cancel_all(pool, &cancelled);
+    ASSERT(cancelled == 20, "cancel_all cancelled exactly 20 queued tasks");
+    ASSERT(loom_pool_pending_count(pool) == 0, "queue empty after cancel_all");
+
+    g_gate_release = 1;
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
@@ -1954,6 +2065,9 @@ int main(void)
     test_cancel_by_id_first_of_many();
     test_cancel_by_id_null_pool();
     test_metrics_callback_all_events();
+    test_bucket_priority_edges();
+    test_bucket_fifo_within_priority();
+    test_bucket_cancel_all();
     test_metrics_latency_nonzero();
     test_metrics_latency_concurrent();
     test_metrics_callback_started();
