@@ -1120,6 +1120,72 @@ static void test_metrics_callback_started(void)
     ASSERT(ctx.completed >= 5, "completed events received");
 }
 
+
+/* ---------- Test: submit_blocking with unbounded queue ---------- */
+static void test_submit_blocking_unbounded(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create unbounded pool");
+
+    int counter = 0;
+    for (int i = 0; i < 100; i++) {
+        ASSERT(loom_pool_submit_blocking(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
+               "submit_blocking unbounded");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(counter == 100, "all blocking submits executed");
+}
+
+/* ---------- Test: submit_blocking returns task ID ---------- */
+static void test_submit_blocking_with_id(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    uint64_t id1 = 0, id2 = 0;
+    ASSERT(loom_pool_submit_blocking(pool, increment_task, &g_passes, &id1) == LOOMWORKS_OK,
+           "submit_blocking with id");
+    ASSERT(id1 > 0, "submit_blocking returned non-zero task_id");
+
+    ASSERT(loom_pool_submit_blocking(pool, increment_task, &g_passes, &id2) == LOOMWORKS_OK,
+           "submit_blocking second task");
+    ASSERT(id2 > id1, "second task_id > first");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: submit_blocking after shutdown ---------- */
+static void test_submit_blocking_after_shutdown(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+    loom_pool_shutdown(pool);
+
+    int counter = 0;
+    ASSERT(loom_pool_submit_blocking(pool, increment_task, &counter, NULL) == LOOMWORKS_ERR_SHUTDOWN,
+           "submit_blocking after shutdown fails");
+
+    loom_pool_destroy(&pool);
+    ASSERT(counter == 0, "no task executed after shutdown");
+}
+
+/* ---------- Test: submit_blocking null safety ---------- */
+static void test_submit_blocking_null_safety(void)
+{
+    ASSERT(loom_pool_submit_blocking(NULL, increment_task, NULL, NULL) == LOOMWORKS_ERR_INVALID,
+           "submit_blocking null pool");
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_pool_submit_blocking(pool, NULL, NULL, NULL) == LOOMWORKS_ERR_INVALID,
+           "submit_blocking null fn");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -1172,6 +1238,10 @@ int main(void)
     test_metrics_latency_nonzero();
     test_metrics_latency_concurrent();
     test_metrics_callback_started();
+    test_submit_blocking_unbounded();
+    test_submit_blocking_with_id();
+    test_submit_blocking_after_shutdown();
+    test_submit_blocking_null_safety();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
