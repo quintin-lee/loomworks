@@ -66,20 +66,6 @@ struct loom_future {
 /* ================================================================
  *  Worker context — per-worker bookkeeping (cache-line padded).
  * ================================================================ */
-/**
- * @brief Per-worker context structure.
- *
- * Currently unused as each worker shares the central queue; the struct
- * is reserved for future per-worker task affinity or load-balancing.
- */
-typedef struct loom_worker_ctx {
-    uint64_t     padding[7];      /**< Pad to cache-line boundary. */
-    loom_task_t *task_queue_head; /**< Reserved for per-worker queues. */
-    loom_task_t *task_queue_tail; /**< Reserved for per-worker queues. */
-    uint32_t     task_queue_len;  /**< Reserved for per-worker queues. */
-    uint64_t     padding2[7];     /**< Pad to cache-line boundary. */
-} loom_worker_ctx_t;
-
 /* ================================================================
  *  Thread pool — central data structure.
  * ================================================================ */
@@ -109,10 +95,10 @@ struct loom_thread_pool {
     loom_task_t *queue_tail; /**< Tail of the FIFO task queue. */
     uint32_t     queue_len;  /**< Current number of pending tasks. */
 
-    loom_worker_ctx_t *workers; /**< Per-worker context array. */
-    pthread_t         *threads; /**< pthread_t array (one per worker). */
-    _Atomic uint64_t   next_task_id; /**< Monotonically increasing task ID counter. */
-    void              *metrics; /**< Optional metrics collector (loom_metrics_t*). */
+    pthread_t       *threads;      /**< pthread_t array (one per worker). */
+    uint32_t         max_worker_count; /**< Max capacity of threads array. */
+    _Atomic uint64_t next_task_id; /**< Monotonically increasing task ID counter. */
+    void            *metrics;      /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback fields to avoid circular dependency */
     void (*metric_cb)(void *, void *, void *);
     void *metric_user_data;

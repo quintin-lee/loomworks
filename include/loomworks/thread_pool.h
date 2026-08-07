@@ -104,7 +104,8 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
  * @param data     Opaque user data passed to the task.
  * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-loom_result_t loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *data);
+loom_result_t
+loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint64_t *task_id);
 
 /**
  * @brief Submit a fire-and-forget task, blocking if the queue is full.
@@ -118,7 +119,8 @@ loom_result_t loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *
  * @param data     Opaque user data passed to the task.
  * @return         LOOMWORKS_OK on success, error code otherwise.
  */
-loom_result_t loom_pool_submit_blocking(loom_thread_pool_t *pool, loom_task_fn fn, void *data);
+loom_result_t
+loom_pool_submit_blocking(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint64_t *task_id);
 
 /**
  * @brief Submit a task that returns a result, with a future for retrieval.
@@ -132,7 +134,8 @@ loom_result_t loom_pool_submit_blocking(loom_thread_pool_t *pool, loom_task_fn f
 loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
                                       loom_task_fn_result fn,
                                       void               *data,
-                                      loom_future_t     **future);
+                                      loom_future_t     **future,
+                                      uint64_t           *task_id);
 
 /**
  * @brief Submit a fire-and-forget task with explicit priority.
@@ -143,8 +146,8 @@ loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
  * @param priority Task priority (see loom_task_priority_t).
  * @return         LOOMWORKS_OK on success.
  */
-loom_result_t
-loom_pool_submit_priority(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority);
+loom_result_t loom_pool_submit_priority(
+    loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority, uint64_t *task_id);
 
 /**
  * @brief Submit a result task with explicit priority.
@@ -160,7 +163,8 @@ loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
                                                loom_task_fn_result fn,
                                                void               *data,
                                                uint8_t             priority,
-                                               loom_future_t     **future);
+                                               loom_future_t     **future,
+                                               uint64_t           *task_id);
 
 /**
  * @brief Wait for a future's result. Blocks until the task completes.
@@ -241,6 +245,19 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data);
  * @return         LOOMWORKS_OK if cancelled, LOOMWORKS_ERR_INVALID if not found.
  */
 loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id);
+
+/**
+ * @brief Dynamically resize the pool to @p count worker threads.
+ *
+ * Growing adds new threads; shrinking stops excess idle workers.
+ * Workers currently executing tasks are NOT interrupted.
+ * Must not be called after loom_pool_shutdown().
+ *
+ * @param pool  The pool handle.
+ * @param count New number of worker threads.
+ * @return      LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count);
 
 /**
  * @brief Cancel all tasks currently waiting in the queue.

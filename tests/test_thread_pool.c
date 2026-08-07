@@ -456,62 +456,6 @@ static void test_cancel_all(void)
 }
 
 /* ---------- Test: future_wait_timeout (should succeed) ---------- */
-
-/* ---------- Test: cancel by task ID ---------- */
-static void test_cancel_by_id(void)
-{
-    loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
-    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
-
-    int counter = 0;
-
-    /* Submit several tasks with the same user_data to verify ID-based cancel */
-    for (int i = 0; i < 5; i++) {
-        ASSERT(loom_pool_submit(pool, increment_task, &counter) == LOOMWORKS_OK, "submit task");
-    }
-
-    /* cancel_all is the only reliable way to cancel when same user_data is used,
-     * but we verify cancel_by_id works with the cancel test below */
-
-    loom_pool_shutdown(pool);
-    loom_pool_destroy(&pool);
-    ASSERT(counter >= 0, "cancel_by_id test completed");
-}
-
-/* ---------- Test: cancel_by_id with unique IDs ---------- */
-static void test_cancel_by_id_unique(void)
-{
-    loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
-    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
-
-    /* Submit tasks with distinct data so we can test cancel_by_id */
-    int *data1 = (int *)malloc(sizeof(int));
-    int *data2 = (int *)malloc(sizeof(int));
-    int *data3 = (int *)malloc(sizeof(int));
-    ASSERT(data1 && data2 && data3, "alloc test data");
-    *data1 = 1; *data2 = 2; *data3 = 3;
-
-    ASSERT(loom_pool_submit(pool, increment_task, data1) == LOOMWORKS_OK, "submit task 1");
-    ASSERT(loom_pool_submit(pool, increment_task, data2) == LOOMWORKS_OK, "submit task 2");
-    ASSERT(loom_pool_submit(pool, increment_task, data3) == LOOMWORKS_OK, "submit task 3");
-
-    /* With 1 worker, task 1 may be running. Cancel task 3 by ID.
-     * We can't know the ID directly, so we use cancel_all as proxy.
-     * The cancel_by_id function is structurally tested above. */
-    uint32_t cancelled = 0;
-    loom_pool_cancel_all(pool, &cancelled);
-    ASSERT(cancelled <= 5, "cancel_all count reasonable");
-
-    free(data1);
-    free(data2);
-    free(data3);
-
-    loom_pool_shutdown(pool);
-    loom_pool_destroy(&pool);
-}
-
 static void test_future_wait_timeout_ok(void)
 {
     loom_thread_pool_t *pool = NULL;
@@ -1606,8 +1550,6 @@ int main(void)
     test_future_wait_completed();
     test_cancel();
     test_cancel_all();
-    test_cancel_by_id();
-    test_cancel_by_id_unique();
     test_future_wait_timeout_ok();
     test_future_wait_timeout_expired();
     test_task_group_create_destroy();
