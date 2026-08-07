@@ -2,8 +2,8 @@
  * @example task_group_demo.c
  * @brief Demonstrates task group usage.
  */
-#include <stdio.h>
 #include "loomworks/task_group.h"
+#include <stdio.h>
 
 static void work(void *arg)
 {
@@ -20,7 +20,7 @@ int main(void)
     loom_task_group_create(pool, &group);
 
     for (int i = 0; i < 10; i++) {
-        loom_task_group_submit(group, work, &i);
+        loom_task_group_submit(group, work, &i, NULL);
     }
 
     printf("Pending: %u\n", loom_task_group_pending_count(group));

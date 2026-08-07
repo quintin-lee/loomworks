@@ -57,7 +57,8 @@ void loom_task_group_destroy(loom_task_group_t **group);
  * @param data   Opaque user data passed to the task.
  * @return       LOOMWORKS_OK on success, error code otherwise.
  */
-loom_result_t loom_task_group_submit(loom_task_group_t *group, loom_task_fn fn, void *data);
+loom_result_t
+loom_task_group_submit(loom_task_group_t *group, loom_task_fn fn, void *data, uint64_t *task_id);
 
 /**
  * @brief Submit a result-producing task to the group.
@@ -73,7 +74,8 @@ loom_result_t loom_task_group_submit(loom_task_group_t *group, loom_task_fn fn, 
 loom_result_t loom_task_group_submit_future(loom_task_group_t  *group,
                                             loom_task_fn_result fn,
                                             void               *data,
-                                            loom_future_t     **future);
+                                            loom_future_t     **future,
+                                            uint64_t           *task_id);
 
 /**
  * @brief Cancel all pending tasks in the group.

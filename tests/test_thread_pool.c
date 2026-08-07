@@ -533,7 +533,7 @@ static void test_task_group_submit(void)
 
     int counter = 0;
     for (int i = 0; i < 10; i++) {
-        ASSERT(loom_task_group_submit(group, increment_task, &counter) == LOOMWORKS_OK,
+        ASSERT(loom_task_group_submit(group, increment_task, &counter, NULL) == LOOMWORKS_OK,
                "submit via group");
     }
     ASSERT(loom_task_group_pending_count(group) == 10, "10 pending");
@@ -556,7 +556,7 @@ static void test_task_group_cancel(void)
     int counters[10];
     for (int i = 0; i < 10; i++) {
         counters[i] = 0;
-        ASSERT(loom_task_group_submit(group, increment_task, &counters[i]) == LOOMWORKS_OK,
+        ASSERT(loom_task_group_submit(group, increment_task, &counters[i], NULL) == LOOMWORKS_OK,
                "submit task");
     }
     /* Cancel before they run */
@@ -580,7 +580,7 @@ static void test_task_group_destroy_cancels(void)
      * is still running when destroy is called.  Destroy cancels only
      * the queued tasks; the running one is expected to complete. */
     for (int i = 0; i < 5; i++) {
-        ASSERT(loom_task_group_submit(group, slow_task, NULL) == LOOMWORKS_OK, "submit task");
+        ASSERT(loom_task_group_submit(group, slow_task, NULL, NULL) == LOOMWORKS_OK, "submit task");
     }
     /* Destroy without waiting — cancels pending queued tasks */
     loom_task_group_destroy(&group);
@@ -612,7 +612,7 @@ static void test_task_group_submit_after_destroy(void)
     loom_task_group_destroy(&group);
 
     int counter = 0;
-    ASSERT(loom_task_group_submit(group, increment_task, &counter) == LOOMWORKS_ERR_INVALID,
+    ASSERT(loom_task_group_submit(group, increment_task, &counter, NULL) == LOOMWORKS_ERR_INVALID,
            "submit after destroy fails");
     ASSERT(counter == 0, "no task ran");
 
@@ -1120,7 +1120,6 @@ static void test_metrics_callback_started(void)
     ASSERT(ctx.completed >= 5, "completed events received");
 }
 
-
 /* ---------- Test: submit_blocking with unbounded queue ---------- */
 static void test_submit_blocking_unbounded(void)
 {
@@ -1166,7 +1165,8 @@ static void test_submit_blocking_after_shutdown(void)
     loom_pool_shutdown(pool);
 
     int counter = 0;
-    ASSERT(loom_pool_submit_blocking(pool, increment_task, &counter, NULL) == LOOMWORKS_ERR_SHUTDOWN,
+    ASSERT(loom_pool_submit_blocking(pool, increment_task, &counter, NULL) ==
+               LOOMWORKS_ERR_SHUTDOWN,
            "submit_blocking after shutdown fails");
 
     loom_pool_destroy(&pool);
@@ -1186,7 +1186,6 @@ static void test_submit_blocking_null_safety(void)
     loom_pool_destroy(&pool);
 }
 
-
 /* ---------- Test: loom_pool_resize grow ---------- */
 static void test_resize_grow(void)
 {
@@ -1202,7 +1201,8 @@ static void test_resize_grow(void)
     /* Verify new workers are functional */
     int counter = 0;
     for (int i = 0; i < 100; i++) {
-        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit task");
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
+               "submit task");
     }
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
@@ -1224,7 +1224,8 @@ static void test_resize_shrink(void)
     /* Submit tasks — should still complete with fewer workers */
     int counter = 0;
     for (int i = 0; i < 50; i++) {
-        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit task");
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
+               "submit task");
     }
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
@@ -1246,7 +1247,6 @@ static void test_resize_null_safety(void)
 {
     ASSERT(loom_pool_resize(NULL, 4) == LOOMWORKS_ERR_INVALID, "resize null pool");
 }
-
 
 /* ---------- Test: metrics invariant — submitted == completed + cancelled ---------- */
 static void test_metrics_invariant(void)
@@ -1280,7 +1280,7 @@ static void test_metrics_invariant(void)
 
     loom_pool_shutdown(pool);
 
-    uint64_t sub = loom_metrics_submitted(metrics);
+    uint64_t sub  = loom_metrics_submitted(metrics);
     uint64_t comp = loom_metrics_completed(metrics);
     uint64_t canc = loom_metrics_cancelled(metrics);
 
@@ -1307,7 +1307,7 @@ static void test_metrics_invariant_all_complete(void)
 
     loom_pool_shutdown(pool);
 
-    uint64_t sub = loom_metrics_submitted(metrics);
+    uint64_t sub  = loom_metrics_submitted(metrics);
     uint64_t comp = loom_metrics_completed(metrics);
     uint64_t canc = loom_metrics_cancelled(metrics);
 
@@ -1317,6 +1317,62 @@ static void test_metrics_invariant_all_complete(void)
 
     loom_pool_destroy(&pool);
     loom_metrics_destroy(&metrics);
+}
+
+/* ---------- Test: task_group + task_id integration ---------- */
+static void test_task_group_with_task_id(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+
+    uint64_t ids[5];
+    int      counter = 0;
+    for (int i = 0; i < 5; i++) {
+        ASSERT(loom_task_group_submit(group, increment_task, &counter, &ids[i]) == LOOMWORKS_OK,
+               "submit via group with task_id");
+    }
+
+    /* Verify task IDs are unique and increasing */
+    for (int i = 1; i < 5; i++) {
+        ASSERT(ids[i] > ids[i - 1], "task_id is increasing");
+    }
+
+    loom_task_group_wait(group);
+    ASSERT(counter == 5, "all tasks executed");
+
+    loom_task_group_destroy(&group);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: task_group submit_future with task_id ---------- */
+static void test_task_group_future_with_task_id(void)
+{
+    loom_thread_pool_t *pool  = NULL;
+    loom_task_group_t  *group = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "create group");
+
+    uint64_t       id  = 0;
+    loom_future_t *fut = NULL;
+    ASSERT(loom_task_group_submit_future(group, fast_result_task, NULL, &fut, &id) == LOOMWORKS_OK,
+           "submit future via group with task_id");
+    ASSERT(id > 0, "task_id returned");
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_OK, "wait future");
+    ASSERT(result != NULL, "result not null");
+    /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
+    ASSERT(*(int *)result == 42, "result value is 42");
+    free(result);
+    loom_future_destroy(fut);
+
+    loom_task_group_wait(group);
+    loom_task_group_destroy(&group);
+    loom_pool_destroy(&pool);
 }
 
 /* ================================================================
@@ -1352,6 +1408,8 @@ int main(void)
     test_task_group_destroy_cancels();
     test_task_group_null_safety();
     test_task_group_submit_after_destroy();
+    test_task_group_with_task_id();
+    test_task_group_future_with_task_id();
     test_priority_ordering();
     test_priority_future();
     test_metrics_callback();
