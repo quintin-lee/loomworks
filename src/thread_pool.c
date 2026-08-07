@@ -118,15 +118,8 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     pool->metrics          = NULL;
     atomic_store_explicit(&pool->next_task_id, 1, memory_order_relaxed);
 
-    pool->workers = (loom_worker_ctx_t *)calloc(pool->worker_count, sizeof(loom_worker_ctx_t));
-    if (!pool->workers) {
-        pool_destroy_internal(pool);
-        return LOOMWORKS_ERR_ALLOC;
-    }
-
     pool->threads = (pthread_t *)calloc(pool->worker_count, sizeof(pthread_t));
     if (!pool->threads) {
-        free(pool->workers);
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
     }
@@ -136,8 +129,8 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
 /* ================================================================
  *  pool_destroy_internal — free every resource owned by the pool.
  *
- *  Does NOT touch pool->threads or pool->workers beyond freeing the
- *  arrays; the join loop lives in loom_pool_shutdown().
+ *  Does NOT touch pool->threads beyond freeing the
+ *  array; the join loop lives in loom_pool_shutdown().
  *  Queue task nodes are freed one by one.
  * ================================================================ */
 static void pool_destroy_internal(loom_thread_pool_t *pool)
@@ -163,7 +156,6 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     pool->metrics          = NULL;
 
     free(pool->threads);
-    free(pool->workers);
     free(pool);
 }
 
