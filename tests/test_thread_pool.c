@@ -1247,6 +1247,78 @@ static void test_resize_null_safety(void)
     ASSERT(loom_pool_resize(NULL, 4) == LOOMWORKS_ERR_INVALID, "resize null pool");
 }
 
+
+/* ---------- Test: metrics invariant — submitted == completed + cancelled ---------- */
+static void test_metrics_invariant(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_metrics_t *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
+
+    /* Submit 20 tasks */
+    for (int i = 0; i < 20; i++) {
+        int *data = (int *)malloc(sizeof(int));
+        if (data) {
+            *data = i;
+            ASSERT(loom_pool_submit(pool, increment_task, data, NULL) == LOOMWORKS_OK, "submit");
+        }
+    }
+
+    /* Cancel the first 5 tasks (they should still be in queue) */
+    for (int i = 0; i < 5; i++) {
+        int *data = (int *)malloc(sizeof(int));
+        if (data) {
+            *data = -1;
+            loom_pool_submit(pool, increment_task, data, NULL);
+            /* Cancel immediately — may or may not succeed depending on timing */
+            loom_pool_cancel(pool, data);
+        }
+    }
+
+    loom_pool_shutdown(pool);
+
+    uint64_t sub = loom_metrics_submitted(metrics);
+    uint64_t comp = loom_metrics_completed(metrics);
+    uint64_t canc = loom_metrics_cancelled(metrics);
+
+    ASSERT(sub == comp + canc, "metrics invariant: submitted == completed + cancelled");
+    ASSERT(sub >= 20, "at least 20 tasks submitted");
+
+    loom_pool_destroy(&pool);
+    loom_metrics_destroy(&metrics);
+}
+
+/* ---------- Test: metrics invariant with only completions ---------- */
+static void test_metrics_invariant_all_complete(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 200};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_metrics_t *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
+
+    for (int i = 0; i < 50; i++) {
+        loom_pool_submit(pool, increment_task, &g_passes, NULL);
+    }
+
+    loom_pool_shutdown(pool);
+
+    uint64_t sub = loom_metrics_submitted(metrics);
+    uint64_t comp = loom_metrics_completed(metrics);
+    uint64_t canc = loom_metrics_cancelled(metrics);
+
+    ASSERT(sub == comp + canc, "invariant holds with only completions");
+    ASSERT(canc == 0, "no cancellations");
+    ASSERT(comp == sub, "completions match submissions");
+
+    loom_pool_destroy(&pool);
+    loom_metrics_destroy(&metrics);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -1307,6 +1379,8 @@ int main(void)
     test_resize_shrink();
     test_resize_after_shutdown();
     test_resize_null_safety();
+    test_metrics_invariant();
+    test_metrics_invariant_all_complete();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
