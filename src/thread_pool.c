@@ -215,13 +215,17 @@ static void *worker_entry(void *arg)
         }
         loom_coro_exit();
         loom_task_t *task = loom_dequeue_unlocked(pool);
+        loom_task_fn fn   = NULL;
+        void        *data = NULL;
         if (task) {
-            loom_task_fn fn   = task->fn;
-            void        *data = task->user_data;
+            fn   = task->fn;
+            data = task->user_data;
             /* Return the node to the pool under the lock (free-list is
              * lock-protected); the task function runs outside the lock. */
             task_destroy(pool, task);
-            pthread_mutex_unlock(&pool->lock);
+        }
+        pthread_mutex_unlock(&pool->lock);
+        if (task) {
             if (pool->metrics) {
                 struct timespec ts_start;
                 clock_gettime(CLOCK_MONOTONIC, &ts_start);
