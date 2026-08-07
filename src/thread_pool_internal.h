@@ -12,6 +12,10 @@
 /* Hard upper bound on queue_capacity to prevent unbounded allocation. */
 #define LOOMWORKS_MAX_QUEUE_CAPACITY (1024 * 1024)
 
+/* Max task nodes retained on the pool free-list (prevents unbounded
+ * residency after bursts; excess nodes are freed normally). */
+#define LOOMWORKS_NODE_POOL_CAP 4096
+
 /* ================================================================
  *  Task node — singly-linked list element in the pool queue.
  * ================================================================ */
@@ -92,14 +96,21 @@ struct loom_thread_pool {
     bool                      draining; /**< true while workers are finishing tasks. */
     bool                      joined;   /**< true once all threads have been joined. */
 
-    loom_task_t *queue_head; /**< Head of the FIFO task queue. */
-    loom_task_t *queue_tail; /**< Tail of the FIFO task queue. */
-    uint32_t     queue_len;  /**< Current number of pending tasks. */
+    /* Per-priority FIFO buckets: bucket[b] holds tasks with priority == b.
+     * Numerically smaller priority runs first.  Enqueue appends to the
+     * bucket tail (O(1)); dequeue pops the lowest non-empty bucket via the
+     * occupancy bitmap (O(1), ~4 loads + ctz). */
+    loom_task_t *buckets_head[256]; /**< Per-priority bucket heads. */
+    loom_task_t *buckets_tail[256]; /**< Per-priority bucket tails. */
+    uint64_t     nonempty_bits[4];  /**< Bit b set <=> buckets_head[b] != NULL. */
+    uint32_t     queue_len;         /**< Current number of pending tasks. */
+    loom_task_t *free_list;         /**< Pooled task nodes (reused, cap bounded). */
+    uint32_t     free_list_len;     /**< Number of nodes currently on free_list. */
 
-    pthread_t       *threads;      /**< pthread_t array (one per worker). */
+    pthread_t       *threads;          /**< pthread_t array (one per worker). */
     uint32_t         max_worker_count; /**< Max capacity of threads array. */
-    _Atomic uint64_t next_task_id; /**< Monotonically increasing task ID counter. */
-    void            *metrics;      /**< Optional metrics collector (loom_metrics_t*). */
+    _Atomic uint64_t next_task_id;     /**< Monotonically increasing task ID counter. */
+    void            *metrics;          /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback fields to avoid circular dependency */
     void (*metric_cb)(void *, void *, void *);
     void *metric_user_data;
