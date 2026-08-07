@@ -182,67 +182,6 @@ typedef enum {
 ```
 
 
-## FAQ
-
-**Q: Can I use loomworks as a shared library (.so)?**
-
-A: No. Coroutines use `_Thread_local` storage, which is incompatible with shared library linking on x86_64 Linux. Use static linking only (`libloomworks.a`). The CMake build still produces a `.so` for completeness, but linking it will fail at runtime.
-
-**Q: Can I resume a coroutine from a different thread than the one that created it?**
-
-A: No. Coroutines are bound to the thread that created them. `ucontext_t` is not thread-safe — calling `loom_coro_resume()` on a coroutine from a different thread than it was created on results in undefined behavior (typically SIGSEGV).
-
-**Q: What happens if a coroutine overflows its stack?**
-
-A: The library installs a SIGSEGV/SIGBUS handler that detects access to guard pages. When triggered, the coroutine is moved to the `ERROR` state and `loom_coro_resume()` returns `LOOMWORKS_CORO_ERR_GUARD`. The process does not crash.
-
-**Q: Is `loom_pool_shutdown()` idempotent?**
-
-A: Yes. Calling `loom_pool_shutdown()` multiple times on the same pool is safe — only the first call performs the drain and join. Subsequent calls are no-ops.
-
-**Q: What is the maximum number of worker threads?**
-
-A: When `worker_count` is set to 0 (auto), the pool creates `min(hardware_concurrency * 2, 64)` threads. The hard upper bound is 64.
-
-**Q: Does `loom_pool_submit()` block when the queue is full?**
-
-A: No. When `queue_capacity > 0` and the queue is full, `loom_pool_submit()` returns `LOOMWORKS_ERR_INVALID` immediately. The caller must retry or handle the error. Use `queue_capacity = 0` for an unbounded (potentially large) queue.
-
-**Q: How do I compile with AddressSanitizer?**
-
-A: Add `-fsanitize=address -fno-omit-frame-pointer` to your compiler flags. The library is fully compatible with ASan. Run `LD_PRELOAD=/usr/lib/libasan.so.8 ./build/test_integration` for leak-checked integration tests.
-
-
-## FAQ
-
-**Q: Can I use loomworks as a shared library (.so)?**
-
-A: No. Coroutines use `_Thread_local` storage, which is incompatible with shared library linking on x86_64 Linux. Use static linking only (`libloomworks.a`). The CMake build still produces a `.so` for completeness, but linking it will fail at runtime.
-
-**Q: Can I resume a coroutine from a different thread than the one that created it?**
-
-A: No. Coroutines are bound to the thread that created them. `ucontext_t` is not thread-safe — calling `loom_coro_resume()` on a coroutine from a different thread than it was created on results in undefined behavior (typically SIGSEGV).
-
-**Q: What happens if a coroutine overflows its stack?**
-
-A: The library installs a SIGSEGV/SIGBUS handler that detects access to guard pages. When triggered, the coroutine is moved to the `ERROR` state and `loom_coro_resume()` returns `LOOMWORKS_CORO_ERR_GUARD`. The process does not crash.
-
-**Q: Is `loom_pool_shutdown()` idempotent?**
-
-A: Yes. Calling `loom_pool_shutdown()` multiple times on the same pool is safe — only the first call performs the drain and join. Subsequent calls are no-ops.
-
-**Q: What is the maximum number of worker threads?**
-
-A: When `worker_count` is set to 0 (auto), the pool creates `min(hardware_concurrency * 2, 64)` threads. The hard upper bound is 64.
-
-**Q: Does `loom_pool_submit()` block when the queue is full?**
-
-A: No. When `queue_capacity > 0` and the queue is full, `loom_pool_submit()` returns `LOOMWORKS_ERR_INVALID` immediately. The caller must retry or handle the error. Use `queue_capacity = 0` for an unbounded (potentially large) queue.
-
-**Q: How do I compile with AddressSanitizer?**
-
-A: Add `-fsanitize=address -fno-omit-frame-pointer` to your compiler flags. The library is fully compatible with ASan. Run `LD_PRELOAD=/usr/lib/libasan.so.8 ./build/test_integration` for leak-checked integration tests.
-
 ## Design Constraints
 
 | Requirement | Implementation |
