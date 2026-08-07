@@ -772,8 +772,6 @@ static void test_metrics_latency(void)
     /* Latency should have been recorded (sum > 0 for at least 1 task) */
     uint64_t sum_ns = loom_metrics_latency_sum_ns(metrics);
     uint64_t max_ns = loom_metrics_latency_max_ns(metrics);
-    ASSERT(sum_ns >= 0, "latency sum is non-negative");
-    ASSERT(max_ns >= 0, "latency max is non-negative");
     (void)sum_ns;
     (void)max_ns;
 }
