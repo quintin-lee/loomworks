@@ -8,11 +8,13 @@
  *   3. worker_scaling   — throughput vs worker count (1,2,4,8,16,32,64)
  *   4. bounded_queue    — throughput with bounded vs unbounded queue
  *   5. future_overhead  — fire-and-forget vs future-based submission
+ *   6. coro_create_destroy — coroutine create+destroy lifecycle cost (ns/cycle)
  *
  * Usage: ./bench [--iterations N] [--tasks M]
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/thread_pool.h"
+#include "loomworks/coroutine.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -276,6 +278,33 @@ static void bench_future_overhead(void)
     loom_pool_destroy(&pool_fut);
 }
 
+/* ---------- Benchmark 6: coro_create_destroy ----------
+ * Coroutine create + destroy lifecycle cost. With stack pooling,
+ * the steady-state path drops to ~0 syscalls (pool hit) instead of
+ * mmap + mprotect + munmap per cycle.
+ * ---------- */
+static void coro_trivial_fn(void *arg)
+{
+    (void)arg;
+}
+
+static void bench_coro_create_destroy(void)
+{
+    const int N = 100000;
+    double    t0 = now_ns();
+    for (int i = 0; i < N; i++) {
+        loom_coroutine_t *coro = NULL;
+        if (loom_coro_create(coro_trivial_fn, NULL, 0, &coro) != LOOMWORKS_CORO_OK) {
+            fprintf(stderr, "coro create failed at %d\n", i);
+            exit(1);
+        }
+        loom_coro_destroy(&coro);
+    }
+    double t1     = now_ns();
+    double avg_ns = (t1 - t0) / (double)N;
+    printf("  coro_create_destroy: %.1f ns/cycle (%d create+destroy cycles)\n", avg_ns, N);
+}
+
 /* ---------- Usage ---------- */
 static void print_usage(const char *prog)
 {
@@ -344,7 +373,11 @@ int main(int argc, char *argv[])
     fflush(stdout);
     bench_future_overhead();
 
-    printf("\n[6/6] queue_depth\n");
+    printf("\n[6/7] coro_create_destroy\n");
+    fflush(stdout);
+    bench_coro_create_destroy();
+
+    printf("\n[7/7] queue_depth\n");
     fflush(stdout);
     bench_queue_depth();
 
