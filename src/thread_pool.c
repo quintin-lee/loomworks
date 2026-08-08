@@ -75,6 +75,16 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
     }
 }
 
+/* Smallest power of two >= v (1 when v == 0). */
+static uint64_t next_pow2_u64(uint32_t v)
+{
+    uint64_t n = 1;
+    while (n < v) {
+        n <<= 1;
+    }
+    return n;
+}
+
 static loom_result_t pool_init(loom_thread_pool_t *pool)
 {
     if (pool->worker_count == 0) {
@@ -106,26 +116,68 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         pthread_cond_destroy(&pool->cond);
         return LOOMWORKS_ERR_ALLOC;
     }
+    if (sem_init(&pool->work_sem, 0, 0) != 0) {
+        pthread_mutex_destroy(&pool->lock);
+        pthread_cond_destroy(&pool->cond);
+        pthread_cond_destroy(&pool->drain_cond);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    if (pthread_cond_init(&pool->space_cond, NULL) != 0) {
+        sem_destroy(&pool->work_sem);
+        pthread_mutex_destroy(&pool->lock);
+        pthread_cond_destroy(&pool->cond);
+        pthread_cond_destroy(&pool->drain_cond);
+        return LOOMWORKS_ERR_ALLOC;
+    }
 
-    pool->shutdown = false;
+    atomic_store_explicit(&pool->shutdown, false, memory_order_relaxed);
     pool->draining = false;
     pool->joined   = false;
     for (int b = 0; b < 256; b++) {
         pool->buckets_head[b] = NULL;
         pool->buckets_tail[b] = NULL;
     }
-    pool->nonempty_bits[0] = 0;
-    pool->nonempty_bits[1] = 0;
-    pool->nonempty_bits[2] = 0;
-    pool->nonempty_bits[3] = 0;
-    pool->queue_len        = 0;
+    for (int w = 0; w < 4; w++) {
+        atomic_store_explicit(&pool->nonempty_bits[w], 0, memory_order_relaxed);
+    }
+    atomic_store_explicit(&pool->queue_len, 0, memory_order_relaxed);
     pool->free_list        = NULL;
     pool->free_list_len    = 0;
-    pool->active_workers   = 0;
+    atomic_store_explicit(&pool->active_workers, 0, memory_order_relaxed);
     pool->metric_cb        = NULL;
     pool->metric_user_data = NULL;
     pool->metrics          = NULL;
     atomic_store_explicit(&pool->next_task_id, 1, memory_order_relaxed);
+
+    /* --- Lock-free ring + cancel index + node pool --- */
+    pool->ring_size = (pool->queue_capacity == 0)
+                          ? LOOMWORKS_RING_DEFAULT_SLOTS
+                          : next_pow2_u64(pool->queue_capacity);
+    pool->ring_mask = pool->ring_size - 1;
+    pool->ring      = (ring_cell_t *)calloc(pool->ring_size, sizeof(ring_cell_t));
+    if (pool->ring != NULL) {
+        for (uint64_t i = 0; i < pool->ring_size; i++) {
+            atomic_store_explicit(&pool->ring[i].seq, i, memory_order_relaxed);
+        }
+        pool->cancel_cap  = pool->ring_size * 2;
+        pool->cancel_slots = (cancel_slot_t *)calloc(pool->cancel_cap, sizeof(cancel_slot_t));
+        if (pool->cancel_slots == NULL) {
+            free(pool->ring);
+            pool->ring = NULL;
+        }
+    }
+    if (pool->ring == NULL) {
+        /* Lane-only fallback: every NORMAL task takes the mutex lane. */
+        pool->ring_size  = 0;
+        pool->ring_mask  = 0;
+        pool->cancel_cap = 0;
+    }
+    atomic_store_explicit(&pool->ring_head, 0, memory_order_relaxed);
+    atomic_store_explicit(&pool->ring_tail, 0, memory_order_relaxed);
+    atomic_store_explicit(&pool->ring_count, 0, memory_order_relaxed);
+    pool->node_pool     = (loom_task_t *)calloc(LOOMWORKS_NODE_POOL_CAP, sizeof(loom_task_t));
+    pool->node_pool_cap = pool->node_pool != NULL ? LOOMWORKS_NODE_POOL_CAP : 0;
+    atomic_store_explicit(&pool->node_stack, 0, memory_order_relaxed);
 
     pool->max_worker_count = pool->worker_count;
     pool->threads          = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
@@ -164,8 +216,14 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
         free(f);
         f = n;
     }
+    /* Free lock-free ring structures and the node pool array. */
+    free(pool->cancel_slots);
+    free(pool->ring);
+    free(pool->node_pool);
     pthread_cond_destroy(&pool->drain_cond);
     pthread_cond_destroy(&pool->cond);
+    pthread_cond_destroy(&pool->space_cond);
+    sem_destroy(&pool->work_sem);
     pthread_mutex_destroy(&pool->lock);
 
     /* Clear metrics so no worker accesses freed pool via metric_cb / metrics.
@@ -304,8 +362,9 @@ void loom_enqueue_unlocked(loom_thread_pool_t *pool, loom_task_t *task)
     }
     pool->buckets_tail[b] = task;
     task->next            = NULL;
-    pool->nonempty_bits[b / 64] |= (uint64_t)1u << (b % 64);
-    pool->queue_len++;
+    atomic_fetch_or_explicit(&pool->nonempty_bits[b / 64], (uint64_t)1u << (b % 64),
+                             memory_order_relaxed);
+    atomic_fetch_add_explicit(&pool->queue_len, 1, memory_order_relaxed);
 }
 
 /* ================================================================
@@ -320,17 +379,19 @@ loom_task_t *loom_dequeue_unlocked(loom_thread_pool_t *pool)
     /* Find the lowest non-empty bucket via the 256-bit bitmap.
      * Bucket index == priority; numerically smaller runs first. */
     for (int w = 0; w < 4; w++) {
-        uint64_t bits = pool->nonempty_bits[w];
+        uint64_t bits = atomic_load_explicit(&pool->nonempty_bits[w], memory_order_relaxed);
         if (bits != 0) {
             int          b        = w * 64 + __builtin_ctzll(bits);
             loom_task_t *t        = pool->buckets_head[b];
             pool->buckets_head[b] = t->next;
             if (pool->buckets_head[b] == NULL) {
                 pool->buckets_tail[b] = NULL;
-                pool->nonempty_bits[w] &= ~((uint64_t)1u << (b % 64));
+                atomic_fetch_and_explicit(&pool->nonempty_bits[w],
+                                          ~((uint64_t)1u << (b % 64)),
+                                          memory_order_relaxed);
             }
             t->next = NULL;
-            pool->queue_len--;
+            atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
             return t;
         }
     }
@@ -890,9 +951,11 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
                     pool->buckets_tail[b] = prev;
                 }
                 if (pool->buckets_head[b] == NULL) {
-                    pool->nonempty_bits[b / 64] &= ~((uint64_t)1u << (b % 64));
+                    atomic_fetch_and_explicit(&pool->nonempty_bits[b / 64],
+                                              ~((uint64_t)1u << (b % 64)),
+                                              memory_order_relaxed);
                 }
-                pool->queue_len--;
+                atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
                 loom_task_t *to_free = cur;
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);
@@ -944,9 +1007,11 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
                     pool->buckets_tail[b] = prev;
                 }
                 if (pool->buckets_head[b] == NULL) {
-                    pool->nonempty_bits[b / 64] &= ~((uint64_t)1u << (b % 64));
+                    atomic_fetch_and_explicit(&pool->nonempty_bits[b / 64],
+                                              ~((uint64_t)1u << (b % 64)),
+                                              memory_order_relaxed);
                 }
-                pool->queue_len--;
+                atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
                 loom_task_t *to_free = cur;
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);
@@ -995,11 +1060,10 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
             }
         }
-        pool->nonempty_bits[0] = 0;
-        pool->nonempty_bits[1] = 0;
-        pool->nonempty_bits[2] = 0;
-        pool->nonempty_bits[3] = 0;
-        pool->queue_len        = 0;
+        for (int w = 0; w < 4; w++) {
+            atomic_store_explicit(&pool->nonempty_bits[w], 0, memory_order_relaxed);
+        }
+        atomic_store_explicit(&pool->queue_len, 0, memory_order_relaxed);
     }
     pthread_mutex_unlock(&pool->lock);
     if (count) {

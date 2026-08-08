@@ -3,7 +3,9 @@
 
 #include "loomworks/thread_pool.h"
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 /* One cache line on modern x86-64.  Hot fields (mutex, condvars) are
  * aligned to avoid false sharing between worker threads. */
@@ -15,6 +17,9 @@
 /* Max task nodes retained on the pool free-list (prevents unbounded
  * residency after bursts; excess nodes are freed normally). */
 #define LOOMWORKS_NODE_POOL_CAP 4096
+
+/* Ring size for unbounded-mode pools (queue_capacity == 0). */
+#define LOOMWORKS_RING_DEFAULT_SLOTS 4096u
 
 /* ================================================================
  *  Task node — element of a per-priority FIFO bucket in the queue.
@@ -29,12 +34,28 @@
 typedef struct loom_task {
     loom_task_fn      fn;        /**< Task function to execute. */
     void             *user_data; /**< Opaque argument passed to @p fn. */
-    bool              cancelled; /**< true if task was cancelled before execution. */
+    _Atomic bool      cancelled; /**< true if task was cancelled before execution. */
     uint64_t          task_id;   /**< Unique task identifier (assigned on submission). */
     uint8_t           priority;  /**< Task priority (lower = higher). */
     struct loom_task *next;      /**< Next node in the queue. */
     bool              free_data; /**< true if user_data should be freed in task_destroy. */
 } loom_task_t;
+
+/* Ring cell — canonical Vyukov sequence numbers.  seq == pos is "empty for
+ * producer pos"; seq == pos+1 is "full"; seq == pos+ring_size is "released
+ * by the consumer at pos" (free for the producer at pos+ring_size). */
+typedef struct ring_cell {
+    _Atomic uint64_t seq;  /* position-relative sequence (see plan) */
+    void            *task; /* loom_task_t* — stable while in the ring */
+} ring_cell_t;
+
+/* Cancel index slot — open addressing, linear probe, hash = id & (cap-1).
+ * task_id: 0 = EMPTY, 1 = TOMBSTONE, id+1 = occupied. */
+typedef struct cancel_slot {
+    _Atomic uint64_t task_id; /* 0 EMPTY / 1 TOMBSTONE / id+1 occupied */
+    loom_task_t     *task;    /* owning task (for the cancelled flag) */
+    void            *data;    /* task user_data (for loom_pool_cancel) */
+} cancel_slot_t;
 
 /* ================================================================
  *  Future task context — bridges a loom_future_t to the pool's
@@ -78,9 +99,11 @@ struct loom_future {
 /**
  * @brief Opaque thread pool structure (visible here for internal use).
  *
- * @p lock protects the entire queue and the three bool flags.  The
- * condition variables are cache-line aligned to avoid false sharing
- * with the mutex on contended paths.
+ * @p lock protects the lane buckets, @p draining/@p joined, and @p cond
+ * (removed in Task 2, replaced by @p work_sem).  The lock-free Vyukov ring
+ * and the cancel index are accessed without @p lock.  The condition
+ * variables are cache-line aligned to avoid false sharing with the mutex on
+ * contended paths.
  *
  * @p joined tracks whether loom_pool_shutdown() has already called
  * pthread_join on every worker, making subsequent calls a no-op.
@@ -90,12 +113,14 @@ struct loom_thread_pool {
     size_t   stack_size;     /**< Stack size per worker (bytes). */
     uint32_t queue_capacity; /**< Max pending tasks (0 = unbounded). */
 
-    pthread_mutex_t lock      LOOMWORKS_CACHELINE_ALIGN; /**< Guard queue + flags. */
-    pthread_cond_t cond       LOOMWORKS_CACHELINE_ALIGN; /**< Signal when task enqueued. */
-    pthread_cond_t drain_cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when draining done. */
-    bool                      shutdown; /**< true once shutdown() has been called. */
-    bool                      draining; /**< true while workers are finishing tasks. */
-    bool                      joined;   /**< true once all threads have been joined. */
+    pthread_mutex_t lock       LOOMWORKS_CACHELINE_ALIGN; /**< Guard lane queue + flags. */
+    pthread_cond_t  cond       LOOMWORKS_CACHELINE_ALIGN; /**< Task-available (removed Task 2). */
+    pthread_cond_t  drain_cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when draining done. */
+    sem_t           work_sem   LOOMWORKS_CACHELINE_ALIGN; /**< Task-available wakeup (lock-free). */
+    pthread_cond_t  space_cond LOOMWORKS_CACHELINE_ALIGN; /**< Space-available (blocking submit). */
+    _Atomic bool               shutdown; /**< true once shutdown() has been called. */
+    bool                       draining; /**< true while workers are finishing tasks. */
+    bool                       joined;   /**< true once all threads have been joined. */
 
     /* Per-priority FIFO buckets: bucket[b] holds tasks with priority == b.
      * Numerically smaller priority runs first.  Enqueue appends to the
@@ -103,10 +128,27 @@ struct loom_thread_pool {
      * occupancy bitmap (O(1), ~4 loads + ctz). */
     loom_task_t *buckets_head[256]; /**< Per-priority bucket heads. */
     loom_task_t *buckets_tail[256]; /**< Per-priority bucket tails. */
-    uint64_t     nonempty_bits[4];  /**< Bit b set <=> buckets_head[b] != NULL. */
-    uint32_t     queue_len;         /**< Current number of pending tasks. */
-    loom_task_t *free_list;         /**< Pooled task nodes (reused, cap bounded). */
-    uint32_t     free_list_len;     /**< Number of nodes currently on free_list. */
+    _Atomic uint64_t nonempty_bits[4]; /**< Bit b set <=> buckets_head[b] != NULL. */
+    _Atomic uint32_t queue_len;        /**< Current pending tasks (ring + lanes). */
+    loom_task_t *free_list;            /**< Pooled task nodes (reused, cap bounded). */
+    uint32_t     free_list_len;        /**< Number of nodes currently on free_list. */
+
+    /* Lock-free Vyukov ring (NORMAL fast path). */
+    _Atomic uint64_t ring_head;  /**< Consumer position (monotonic). */
+    _Atomic uint64_t ring_tail;  /**< Producer position (monotonic). */
+    ring_cell_t     *ring;       /**< NULL when allocation failed (lane-only mode). */
+    uint64_t         ring_size;  /**< Power of two. */
+    uint64_t         ring_mask;  /**< ring_size - 1. */
+    _Atomic uint32_t ring_count; /**< Tasks currently in the ring. */
+
+    /* Lock-free task_id → slot index for ring cancel (open addressing). */
+    cancel_slot_t *cancel_slots; /**< NULL when ring is NULL. */
+    uint64_t       cancel_cap;   /**< Power of two >= 2 * ring_size. */
+
+    /* Lock-free node pool (tagged bounded stack; replaces free_list in Task 3). */
+    loom_task_t      *node_pool;     /**< Preallocated node array (never freed individually). */
+    uint32_t          node_pool_cap; /**< == LOOMWORKS_NODE_POOL_CAP. */
+    _Atomic uint64_t  node_stack;    /**< low32: top, high32: ABA tag. */
 
     _Atomic uint32_t active_workers; /**< Workers currently executing a task. */
 
