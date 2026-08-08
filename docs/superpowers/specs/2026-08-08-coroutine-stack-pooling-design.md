@@ -35,7 +35,7 @@ The thread pool received the equivalent treatment (task node pool + bucketized O
 
 typedef struct coro_stack_node {
     struct coro_stack_node *next;
-    size_t  stack_size;        /* exact-match key (requested usable size) */
+    size_t  stack_size;        /* exact-match key: c->stack_size (requested size, pre-rounding) */
     void   *mmap_base;         /* mapping metadata for reuse */
     size_t  mmap_size;
     void   *stack_start;
