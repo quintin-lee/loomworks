@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int g_passes   = 0;
 static int g_failures = 0;
@@ -299,6 +300,131 @@ static void test_many_coroutines(void)
     ASSERT(counter == N, "all coroutines completed");
 }
 
+/* ================================================================
+ *  Stack pool tests
+ * ================================================================ */
+/* ---------- Test: pool reuses the same mapping ----------
+ * Create/destroy 1000 default-size coroutines. Each cycle must recycle
+ * the exact same stack mapping (pool hit) — proven by a sentinel byte
+ * written into the live mapping that must survive destroy + recreate.
+ * (Address equality alone is not enough: the kernel's mmap allocator
+ * reuses the same hole after munmap. A fresh MAP_ANONYMOUS mmap would
+ * be zero-filled, so a surviving sentinel proves userspace pooling.)
+ * ---------- */
+static void test_stack_pool_reuse(void)
+{
+    void *first_start = NULL;
+    void *first_end   = NULL;
+    for (int i = 0; i < 1000; i++) {
+        loom_coroutine_t *coro = NULL;
+        ASSERT(loom_coro_create(simple_coro_fn, NULL, 0, &coro) == LOOMWORKS_CORO_OK,
+               "pool reuse create");
+        void *start = NULL;
+        void *end   = NULL;
+        ASSERT(loom_coro_stack_info(coro, &start, &end) == LOOMWORKS_CORO_OK,
+               "pool reuse stack info");
+        if (i > 0) {
+            ASSERT(start == first_start && end == first_end,
+                   "stack mapping recycled from pool");
+            ASSERT(*(volatile char *)first_start == (char)0x5A,
+                   "pool retains stack contents (no fresh mmap)");
+        } else {
+            first_start = start;
+            first_end   = end;
+        }
+        *(volatile char *)start = (char)0x5A;
+        loom_coro_destroy(&coro);
+    }
+}
+
+/* ---------- Test: size isolation (exact-match key) ---------- */
+static void test_stack_pool_size_isolation(void)
+{
+    loom_coroutine_t *coro = NULL;
+    ASSERT(loom_coro_create(simple_coro_fn, NULL, 0, &coro) == LOOMWORKS_CORO_OK,
+           "size isolation create 64K");
+    void *s64 = NULL;
+    void *e64 = NULL;
+    ASSERT(loom_coro_stack_info(coro, &s64, &e64) == LOOMWORKS_CORO_OK,
+           "size isolation info 64K");
+    *(volatile char *)s64 = (char)0x5A;
+    loom_coro_destroy(&coro);
+
+    /* A 256 KiB request must NOT receive the pooled 64 KiB mapping. */
+    ASSERT(loom_coro_create(simple_coro_fn, NULL, (size_t)256 * 1024, &coro) ==
+               LOOMWORKS_CORO_OK,
+           "size isolation create 256K");
+    void *s256 = NULL;
+    void *e256 = NULL;
+    ASSERT(loom_coro_stack_info(coro, &s256, &e256) == LOOMWORKS_CORO_OK,
+           "size isolation info 256K");
+    ASSERT((size_t)((char *)e256 - (char *)s256) == (size_t)256 * 1024,
+           "256K stack is full size (no 64K reuse)");
+    ASSERT(s256 != s64, "256K mapping differs from pooled 64K mapping");
+    loom_coro_destroy(&coro);
+
+    /* The 64 KiB mapping must still be pooled for later reuse. */
+    ASSERT(loom_coro_create(simple_coro_fn, NULL, 0, &coro) == LOOMWORKS_CORO_OK,
+           "size isolation create 64K again");
+    void *s64b = NULL;
+    void *e64b = NULL;
+    ASSERT(loom_coro_stack_info(coro, &s64b, &e64b) == LOOMWORKS_CORO_OK,
+           "size isolation info 64K again");
+    ASSERT(s64b == s64 && e64b == e64, "64K mapping preserved in pool");
+    ASSERT(*(volatile char *)s64b == (char)0x5A, "64K mapping retained (not re-mmap'd)");
+    loom_coro_destroy(&coro);
+}
+
+/* ---------- Test: guard pages intact on pooled reuse ---------- */
+typedef struct {
+    char *target;
+} guard_arg_t;
+
+static void guard_write_fn(void *arg)
+{
+    guard_arg_t   *a = (guard_arg_t *)arg;
+    volatile char *p = (volatile char *)a->target;
+    *p = (char)0xAA; /* PROT_NONE guard page -> SIGSEGV -> LOOMWORKS_CORO_ERR_GUARD */
+}
+
+static void test_stack_pool_guard_on_reuse(void)
+{
+    long psl = sysconf(_SC_PAGESIZE);
+    if (psl <= 0) {
+        psl = 4096;
+    }
+    size_t ps = (size_t)psl;
+
+    loom_coroutine_t *coro = NULL;
+    ASSERT(loom_coro_create(guard_write_fn, NULL, 0, &coro) == LOOMWORKS_CORO_OK,
+           "guard reuse create 1");
+    void *start = NULL;
+    void *end   = NULL;
+    ASSERT(loom_coro_stack_info(coro, &start, &end) == LOOMWORKS_CORO_OK,
+           "guard reuse info 1");
+    *(volatile char *)start = (char)0x5A;
+    loom_coro_destroy(&coro);
+
+    guard_arg_t arg = {0};
+    ASSERT(loom_coro_create(guard_write_fn, &arg, 0, &coro) == LOOMWORKS_CORO_OK,
+           "guard reuse create 2");
+    void *start2 = NULL;
+    void *end2   = NULL;
+    ASSERT(loom_coro_stack_info(coro, &start2, &end2) == LOOMWORKS_CORO_OK,
+           "guard reuse info 2");
+    ASSERT(start2 == start && end2 == end, "mapping recycled from pool");
+    ASSERT(*(volatile char *)start2 == (char)0x5A, "pool retained mapping contents");
+
+    /* Layout: [GUARD][GUARD][usable]; stack_start = base + 2*ps, so
+     * start2 - 2*ps == mmap base (first PROT_NONE page). The handler
+     * catches fp == base and longjmps -> resume returns ERR_GUARD. */
+    arg.target = (char *)start2 - (long)(LOOMWORKS_CORO_GUARD_PAGES_EACH * 2) * (long)ps;
+    loom_coro_result_t rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_GUARD, "guard violation trapped on pooled stack");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_ERROR, "state ERROR after guard fault");
+    loom_coro_destroy(&coro);
+}
+
 /* ---------- Test: yield then terminate ---------- */
 static void test_yield_then_terminate(void)
 {
@@ -379,6 +505,10 @@ int main(void)
     test_terminate();
     test_result_str();
     test_custom_stack_size();
+    /* Stack pool tests MUST run before test_many_coroutines (pool cap 64) */
+    test_stack_pool_reuse();
+    test_stack_pool_size_isolation();
+    test_stack_pool_guard_on_reuse();
     test_destroy_null();
     test_multi_yield_resume();
     test_terminate_new();

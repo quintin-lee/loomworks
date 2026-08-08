@@ -16,6 +16,9 @@
  * Stack layout (mmap with PROT_NONE guard pages on each side):
  *   [GUARD][GUARD][STACK][GUARD][GUARD]
  *   where GUARD pages are PROT_NONE.
+ * Freed stacks are pooled in coroutine.c (exact-size match, capped
+ * at 64 mappings); a pooled mapping is reused with zero syscalls on
+ * the next create of the same requested size.
  *
  * Context switching uses POSIX ucontext(3).  The scheduler context
  * (g_scheduler) is thread-local and persistent across all coroutines

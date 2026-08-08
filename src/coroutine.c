@@ -3,6 +3,7 @@
 #include "coroutine_internal.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -33,6 +34,29 @@ typedef struct scheduler_stack_node {
 } scheduler_stack_node_t;
 
 static scheduler_stack_node_t *g_scheduler_stacks = NULL;
+
+/* ================================================================
+ *  Stack pool — reuse mmap'd coroutine stacks across create/destroy
+ *  cycles.  Exact-size matching; global mutex; cap of 64 mappings
+ *  (~4 MiB worst case at 64 KiB each).  A pooled mapping needs zero
+ *  syscalls on reuse (guard pages + RW permissions persist in the
+ *  mapping; only the valgrind registration is re-done on acquire).
+ * ================================================================ */
+#define LOOMWORKS_CORO_STACK_POOL_CAP 64u
+
+typedef struct coro_stack_node {
+    struct coro_stack_node *next;
+    size_t                 stack_size; /* exact-match key (requested size, pre-rounding) */
+    void                  *mmap_base;
+    size_t                 mmap_size;
+    void                  *stack_start;
+    void                  *stack_end;
+    uintptr_t              valgrind_stack_id;
+} coro_stack_node_t;
+
+static coro_stack_node_t *g_stack_pool       = NULL;
+static pthread_mutex_t    g_stack_pool_lock  = PTHREAD_MUTEX_INITIALIZER;
+static size_t             g_stack_pool_count = 0;
 /* ================================================================
  *  Guard-page signal handler
  * ================================================================ */
@@ -108,6 +132,36 @@ void loom_coro_uninstall_guard_handler(void)
  * ================================================================ */
 static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
 {
+    /* Fast path: reuse an exact-size pooled mapping (zero syscalls). */
+    pthread_mutex_lock(&g_stack_pool_lock);
+    coro_stack_node_t **pp = &g_stack_pool;
+    while (*pp != NULL) {
+        if ((*pp)->stack_size == c->stack_size) {
+            coro_stack_node_t *node = *pp;
+            *pp                    = node->next;
+            g_stack_pool_count--;
+            pthread_mutex_unlock(&g_stack_pool_lock);
+
+            c->mmap_base   = node->mmap_base;
+            c->mmap_size   = node->mmap_size;
+            c->stack_start = node->stack_start;
+            c->stack_end   = node->stack_end;
+#ifdef VALGRIND_STACK_REGISTER
+            c->valgrind_stack_id =
+                (uintptr_t)VALGRIND_STACK_REGISTER(c->stack_start, c->stack_end);
+#else
+            (void)c->stack_start;
+            (void)c->stack_end;
+            c->valgrind_stack_id = 0;
+#endif
+            free(node);
+            return LOOMWORKS_CORO_OK;
+        }
+        pp = &(*pp)->next;
+    }
+    pthread_mutex_unlock(&g_stack_pool_lock);
+
+    /* Miss — fall through to the existing mmap + mprotect path. */
     long psl = sysconf(_SC_PAGESIZE);
     if (psl <= 0) {
         psl = 4096;
@@ -152,6 +206,34 @@ static void deallocate_stack(loom_coroutine_t *c)
 #ifdef VALGRIND_STACK_DEREGISTER
         VALGRIND_STACK_DEREGISTER((unsigned)c->valgrind_stack_id);
 #endif
+        /* Fast path: cache the mapping for reuse (respecting the cap). */
+        pthread_mutex_lock(&g_stack_pool_lock);
+        if (g_stack_pool_count < LOOMWORKS_CORO_STACK_POOL_CAP) {
+            coro_stack_node_t *node = (coro_stack_node_t *)malloc(sizeof(*node));
+            if (node != NULL) {
+                node->next              = g_stack_pool;
+                node->stack_size        = c->stack_size;
+                node->mmap_base         = c->mmap_base;
+                node->mmap_size         = c->mmap_size;
+                node->stack_start       = c->stack_start;
+                node->stack_end         = c->stack_end;
+                node->valgrind_stack_id = 0; /* re-registered on acquire */
+                g_stack_pool            = node;
+                g_stack_pool_count++;
+                pthread_mutex_unlock(&g_stack_pool_lock);
+
+                c->mmap_base        = NULL;
+                c->mmap_size        = 0;
+                c->stack_start      = NULL;
+                c->stack_end        = NULL;
+                c->valgrind_stack_id = 0;
+                return;
+            }
+        }
+        pthread_mutex_unlock(&g_stack_pool_lock);
+
+        /* Pool full or node alloc failed — munmap (unchanged semantics:
+         * failure is ignored, as today). */
         munmap(c->mmap_base, c->mmap_size);
         c->mmap_base = NULL;
         c->mmap_size = 0;
@@ -388,9 +470,28 @@ static void free_all_scheduler_stacks(void)
     }
 }
 
+static void free_all_pooled_stacks(void)
+{
+    pthread_mutex_lock(&g_stack_pool_lock);
+    coro_stack_node_t *cur = g_stack_pool;
+    g_stack_pool           = NULL;
+    g_stack_pool_count     = 0;
+    pthread_mutex_unlock(&g_stack_pool_lock);
+
+    while (cur != NULL) {
+        coro_stack_node_t *next = cur->next;
+        if (cur->mmap_base != NULL) {
+            munmap(cur->mmap_base, cur->mmap_size);
+        }
+        free(cur);
+        cur = next;
+    }
+}
+
 static __attribute__((destructor)) void coro_atexit(void)
 {
     free_all_scheduler_stacks();
+    free_all_pooled_stacks();
 }
 
 const char *loom_coro_result_str(loom_coro_result_t result)
