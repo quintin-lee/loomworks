@@ -863,6 +863,32 @@ static void ring_gate2_task(void *arg)
     }
 }
 
+static _Atomic int g_ring_cancel_done;
+static _Atomic int g_ring_cancel_release;
+static _Atomic int g_ring_cancel_run;
+
+static void ring_cancel_pin_task(void *arg)
+{
+    (void)arg;
+    atomic_store_explicit(&g_ring_cancel_done, 1, memory_order_release);
+    while (!atomic_load_explicit(&g_ring_cancel_release, memory_order_acquire)) {
+    }
+}
+
+static void ring_cancel_inc_task(void *arg)
+{
+    (void)arg;
+    atomic_fetch_add_explicit(&g_ring_cancel_run, 1, memory_order_relaxed);
+}
+
+static _Atomic int g_ring_cancel_data_hits;
+
+static void ring_cancel_data_task(void *arg)
+{
+    (void)arg;
+    atomic_fetch_add_explicit(&g_ring_cancel_data_hits, 1, memory_order_relaxed);
+}
+
 /* Guard: bounded pools use the ring (ring_size = next_pow2(capacity) = 8)
  * and enforce the configured capacity: the 6th submit is rejected. */
 static void test_ring_bounded_full(void)
@@ -933,6 +959,131 @@ static void test_ring_unbounded_spill(void)
     ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 4097,
            "spill: all 4097 tasks ran exactly once");
     ASSERT(loom_pool_pending_count(pool) == 0, "spill: nothing pending");
+    loom_pool_destroy(&pool);
+}
+
+/* Guard: cancel-by-id claims the ring cancel index; double-cancel
+ * is rejected as not-found. */
+static void test_ring_cancel_by_id(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 1;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-by-id create");
+
+    atomic_store_explicit(&g_ring_cancel_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_release, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_run, 0, memory_order_relaxed);
+
+    ASSERT(loom_pool_submit(pool, ring_cancel_pin_task, NULL, NULL) == LOOMWORKS_OK,
+           "cancel-by-id submit gate");
+    while (!atomic_load_explicit(&g_ring_cancel_done, memory_order_acquire)) {
+    }
+
+    uint64_t tid = 0;
+    ASSERT(loom_pool_submit(pool, ring_cancel_inc_task, NULL, &tid) == LOOMWORKS_OK,
+           "cancel-by-id submit victim");
+    ASSERT(tid != 0, "cancel-by-id: task id assigned");
+    ASSERT(loom_pool_pending_count(pool) == 1, "cancel-by-id: 1 pending");
+
+    ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_OK,
+           "cancel-by-id: first cancel ok");
+    ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_ERR_INVALID,
+           "cancel-by-id: double cancel rejected");
+
+    atomic_store_explicit(&g_ring_cancel_release, 1, memory_order_release);
+    loom_pool_shutdown(pool);
+    ASSERT(atomic_load_explicit(&g_ring_cancel_run, memory_order_relaxed) == 0,
+           "cancel-by-id: victim never ran");
+    ASSERT(loom_pool_pending_count(pool) == 0, "cancel-by-id: nothing pending");
+    loom_pool_destroy(&pool);
+}
+
+/* Guard: cancelling an unknown task id returns not-found. */
+static void test_ring_cancel_not_found(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 1;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-notfound create");
+
+    /* ids start at 1 and increment; UINT64_MAX can never be assigned */
+    ASSERT(loom_pool_cancel_by_id(pool, UINT64_MAX) == LOOMWORKS_ERR_INVALID,
+           "cancel-notfound: unknown id rejected");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* Guard: tombstones left by 64 cancels are skipped by the worker —
+ * none of the cancelled tasks run. */
+static void test_ring_tombstone_skip(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 1;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "tombstone create");
+
+    atomic_store_explicit(&g_ring_cancel_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_release, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_run, 0, memory_order_relaxed);
+
+    ASSERT(loom_pool_submit(pool, ring_cancel_pin_task, NULL, NULL) == LOOMWORKS_OK,
+           "tombstone submit gate");
+    while (!atomic_load_explicit(&g_ring_cancel_done, memory_order_acquire)) {
+    }
+
+    uint64_t tids[64];
+    for (uint32_t i = 0; i < 64; i++)
+        ASSERT(loom_pool_submit(pool, ring_cancel_inc_task, NULL, &tids[i]) == LOOMWORKS_OK,
+               "tombstone submit victim");
+    ASSERT(loom_pool_pending_count(pool) == 64, "tombstone: 64 pending");
+
+    for (uint32_t i = 0; i < 64; i++)
+        ASSERT(loom_pool_cancel_by_id(pool, tids[i]) == LOOMWORKS_OK,
+               "tombstone cancel victim");
+    ASSERT(loom_pool_pending_count(pool) == 0, "tombstone: all cancelled");
+
+    atomic_store_explicit(&g_ring_cancel_release, 1, memory_order_release);
+    loom_pool_shutdown(pool);
+    ASSERT(atomic_load_explicit(&g_ring_cancel_run, memory_order_relaxed) == 0,
+           "tombstone: cancelled tasks skipped, none ran");
+    ASSERT(loom_pool_pending_count(pool) == 0, "tombstone: nothing pending");
+    loom_pool_destroy(&pool);
+}
+
+/* Guard: loom_pool_cancel matches by user_data on ring-indexed tasks. */
+static void test_ring_cancel_data(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 1;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-data create");
+
+    int d1 = 1, d2 = 2;
+    atomic_store_explicit(&g_ring_cancel_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_release, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_data_hits, 0, memory_order_relaxed);
+
+    ASSERT(loom_pool_submit(pool, ring_cancel_pin_task, NULL, NULL) == LOOMWORKS_OK,
+           "cancel-data submit gate");
+    while (!atomic_load_explicit(&g_ring_cancel_done, memory_order_acquire)) {
+    }
+
+    ASSERT(loom_pool_submit(pool, ring_cancel_data_task, &d1, NULL) == LOOMWORKS_OK,
+           "cancel-data submit d1");
+    ASSERT(loom_pool_submit(pool, ring_cancel_data_task, &d2, NULL) == LOOMWORKS_OK,
+           "cancel-data submit d2");
+
+    ASSERT(loom_pool_cancel(pool, &d1) == LOOMWORKS_OK, "cancel-data: d1 cancelled");
+    ASSERT(loom_pool_cancel(pool, &d2) == LOOMWORKS_OK, "cancel-data: d2 cancelled");
+    ASSERT(loom_pool_cancel(pool, &d1) == LOOMWORKS_ERR_INVALID,
+           "cancel-data: re-cancel rejected");
+    ASSERT(loom_pool_pending_count(pool) == 0, "cancel-data: nothing pending");
+
+    atomic_store_explicit(&g_ring_cancel_release, 1, memory_order_release);
+    loom_pool_shutdown(pool);
+    ASSERT(atomic_load_explicit(&g_ring_cancel_data_hits, memory_order_relaxed) == 0,
+           "cancel-data: neither task ran");
     loom_pool_destroy(&pool);
 }
 #include "loomworks/metrics.h"
@@ -2304,6 +2455,10 @@ int main(void)
     test_ring_multithread_stress();
     test_ring_bounded_full();
     test_ring_unbounded_spill();
+    test_ring_cancel_by_id();
+    test_ring_cancel_not_found();
+    test_ring_tombstone_skip();
+    test_ring_cancel_data();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
