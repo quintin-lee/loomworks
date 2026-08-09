@@ -99,11 +99,10 @@ struct loom_future {
 /**
  * @brief Opaque thread pool structure (visible here for internal use).
  *
- * @p lock protects the lane buckets, @p draining/@p joined, and @p cond
- * (removed in Task 2, replaced by @p work_sem).  The lock-free Vyukov ring
- * and the cancel index are accessed without @p lock.  The condition
- * variables are cache-line aligned to avoid false sharing with the mutex on
- * contended paths.
+ * @p lock protects the lane buckets, @p draining/@p joined, and the
+ * condition variables.  The lock-free Vyukov ring and the cancel index
+ * are accessed without @p lock.  The condition variables are cache-line
+ * aligned to avoid false sharing with the mutex on contended paths.
  *
  * @p joined tracks whether loom_pool_shutdown() has already called
  * pthread_join on every worker, making subsequent calls a no-op.
@@ -114,7 +113,6 @@ struct loom_thread_pool {
     uint32_t queue_capacity; /**< Max pending tasks (0 = unbounded). */
 
     pthread_mutex_t lock       LOOMWORKS_CACHELINE_ALIGN; /**< Guard lane queue + flags. */
-    pthread_cond_t  cond       LOOMWORKS_CACHELINE_ALIGN; /**< Task-available (removed Task 2). */
     pthread_cond_t  drain_cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when draining done. */
     sem_t           work_sem   LOOMWORKS_CACHELINE_ALIGN; /**< Task-available wakeup (lock-free). */
     pthread_cond_t  space_cond LOOMWORKS_CACHELINE_ALIGN; /**< Space-available (blocking submit). */
