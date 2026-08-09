@@ -849,6 +849,92 @@ static void test_ring_multithread_stress(void)
     ASSERT(loom_pool_pending_count(pool) == 0, "stress: nothing pending");
     loom_pool_destroy(&pool);
 }
+
+/* --- ring acceptance helpers (spec 2026-08-09) --- */
+
+static _Atomic int g_ring_gate2_started;
+static _Atomic int g_ring_gate2_release;
+
+static void ring_gate2_task(void *arg)
+{
+    (void)arg;
+    atomic_store_explicit(&g_ring_gate2_started, 1, memory_order_release);
+    while (!atomic_load_explicit(&g_ring_gate2_release, memory_order_acquire)) {
+    }
+}
+
+/* Guard: bounded pools use the ring (ring_size = next_pow2(capacity) = 8)
+ * and enforce the configured capacity: the 6th submit is rejected. */
+static void test_ring_bounded_full(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count   = 1;
+    cfg.queue_capacity = 5;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "bounded create");
+
+    atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_gate2_started, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_gate2_release, 0, memory_order_relaxed);
+
+    /* gate: NORMAL -> ring, pins the only worker */
+    ASSERT(loom_pool_submit(pool, ring_gate2_task, NULL, NULL) == LOOMWORKS_OK,
+           "bounded submit gate");
+    while (!atomic_load_explicit(&g_ring_gate2_started, memory_order_acquire)) {
+    }
+
+    for (uint32_t i = 0; i < 5; i++)
+        ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
+               "bounded fill ring");
+    ASSERT(loom_pool_pending_count(pool) == 5, "bounded: 5 pending");
+
+    /* 6th submit must be rejected: queue is full */
+    ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_ERR_INVALID,
+           "bounded: full queue rejects submit");
+
+    atomic_store_explicit(&g_ring_gate2_release, 1, memory_order_release);
+    loom_pool_shutdown(pool);
+    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 5,
+           "bounded: all 5 queued tasks ran exactly once");
+    ASSERT(loom_pool_pending_count(pool) == 0, "bounded: nothing pending");
+    loom_pool_destroy(&pool);
+}
+
+/* Guard: unbounded pools (capacity 0) get a 4096-slot ring
+ * (LOOMWORKS_RING_DEFAULT_SLOTS); the 4097th NORMAL submit spills
+ * to the NORMAL lane instead of failing. */
+static void test_ring_unbounded_spill(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 1;
+    cfg.queue_capacity = 0;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "spill create");
+
+    atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_gate2_started, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_gate2_release, 0, memory_order_relaxed);
+
+    ASSERT(loom_pool_submit(pool, ring_gate2_task, NULL, NULL) == LOOMWORKS_OK,
+           "spill submit gate");
+    while (!atomic_load_explicit(&g_ring_gate2_started, memory_order_acquire)) {
+    }
+
+    for (uint32_t i = 0; i < 4096; i++)
+        ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
+               "spill fill ring");
+    /* ring is full now: overflow accepted via NORMAL lane */
+    ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
+           "spill: overflow accepted via lane");
+    ASSERT(loom_pool_pending_count(pool) == 4097, "spill: 4097 pending");
+
+    atomic_store_explicit(&g_ring_gate2_release, 1, memory_order_release);
+    loom_pool_shutdown(pool);
+    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 4097,
+           "spill: all 4097 tasks ran exactly once");
+    ASSERT(loom_pool_pending_count(pool) == 0, "spill: nothing pending");
+    loom_pool_destroy(&pool);
+}
 #include "loomworks/metrics.h"
 
 /* ---------- Test: metrics callback ---------- */
@@ -2216,6 +2302,8 @@ int main(void)
     test_metrics_invariant_all_complete();
     test_ring_basic();
     test_ring_multithread_stress();
+    test_ring_bounded_full();
+    test_ring_unbounded_spill();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
