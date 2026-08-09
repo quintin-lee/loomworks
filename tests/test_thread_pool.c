@@ -3,6 +3,7 @@
 #include "loomworks/thread_pool.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -785,6 +786,67 @@ static void test_priority_future(void)
     free(result);
     loom_future_destroy(fut);
     loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ==== Ring fast-path tests (lock-free NORMAL queue) ==== */
+
+static _Atomic int g_ring_run_count;
+
+static void ring_inc_task(void *arg)
+{
+    (void)arg;
+    atomic_fetch_add_explicit(&g_ring_run_count, 1, memory_order_relaxed);
+}
+
+static void test_ring_basic(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 2;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "basic create");
+
+    atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
+    for (uint32_t i = 0; i < 1000; i++)
+        ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
+               "basic submit");
+
+    loom_pool_shutdown(pool);
+    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 1000,
+           "basic: all 1000 NORMAL tasks ran exactly once");
+    ASSERT(loom_pool_pending_count(pool) == 0, "basic: nothing pending");
+    loom_pool_destroy(&pool);
+}
+
+static void *ring_producer(void *arg)
+{
+    loom_thread_pool_t *pool = (loom_thread_pool_t *)arg;
+    for (uint32_t i = 0; i < 25000; i++) {
+        if (loom_pool_submit(pool, ring_inc_task, NULL, NULL) != LOOMWORKS_OK)
+            break; /* tolerate shutdown race in stress test only */
+    }
+    return NULL;
+}
+
+static void test_ring_multithread_stress(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 8;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "stress create");
+
+    pthread_t producers[4];
+    atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
+    for (int i = 0; i < 4; i++)
+        ASSERT(pthread_create(&producers[i], NULL, ring_producer, pool) == 0,
+               "stress spawn producer");
+    for (int i = 0; i < 4; i++)
+        pthread_join(producers[i], NULL);
+
+    loom_pool_shutdown(pool);
+    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 100000,
+           "stress: 4x25k tasks ran exactly once");
+    ASSERT(loom_pool_pending_count(pool) == 0, "stress: nothing pending");
     loom_pool_destroy(&pool);
 }
 #include "loomworks/metrics.h"
@@ -2152,6 +2214,8 @@ int main(void)
     test_resize_null_safety();
     test_metrics_invariant();
     test_metrics_invariant_all_complete();
+    test_ring_basic();
+    test_ring_multithread_stress();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
