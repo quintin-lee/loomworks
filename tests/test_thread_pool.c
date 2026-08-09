@@ -889,6 +889,33 @@ static void ring_cancel_data_task(void *arg)
     atomic_fetch_add_explicit(&g_ring_cancel_data_hits, 1, memory_order_relaxed);
 }
 
+static _Atomic int g_ring_order_len;
+static int g_ring_order[512];
+
+static void ring_order_record(int prio)
+{
+    int idx = atomic_fetch_add_explicit(&g_ring_order_len, 1, memory_order_relaxed);
+    g_ring_order[idx] = prio;
+}
+
+static void ring_normal_rec(void *arg)
+{
+    (void)arg;
+    ring_order_record(LOOMWORKS_PRIORITY_NORMAL);
+}
+
+static void ring_high_rec(void *arg)
+{
+    (void)arg;
+    ring_order_record(LOOMWORKS_PRIORITY_HIGH);
+}
+
+static void ring_rt_rec(void *arg)
+{
+    (void)arg;
+    ring_order_record(LOOMWORKS_PRIORITY_REALTIME);
+}
+
 /* Guard: bounded pools use the ring (ring_size = next_pow2(capacity) = 8)
  * and enforce the configured capacity: the 6th submit is rejected. */
 static void test_ring_bounded_full(void)
@@ -1084,6 +1111,75 @@ static void test_ring_cancel_data(void)
     loom_pool_shutdown(pool);
     ASSERT(atomic_load_explicit(&g_ring_cancel_data_hits, memory_order_relaxed) == 0,
            "cancel-data: neither task ran");
+    loom_pool_destroy(&pool);
+}
+
+/* Guard: REALTIME/HIGH lane tasks run before ring NORMAL tasks even
+ * when the NORMAL ones were submitted first. Worker drain order is
+ * lanes <5 -> ring -> lanes >=5 (src/thread_pool.c worker_entry). */
+static void test_ring_priority_preempt(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 1;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "preempt create");
+
+    atomic_store_explicit(&g_ring_order_len, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ring_cancel_release, 0, memory_order_relaxed);
+
+    /* gate: NORMAL -> ring, pins the worker (does not record) */
+    ASSERT(loom_pool_submit(pool, ring_cancel_pin_task, NULL, NULL) == LOOMWORKS_OK,
+           "preempt submit gate");
+    while (!atomic_load_explicit(&g_ring_cancel_done, memory_order_acquire)) {
+    }
+
+    for (uint32_t i = 0; i < 50; i++)
+        ASSERT(loom_pool_submit_priority(pool, ring_normal_rec, NULL,
+                                         LOOMWORKS_PRIORITY_NORMAL, NULL) == LOOMWORKS_OK,
+               "preempt submit normal");
+    for (uint32_t i = 0; i < 3; i++)
+        ASSERT(loom_pool_submit_priority(pool, ring_rt_rec, NULL,
+                                         LOOMWORKS_PRIORITY_REALTIME, NULL) == LOOMWORKS_OK,
+               "preempt submit rt");
+    for (uint32_t i = 0; i < 3; i++)
+        ASSERT(loom_pool_submit_priority(pool, ring_high_rec, NULL,
+                                         LOOMWORKS_PRIORITY_HIGH, NULL) == LOOMWORKS_OK,
+               "preempt submit high");
+    ASSERT(loom_pool_pending_count(pool) == 56, "preempt: 56 pending");
+
+    atomic_store_explicit(&g_ring_cancel_release, 1, memory_order_release);
+    loom_pool_shutdown(pool);
+
+    /* 56 records: 3 RT, 3 HIGH, 50 NORMAL (gate does not record) */
+    int len = atomic_load_explicit(&g_ring_order_len, memory_order_relaxed);
+    ASSERT(len == 56, "preempt: all 56 ran and recorded");
+    int ok = 1;
+    for (int i = 0; i < 3; i++) ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_REALTIME;
+    for (int i = 3; i < 6; i++) ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_HIGH;
+    for (int i = 6; i < 56; i++) ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_NORMAL;
+    ASSERT(ok, "preempt: RT(0)x3, HIGH(1)x3, then NORMAL(5)x50");
+    ASSERT(loom_pool_pending_count(pool) == 0, "preempt: nothing pending");
+    loom_pool_destroy(&pool);
+}
+
+/* Guard: shutdown drains the ring — all 500 tasks run exactly once. */
+static void test_ring_shutdown_drains(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {0};
+    cfg.worker_count = 2;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "shutdown-drain create");
+
+    atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
+    for (uint32_t i = 0; i < 500; i++)
+        ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
+               "shutdown-drain submit");
+
+    loom_pool_shutdown(pool); /* must drain the ring before returning */
+    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 500,
+           "shutdown-drain: all 500 ran exactly once");
+    ASSERT(loom_pool_pending_count(pool) == 0, "shutdown-drain: nothing pending");
     loom_pool_destroy(&pool);
 }
 #include "loomworks/metrics.h"
@@ -2459,6 +2555,8 @@ int main(void)
     test_ring_cancel_not_found();
     test_ring_tombstone_skip();
     test_ring_cancel_data();
+    test_ring_priority_preempt();
+    test_ring_shutdown_drains();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
