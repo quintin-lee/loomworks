@@ -432,10 +432,17 @@ static void *fast_result_task(void *arg)
     return (void *)val;
 }
 
-static void *slow_result_task(void *arg)
+static void *gated_result_task(void *arg)
 {
     (void)arg;
-    return NULL;
+    g_gate_started = 1;
+    while (!g_gate_release) {
+    }
+    int *val = (int *)malloc(sizeof(int));
+    if (val) {
+        *val = 42;
+    }
+    return val;
 }
 
 /* ---------- Test: cancel pending task ---------- */
@@ -509,12 +516,19 @@ static void test_future_wait_timeout_ok(void)
 /* ---------- Test: future_wait_timeout (should timeout) ---------- */
 static void test_future_wait_timeout_expired(void)
 {
+    g_gate_started = 0;
+    g_gate_release = 0;
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
     loom_future_t *fut = NULL;
-    ASSERT(loom_pool_submit_future(pool, slow_result_task, NULL, &fut, NULL) == LOOMWORKS_OK,
-           "submit slow future");
+    ASSERT(loom_pool_submit_future(pool, gated_result_task, NULL, &fut, NULL) == LOOMWORKS_OK,
+           "submit gated future");
+
+    /* Wait until the worker is inside the gated task: the future is now
+     * guaranteed to still be pending when wait_timeout runs below. */
+    while (!g_gate_started) {
+    }
 
     /* Deadline in the past */
     struct timespec deadline = {.tv_sec = 0, .tv_nsec = 0};
@@ -522,6 +536,14 @@ static void test_future_wait_timeout_expired(void)
     void *result = NULL;
     ASSERT(loom_future_wait_timeout(fut, &result, &deadline) == LOOMWORKS_ERR_TIMEOUT,
            "wait_timeout times out");
+
+    /* Release the gate so the task can finish and the pool can shut down. */
+    g_gate_release = 1;
+    void *done = NULL;
+    ASSERT(loom_future_wait(fut, &done) == LOOMWORKS_OK, "future completes after release");
+    if (done) {
+        free(done);
+    }
 
     loom_pool_shutdown(pool);
     loom_future_destroy(fut);
