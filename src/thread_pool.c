@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -733,10 +734,14 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
     if (!pool) {
         return LOOMWORKS_ERR_INVALID;
     }
-    loom_thread_pool_t *p = (loom_thread_pool_t *)calloc(1, sizeof(*p));
-    if (!p) {
+    /* struct loom_thread_pool embeds LOOMWORKS_CACHELINE_ALIGN (aligned(64))
+     * members, so it must itself be 64-byte aligned; plain calloc only
+     * guarantees max_align_t (16). Use posix_memalign + memset. */
+    loom_thread_pool_t *p = NULL;
+    if (posix_memalign((void **)&p, 64, sizeof(*p)) != 0) {
         return LOOMWORKS_ERR_ALLOC;
     }
+    memset(p, 0, sizeof(*p));
     if (config) {
         p->worker_count   = config->worker_count;
         p->stack_size     = config->stack_size;
