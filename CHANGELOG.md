@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Bucketized priority queue: 256 O(1) FIFO buckets with 256-bit occupancy bitmap (replaces the single linked list)
+- Lock-free node pool: ABA-tagged Treiber stack recycles task nodes (`LOOMWORKS_NODE_POOL_CAP`)
+- Lock-free Vyukov bounded ring as the NORMAL-priority fast path, spilling to the priority lanes when full
+- Open-addressing cancel index: `loom_pool_cancel()` / `cancel_by_id()` / `cancel_all()` can retract not-yet-started tasks
+- POSIX counting semaphore (`work_sem`) worker wakeup, replacing the condition variable (no lost wakeups)
+- Coroutine stack pooling: capped at 64 exact-size mmap mappings, reused across create/destroy cycles with zero syscalls
+- Serialize the scheduler-stack registry with `g_scheduler_lock` — fixes a heap-corruption race when pool workers run coroutines concurrently
+- Scheduler-stack race stress regression test (pool + coroutine interop under 64 workers)
+- `examples/monitor_demo.c` — metrics monitoring demo
 - Full project rename from `ctpool` to `loomworks`
 - `docs/faq.md` — frequently asked questions
 - `docs/migration.md` — migration guide from ctpool
@@ -30,10 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Task queue redesigned from O(n) single linked list to O(1) per-priority FIFO buckets with a 256-bit occupancy bitmap (enqueue and dequeue now constant time)
 - Task nodes pooled on a bounded free-list (`LOOMWORKS_NODE_POOL_CAP`) to cut alloc/free churn on submit/drain
 - `clock_gettime` calls in the worker loop now lazy: only invoked when metrics collection is enabled (zero overhead otherwise)
+- Shared library (`libloomworks.so`, SOVERSION 1) now builds and works at runtime, including coroutines
 
 ### Fixed
 - Fixed misleading blocks syntax (`^()`) in README examples; replaced with standard C function pointers
 - `bench_future_overhead` hung at shutdown: future pool destroyed without a prior `loom_pool_shutdown` (contract violation); now shuts down before destroy
+- Scheduler-stack registry race: concurrent `loom_coro_exit()` / `ensure_scheduler()` from pool worker threads corrupted the global list, causing heap corruption at process exit. List mutations are now serialized by `g_scheduler_lock`.
 
 ---
 
@@ -47,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SIGSEGV/SIGBUS signal handler for safe stack overflow recovery
 - Per-thread scheduler context (`_Thread_local`) for cross-thread safety
 - Cache-line aligned structures to prevent false sharing
-- Comprehensive test suite: 1025 pool assertions, 36 coroutine assertions, 50511 integration assertions
+- Comprehensive test suite: ~10455 pool assertions, ~5587 coroutine assertions, ~68750 integration assertions
 - Full API documentation in `docs/api-reference.md`
 - Architecture documentation in `docs/architecture.md`
 - Design decisions documentation in `docs/design-decisions.md`

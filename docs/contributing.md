@@ -88,11 +88,14 @@ Every new feature or fix must include corresponding test cases:
 
 ```bash
 # CMake
-cd build_cmake && ctest --output-on-failure
+cmake -S . -B build
+cmake --build build
+cd build && ctest --output-on-failure
 
-# Direct compilation
+# Direct compilation (all five translation units)
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
-    -I include src/thread_pool.c src/coroutine.c \
+    -I include \
+    src/thread_pool.c src/coroutine.c src/pipeline.c src/task_group.c src/metrics.c \
     tests/test_coroutine.c -o test_coroutine && ./test_coroutine
 ```
 
