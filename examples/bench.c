@@ -6,6 +6,7 @@
  *   1. submit_latency   — per-submit call overhead (ns)
  *   2. throughput       — max tasks/sec with N workers
  *   3. worker_scaling   — throughput vs worker count (1,2,4,8,16,32,64)
+ *   3b. parallel_scaling — multi-producer scaling with CPU-bound tasks
  *   4. bounded_queue    — throughput with bounded vs unbounded queue
  *   5. future_overhead  — fire-and-forget vs future-based submission
  *   6. coro_create_destroy — coroutine create+destroy lifecycle cost (ns/cycle)
@@ -16,6 +17,7 @@
 #include "loomworks/thread_pool.h"
 #include "loomworks/coroutine.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -156,6 +158,102 @@ static void bench_worker_scaling(void)
     }
 }
 
+/* ---------- Benchmark 3b: parallel_scaling ----------
+ * Multi-producer scaling with CPU-bound tasks.  The single-producer
+ * noop worker_scaling bench measures wakeup latency (sem_post→futex
+ * per task); with real work per task and parallel producers, worker
+ * count should scale throughput.  This is the acceptance workload
+ * for the ring scaling gate (worker_scaling-8 >= worker_scaling-1).
+ * ---------- */
+#define PARALLEL_PRODUCERS 8
+
+typedef struct {
+    loom_thread_pool_t *pool;
+    int                 tasks;
+    pthread_barrier_t  *start;
+} parallel_submit_arg_t;
+
+static void cpu_task(void *arg)
+{
+    /* ~4us of CPU work: a data-dependent loop the compiler cannot
+     * eliminate (result feeds the stop condition). */
+    volatile uint64_t x = (uintptr_t)arg;
+    uint64_t          n = 3000;
+    for (uint64_t i = 0; i < n; i++) {
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    }
+    (void)x;
+}
+
+static void *parallel_submit_worker(void *arg)
+{
+    parallel_submit_arg_t *pa = (parallel_submit_arg_t *)arg;
+    pthread_barrier_wait(pa->start);
+    for (int i = 0; i < pa->tasks; i++) {
+        loom_pool_submit(pa->pool, cpu_task, NULL, NULL);
+    }
+    return NULL;
+}
+
+static void bench_parallel_scaling(void)
+{
+    int  workers[] = {1, 2, 4, 8, 16, 32, 64};
+    int  n_workers = (int)(sizeof(workers) / sizeof(workers[0]));
+    long max_cpus  = sysconf(_SC_NPROCESSORS_ONLN);
+    if (max_cpus < 1) {
+        max_cpus = 1;
+    }
+    int prod = PARALLEL_PRODUCERS;
+    if (prod > (int)max_cpus) {
+        prod = (int)max_cpus;
+    }
+
+    printf("  %-8s  %s\n", "workers", "tasks/sec");
+    printf("  -------  --------\n");
+    for (int i = 0; i < n_workers; i++) {
+        int w = workers[i];
+        if (w > (int)max_cpus) {
+            break;
+        }
+
+        loom_thread_pool_t *pool = NULL;
+        loom_pool_config_t  cfg  = {.worker_count = (uint32_t)w, .queue_capacity = 0};
+        loom_pool_create(&cfg, &pool);
+
+        /* Each producer submits g_task_count/prod tasks. */
+        int per_prod = g_task_count / prod;
+        if (per_prod < 1) {
+            per_prod = 1;
+        }
+        int                     total_tasks = per_prod * prod;
+        pthread_barrier_t       start;
+        pthread_barrier_init(&start, NULL, (unsigned)prod);
+        parallel_submit_arg_t   args[PARALLEL_PRODUCERS];
+        pthread_t               th[PARALLEL_PRODUCERS];
+
+        double t0 = now_ns();
+        for (int p = 0; p < prod; p++) {
+            args[p].pool  = pool;
+            args[p].tasks = per_prod;
+            args[p].start = &start;
+            pthread_create(&th[p], NULL, parallel_submit_worker, &args[p]);
+        }
+        /* Wait for all producers to finish submitting, then drain. */
+        for (int p = 0; p < prod; p++) {
+            pthread_join(th[p], NULL);
+        }
+        loom_pool_shutdown(pool);
+        double t1         = now_ns();
+        double elapsed_ms = (t1 - t0) / 1e6;
+        double tps        = (double)total_tasks / (elapsed_ms / 1000.0);
+
+        printf("  %8d  %.0f\n", w, tps);
+
+        pthread_barrier_destroy(&start);
+        loom_pool_destroy(&pool);
+    }
+}
+
 /* ---------- Benchmark 4: bounded_queue ----------
  * Compare unbounded (capacity=0) vs bounded queue.
  * With a bounded queue, submit should block when full, so
@@ -237,8 +335,7 @@ static void bench_queue_depth(void)
 /* ---------- Benchmark 5: future_overhead ----------
  * Compare fire-and-forget (submit) vs future-based (submit_future
  * + future_wait) submission latency.
- * ---------- */
-static void bench_future_overhead(void)
+ * ---------- */static void bench_future_overhead(void)
 {
     const int FUTURE_N = 100;
 
@@ -364,6 +461,10 @@ int main(int argc, char *argv[])
     printf("\n[3/5] worker_scaling\n");
     fflush(stdout);
     bench_worker_scaling();
+
+    printf("\n[3b] parallel_scaling\n");
+    fflush(stdout);
+    bench_parallel_scaling();
 
     printf("\n[4/5] bounded_queue\n");
     fflush(stdout);
