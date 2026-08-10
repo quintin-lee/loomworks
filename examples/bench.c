@@ -310,7 +310,10 @@ static void bench_queue_depth(void)
     for (int i = 0; i < 4; i++) {
         int                 d    = g_queue_depths[i];
         double              best = 1e18;
-        for (int r = 0; r < 3; r++) {
+        /* best-of-10: CI runners are noisy (observed up to -58% on
+         * identical binaries with best-of-3); more reps tighten the
+         * best-of estimator without changing what it measures. */
+        for (int r = 0; r < 10; r++) {
             loom_thread_pool_t *pool = NULL;
             loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
             loom_pool_create(&cfg, &pool);

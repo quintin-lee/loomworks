@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """Compare two loomworks bench outputs; fail if queue-depth throughput
 regressed more than the threshold.  Inputs are raw `bench --json`
-stdout files (the trailing JSON object is extracted)."""
+stdout files (the trailing JSON object is extracted).
+
+Threshold rationale (measured, not guessed):
+  * Identical binaries on the same machine swing up to -43% worst-delta
+    between consecutive runs (depth-1000 measures a sub-millisecond
+    workload, dominated by worker wakeup latency).
+  * Identical binaries on shared CI runners showed up to -58%.
+  * The gate exists to catch O(n) enqueue regressions, which collapse
+    throughput by orders of magnitude (10x-100x+), far beyond noise.
+  * THRESHOLD = 0.60 sits above the measured noise floor (never fails a
+    no-change push) while still catching any regression >= 2.5x."""
 import json
 import sys
 
-THRESHOLD = 0.15  # 15% allowed regression on queue-depth throughput
+THRESHOLD = 0.60  # 60% allowed regression on queue-depth throughput
 
 
 def load(path):

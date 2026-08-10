@@ -24,7 +24,18 @@ jobs:
         run: cmake --build build -j$(nproc)
       - name: Checkout baseline
         run: |
-          BASE_REF="${GITHUB_BASE_REF:-origin/master}"
+          # PR: compare against the target branch tip. Push: compare
+          # against the previous tip (event.before) -- NOT origin/master,
+          # which after a push IS the pushed commit (self-comparison).
+          if [ -n "$GITHUB_BASE_REF" ]; then
+            BASE_REF="origin/$GITHUB_BASE_REF"
+          elif [ -n "${{ github.event.before }}" ] && \
+               [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE_REF="${{ github.event.before }}"
+          else
+            BASE_REF="HEAD~1"
+          fi
+          echo "Baseline ref: $BASE_REF"
           git worktree add /tmp/base "$BASE_REF" || git worktree add /tmp/base "origin/$BASE_REF"
       - name: Configure baseline (Release)
         run: cmake -S /tmp/base -B /tmp/base/build -DCMAKE_BUILD_TYPE=Release

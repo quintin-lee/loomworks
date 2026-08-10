@@ -66,8 +66,11 @@ jobs:
         run: >
           cd build &&
           valgrind --leak-check=full --error-exitcode=1
+          --suppressions=${{ github.workspace }}/.github/valgrind.supp
           ./test_thread_pool &&
           valgrind --leak-check=full --error-exitcode=1
+          --suppressions=${{ github.workspace }}/.github/valgrind.supp
           ./test_coroutine &&
           valgrind --leak-check=full --error-exitcode=1
+          --suppressions=${{ github.workspace }}/.github/valgrind.supp
           ./test_integration

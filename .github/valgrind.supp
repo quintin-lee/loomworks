@@ -1,0 +1,13 @@
+# Valgrind suppressions for loomworks CI.
+#
+# test_coroutine.c guard_write_fn() deliberately writes to a PROT_NONE
+# guard page to verify the SIGSEGV -> LOOMWORKS_CORO_ERR_GUARD mechanism.
+# Memcheck reports that intentional write as "Invalid write of size 1";
+# the test itself passes (the fault is caught by the library's handler).
+# Without this suppression --error-exitcode=1 turns the deliberate fault
+# into a job failure.
+{
+   loomworks-coro-guard-page-write
+   Memcheck:Addr1
+   fun:guard_write_fn
+}
