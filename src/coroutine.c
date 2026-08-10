@@ -35,6 +35,18 @@ typedef struct scheduler_stack_node {
 
 static scheduler_stack_node_t *g_scheduler_stacks = NULL;
 
+/* Serializes all mutations of g_scheduler_stacks.  Three writers:
+ *  - ensure_scheduler()           appends (a thread's first coro resume)
+ *  - loom_coro_exit()             unlinks + frees (worker loop top)
+ *  - free_all_scheduler_stacks()  atexit teardown
+ * A dedicated lock keeps this registry independent of the stack pool;
+ * the only cross-lock ordering that can occur is pool->lock ->
+ * g_scheduler_lock (loom_coro_exit runs under the pool lock and no
+ * coroutine API path takes g_scheduler_lock then a pool lock), so there
+ * is no lock-cycle.  free_all_scheduler_stacks additionally assumes all
+ * threads have been joined before process exit (pthread contract). */
+static pthread_mutex_t g_scheduler_lock = PTHREAD_MUTEX_INITIALIZER;
+
 /* ================================================================
  *  Stack pool — reuse mmap'd coroutine stacks across create/destroy
  *  cycles.  Exact-size matching; global mutex; cap of 64 mappings
@@ -267,12 +279,15 @@ static bool ensure_scheduler(void)
     g_scheduler.uc_link           = NULL;
     g_scheduler_inited            = true;
 
-    /* Track for cleanup. */
+    /* Track for cleanup — append must be serialized against concurrent
+     * loom_coro_exit() unlinks and the atexit walk. */
     scheduler_stack_node_t *node = (scheduler_stack_node_t *)malloc(sizeof(*node));
     if (node) {
+        pthread_mutex_lock(&g_scheduler_lock);
         node->stack        = g_scheduler_stack;
         node->next         = g_scheduler_stacks;
         g_scheduler_stacks = node;
+        pthread_mutex_unlock(&g_scheduler_lock);
     }
     return true;
 }
@@ -439,10 +454,15 @@ loom_coro_result_t loom_coro_stack_info(const loom_coroutine_t *coro, void **sta
 void loom_coro_exit(void)
 {
     /* Free the scheduler stack for this thread, if any.
-     * Also remove from the global list so coro_atexit doesn't double-free. */
+     * Also remove from the global list so coro_atexit doesn't double-free.
+     * Called with the pool lock held (worker loop); the unlink must be
+     * serialized against concurrent ensure_scheduler() appends from other
+     * threads.  free(stack) stays outside the lock: after the unlink the
+     * stack is owned solely by this thread. */
     char *stack = g_scheduler_stack;
     if (stack) {
         g_scheduler_stack = NULL;
+        pthread_mutex_lock(&g_scheduler_lock);
         /* Remove from linked list */
         scheduler_stack_node_t **pp = &g_scheduler_stacks;
         while (*pp) {
@@ -454,14 +474,19 @@ void loom_coro_exit(void)
             }
             pp = &(*pp)->next;
         }
+        pthread_mutex_unlock(&g_scheduler_lock);
         free(stack);
     }
 }
 
 static void free_all_scheduler_stacks(void)
 {
+    /* Snapshot the head under the lock (mirrors free_all_pooled_stacks);
+     * at exit all other threads are joined, so the walk is single-threaded. */
+    pthread_mutex_lock(&g_scheduler_lock);
     scheduler_stack_node_t *cur = g_scheduler_stacks;
     g_scheduler_stacks          = NULL;
+    pthread_mutex_unlock(&g_scheduler_lock);
     while (cur) {
         scheduler_stack_node_t *next = cur->next;
         free(cur->stack);
