@@ -2,25 +2,29 @@
 
 ## 1. System Overview
 
-loomworks is a pure C11 concurrency library comprising two independent subsystems:
+loomworks is a pure C11 concurrency library comprising five subsystems:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                        loomworks                           │
-├─────────────────────────┬───────────────────────────────┤
-│     Thread Pool         │       Coroutine               │
-│  thread_pool.h/c        │  coroutine.h/c                │
-├─────────────────────────┼───────────────────────────────┤
-│  • Worker thread mgmt   │  • ucontext save/restore       │
-│  • Bounded/unbounded    │  • mmap PROT_NONE guard stack │
-│    task queue           │  • SIGSEGV/SIGBUS guard hit   │
-│  • Future async results │  • Per-thread scheduler       │
-│  • Graceful shutdown    │  • 64-bit safe makecontext    │
-│  • Cache-line aligned   │  • Thread-safe signal handler │
-└─────────────────────────┴───────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                              loomworks                                    │
+├───────────────┬───────────────┬──────────────┬──────────────┬───────────┤
+│ Thread Pool   │  Coroutine    │  Pipeline    │ Task Group   │  Metrics  │
+│ thread_pool.h │ coroutine.h   │ pipeline.h   │ task_group.h │ metrics.h │
+├───────────────┼───────────────┼──────────────┼──────────────┼───────────┤
+│ • Worker mgmt │ • ucontext    │ • Bounded/   │ • Tracked    │ • Event   │
+│ • 256 prio    │   save/restore│   unbounded  │   submissions│   counters│
+│   buckets     │ • mmap guard  │   FIFO       │ • Cancel by  │ • Latency │
+│ • Lock-free   │   stacks      │ • Internal   │   pointer    │   sum/max │
+│   Vyukov ring │ • Stack pool  │   consumers  │   equality   │ • Snapshot│
+│ • Cancel idx  │ • Scheduler   │ • Shutdown   │ • wait()     │ • Callback│
+│ • Node pool   │   stack       │              │   = drain    │   wiring  │
+└───────────────┴───────────────┴──────────────┴──────────────┴───────────┘
 ```
 
-The two subsystems share the same API conventions (opaque pointers, result codes, C11 standard) but have completely independent internal implementations with no cross-dependencies.
+The thread pool is the core; pipeline, task group, and metrics are thin layers
+built on top of it. The coroutine subsystem is independent (no pool
+dependency) but interoperates: pool workers may legally run coroutines, so the
+coroutine internals must be concurrency-safe even from many worker threads.
 
 ---
 
@@ -29,94 +33,166 @@ The two subsystems share the same API conventions (opaque pointers, result codes
 ### 2.1 Component Relationships
 
 ```
-                    ┌──────────────────────┐
-                    │   loom_thread_pool │
-                    │   (opaque handle)    │
-                    └───────┬──────────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        ▼                   ▼                   ▼
-┌───────────────┐  ┌───────────────┐  ┌────────────────┐
-│  lock + cond  │  │ 256 priority  │  │  worker[]     │
-│  (cache line 0)│ │  buckets       │  │  (per-index   │
-├───────────────┤  ├───────────────┤  │   worker_ctx) │
-│  drain_cond   │  │  256-bit      │  ├───────────────┤
-│ (cache line 2)│  │  occupancy    │  │  task_queue_* │
-└───────────────┘  │  bitmap       │  │  [cache line  │
-                   ├───────────────┤  │   3,4...]      │
-                   │  free_list    │  └───────────────┘
-                   │  (node pool)  │
-                   └───────────────┘
+                    ┌──────────────────────────┐
+                    │    loom_thread_pool_t    │
+                    │        (opaque)          │
+                    └──────┬─────────┬─────────┘
+                           │         │
+        ┌──────────────────┼─────────┼──────────────────┐
+        ▼                  ▼         ▼                  ▼
+┌──────────────┐  ┌───────────────┐  ┌──────────────┐  ┌──────────────┐
+│ 256 prio     │  │ lock + work_  │  │ Vyukov ring  │  │ cancel       │
+│ lane buckets │  │ sem + space_  │  │ (NORMAL fast │  │ slots        │
+│ (buckets_    │  │ cond + drain_ │  │  path)       │  │ (open-       │
+│  head[256],  │  │ cond          │  ├──────────────┤  │  addressing) │
+│  tail[256],  │  │ (aligned 64B) │  │ ring_cell_t  │  ├──────────────┤
+│  nonempty_   │  └───────────────┘  │ seq-protocol │  │ node_pool    │
+│  bits[4])    │                     └──────────────┘  │ (ABA-tagged  │
+└──────────────┘                                      │  Treiber)    │
+                                                       └──────────────┘
 ```
 
-### 2.2 Cache-Line Layout
+### 2.2 Queue Layer — Two Paths
+
+The task queue is a **single shared structure** with two insertion paths:
+
+1. **Priority lanes** (all non-NORMAL priorities; NORMAL when no ring is
+   configured): 256 FIFO buckets (`buckets_head[256]` / `buckets_tail[256]`)
+   protected by one pool lock, with a 256-bit occupancy bitmap
+   (`nonempty_bits[4]`) enabling O(1) lowest-priority scan via `ctz`.
+   Priorities: `LOW=10`, `NORMAL=5`, `HIGH=1`, `REALTIME=0` — **lower value
+   runs first**.
+
+2. **Lock-free Vyukov ring** (NORMAL-priority fast path, when `ring != NULL`):
+   bounded array of `ring_cell_t { _Atomic size_t seq; _Atomic(loom_task_t*) task; }`
+   following the standard Vyukov protocol:
+
+   - `seq == pos`        → cell empty
+   - `seq == pos + 1`    → cell full (producer owns it)
+   - `seq == pos + ring_size` → cell released (consumer returned it)
+
+   Producers `CAS` the tail, store the task, insert the cancel slot, then
+   release the cell (`seq = want + 1`, `release` order). Consumers `CAS` the
+   head, load the task, remove the cancel slot, then publish
+   `seq = want + ring_size`. When the ring is full, submission **spills to
+   the NORMAL lane bucket** instead of blocking.
+
+### 2.3 Worker Drain Order
+
+`worker_entry()` (one thread per worker index) runs this loop:
+
+```
+lock
+  ├─ exit if (idx >= worker_count && !shutdown)      // resized down
+  ├─ exit if (shutdown && queue_len == 0 && ring_count == 0)  // drained
+  ├─ loom_coro_exit()        // free this thread's coroutine scheduler stack, if any
+  ├─ Step 1: lane_has_priority(pool, 4)  → dequeue lowest-priority task with p <= 4 (REALTIME/HIGH) under the lock
+  ├─ Step 2: ring_try_dequeue()          → lock-free pop from the Vyukov ring
+  ├─ Step 3: if ring empty → dequeue_lowest_priority_unlocked(255) from lanes
+  └─ none available → unlock, sem_wait(&pool->work_sem) (EINTR → retry)
+run fn(data) with active_workers++/-- and metrics around it
+```
+
+The priority-aware ordering means REALTIME/HIGH tasks bypass the ring, so a
+flood of NORMAL tasks cannot starve high-priority work.
+
+The wakeup primitive is a **POSIX counting semaphore** (`work_sem`): every
+successful enqueue posts exactly one token, so there are no lost wakeups;
+workers that find no work wait on `sem_wait`. (`space_cond` is used by
+submitters waiting for capacity in bounded-queue mode; `drain_cond` signals
+shutdown completion.)
+
+### 2.4 Cancel Index
+
+Cancellation of **not-yet-started** tasks uses an open-addressing hash table
+(`cancel_slots`, capacity `2 * ring_size`, slot keyed by `task_id & (cap-1)`):
+
+- `0` = EMPTY, `1` = TOMBSTONE, `id + 1` = occupied (task ids start at 2, so
+  `id + 1` never collides with the sentinels).
+- Submit inserts a slot *before* making the task visible to workers; the
+  worker removes it after dequeue. `cancel_by_id` finds + claims (CAS to
+  TOMBSTONE); `cancel(data)` scans slots matching `user_data`; `cancel_all`
+  claims every occupied slot.
+- A worker that pops a TOMBSTONEd task frees it (and its user data if
+  `free_data`) and continues — no dangling pointers.
+
+### 2.5 Task Node Pool
+
+`loom_task_t` nodes are recycled through a lock-free **ABA-tagged Treiber
+stack** (`node_stack`: low 32 bits = top, high 32 bits = ABA tag). `pop`
+returns a pooled node or falls back to `malloc`; `push` returns it to the
+pool (nodes outside the pool are simply `free`d).
+
+### 2.6 Cache-Line Layout
+
+Locks and hot flags are separated on cache lines to prevent false sharing:
 
 ```c
 struct loom_thread_pool {
-    // ── Shared state (frequently written, must span different cache lines) ──
-    pthread_mutex_t lock              __attribute__((aligned(64)));  // cache line 0
-    pthread_cond_t  cond              __attribute__((aligned(64)));  // cache line 1
-    pthread_cond_t  drain_cond        __attribute__((aligned(64)));  // cache line 2
-    bool            shutdown;                                         // same cache line as drain_cond
-    bool            draining;
+    // scalars: worker_count, stack_size, queue_capacity, …
+    __attribute__((aligned(64)))
+    pthread_mutex_t lock;       // serializes lane buckets, submit funnel, shutdown
+    pthread_cond_t  drain_cond; // shutdown completion
+    sem_t           work_sem;   // counting semaphore: 1 token per enqueued task
+    pthread_cond_t  space_cond; // bounded-queue capacity wait
 
-    // ── Queue (frequently read/written, independent cache line) ──
-    loom_task_t  *buckets_head[256];  // per-priority FIFO bucket heads
-    loom_task_t  *buckets_tail[256];  // per-priority FIFO bucket tails
-    uint64_t       nonempty_bits[4];  // 256-bit occupancy bitmap
-    uint32_t       queue_len;
-
-    // ── Node pool (reuses task nodes to cut alloc/free churn) ──
-    loom_task_t  *free_list;          // pooled task nodes (LIFO)
-    uint32_t       free_list_len;     // bounded by LOOMWORKS_NODE_POOL_CAP
-
-    // ── Worker array (each worker独占 its own cache line) ──
-    loom_worker_ctx_t workers[];
-};
-
-struct loom_worker_ctx {
-    uint64_t padding[7];            // prevents false sharing with adjacent workers
-    loom_task_t *task_queue_head;
-    loom_task_t *task_queue_tail;
-    uint32_t       task_queue_len;
-    uint64_t padding2[7];
+    _Atomic bool shutdown; _Atomic bool draining; _Atomic bool joined;
+    loom_task_t *buckets_head[256]; loom_task_t *buckets_tail[256];
+    _Atomic uint64_t nonempty_bits[4];      // 256-bit occupancy bitmap
+    _Atomic uint32_t queue_len;             // lane count
+    // Vyukov ring: ring_head, ring_tail, ring, ring_size, ring_mask, _Atomic ring_count
+    // cancel index: cancel_slots, cancel_cap
+    // node pool: node_pool array, _Atomic node_stack (top|ABA tag)
+    _Atomic uint32_t active_workers; _Atomic uint64_t next_task_id;
+    pthread_t *threads; uint32_t max_worker_count;
+    // metrics pointer + callback + user data
 };
 ```
 
-### 2.3 Task Lifecycle
+### 2.7 Submit Funnel
 
 ```
-submit() ──► task_create() ──► enqueue() ──► worker dequeue()
-    │              │                  │                │
-    ▼              ▼                  ▼                ▼
-  User call    pool pop or      lock + append    lock + ctz pop
-              malloc alloc     to priority      lowest non-empty
-                               bucket (O(1))    bucket (O(1))
-                                                    │
-                                                    ▼
-                                               call fn(data)
-                                                    │
-                                                    ▼
-                                              task_destroy()
-                                              free-list push
-                                              or free node
+enqueue_task(pool, task)
+  ├─ shutdown? → ERR_SHUTDOWN
+  ├─ queue full (cap > 0 && queue_len >= cap)?
+  │    └─ wait on space_cond up to 60 s (CLOCK_REALTIME timedwait)
+  │         ├─ timeout → ERR_TIMEOUT
+  │         └─ shutdown/draining → ERR_SHUTDOWN
+  ├─ priority == NORMAL && ring configured? → ring enqueue (spill to lane if full)
+  └─ else → lane enqueue under lock
 ```
 
-### 2.4 Shutdown Flow
+Futures (`loom_future_t`) wrap the task with a caller-supplied result buffer;
+`future_wait` / `future_wait_timeout` (returns `ERR_TIMEOUT` on deadline
+expiry) block on a per-future mutex/cond until the worker signals completion.
+
+### 2.8 Shutdown Flow
 
 ```
 shutdown()
-  ├─ Acquire lock, set shutdown=true, draining=true
-  ├─ Broadcast cond (wake all waiting workers)
-  └─ Join all worker threads
-       ├─ Worker detects shutdown && queue_len==0 → break
-       └─ Drain remaining tasks from queue (if any)
+  ├─ lock; joined? → return (idempotent)
+  ├─ shutdown = true; draining = true
+  ├─ sem_post(work_sem) × worker_count    // wake every idle worker
+  ├─ unlock
+  ├─ pthread_join over threads[0 .. max_worker_count)
+  └─ draining = false; joined = true; broadcast(drain_cond)
 
 pool_destroy()
-  ├─ Acquire lock, free all remaining task nodes in queue
-  ├─ destroy drain_cond, cond, lock
-  └─ free(threads), free(workers), free(pool)
+  ├─ free lane buckets, cancel slots, ring, node pool, worker threads array
+  ├─ destroy space_cond, drain_cond, work_sem, lock
+  ├─ clear metrics pointer / callback
+  └─ free(pool)
 ```
+
+Shutdown drains all pending tasks (including cancelled ring tasks awaiting a
+tombstone drain) and is safe to call after `resize`.
+
+### 2.9 Resize
+
+`resize(count)` grows or shrinks the worker set: the thread array is
+reallocated if needed, `worker_count` is updated, new workers are spawned
+(failure rolls back), and `work_sem` is posted `worker_count` times. Workers
+whose index falls beyond the new count self-exit at the top of their loop.
 
 ---
 
@@ -130,7 +206,8 @@ pool_destroy()
                     │  ┌────────────────┐  │
                     │  │ ucontext_t ctx │  │  ← save/restore points
                     │  ├────────────────┤  │
-                    │  │ mmap stack     │  │  ← [GUARD][GUARD][STACK][GUARD]
+                    │  │ mmap stack     │  │  ← [GUARD][usable][GUARD][GUARD]
+                    │  │ (pooled)       │  │
                     │  └────────────────┘  │
                     └──────────┬───────────┘
                                │
@@ -141,9 +218,10 @@ pool_destroy()
 │  _Thread_local    │ │  _Thread_local    │ │  _Thread_local   │
 │  (per-thread)     │ │  (per-thread)     │ │  (per-thread)    │
 ├───────────────────┤ ├───────────────────┤ ├──────────────────┤
-│  ss_sp = malloc   │ │  points to        │ │  longjmp target │
-│  ss_size = 128KB  │ │  active coro      │ │  for guard hit  │
-└───────────────────┘ └───────────────────┘ └──────────────────┘
+│  128 KiB malloc   │ │  points to        │ │  longjmp target │
+│  tracked in       │ │  active coro      │ │  for guard hit  │
+│  registry list    │ └───────────────────┘ └──────────────────┘
+└───────────────────┘
 ```
 
 ### 3.2 Stack Layout
@@ -157,7 +235,7 @@ High address ┌─────────────────────�
              │    (64 KiB default)  │
              │                      │
              ├──────────────────────┤
-             │  GUARD (PROT_NONE)   │  ← prevents downward stack overflow (starting guard)
+             │  GUARD (PROT_NONE)   │  ← prevents downward stack overflow
              │  GUARD (PROT_NONE)   │
 Low address  └──────────────────────┘
               ↑ mmap_base
@@ -165,13 +243,45 @@ Low address  └─────────────────────�
                         ↑ stack_end
 ```
 
-### 3.3 Context Switching Flow
+`LOOMWORKS_CORO_GUARD_PAGES_EACH = 1u`; the bottom uses two guards
+(`guard_nb = 2`). The whole region is `mmap`ed `PROT_NONE` then the usable
+part is `mprotect`ed `RW`.
+
+### 3.3 Stack Pool
+
+Coroutine stacks are **reused across create/destroy cycles**: a global pool
+(cap 64 mappings) matches exact requested stack sizes under
+`g_stack_pool_lock`. A pool hit requires zero system calls (the mapping keeps
+its guard pages and RW permissions; only the valgrind registration is
+redone). Pool misses `mmap` fresh; on destroy, hits are returned to the pool,
+misses are `munmap`ed.
+
+### 3.4 Scheduler Stack & Registry
+
+Each thread that runs a coroutine lazily allocates a 128 KiB scheduler stack
+(`ensure_scheduler()`, called from `loom_coro_resume()`). The allocation is
+tracked in a process-global linked list so it can be reclaimed:
+
+- `loom_coro_exit()` — frees the *current thread's* scheduler stack and
+  removes its node from the registry (called by pool workers at the top of
+  every loop iteration; a no-op for threads that never used coroutines).
+- `coro_atexit()` (a `__attribute__((destructor))` handler) — frees any
+  remaining nodes at process exit.
+
+**Concurrency:** pool workers may run coroutines, so `ensure_scheduler()`
+(appends) and `loom_coro_exit()` (unlinks) can run concurrently across many
+threads. All registry mutations are serialized by `g_scheduler_lock` (a
+static pthread mutex) — without it, concurrent read-modify-writes corrupted
+`next` pointers and caused heap corruption at exit.
+
+### 3.5 Context Switching Flow
 
 ```
 Main thread                      Coroutine stack
   │                                  │
   │  loom_coro_resume(coro)       │
   │  ├─ setjmp(g_guard_jmp)         │
+  │  ├─ ensure_scheduler()          │  (alloc + registry append, once)
   │  ├─ getcontext(&coro->ctx)      │
   │  ├─ makecontext(ctx, coro_entry, 1, coro_ptr)
   │  └─ swapcontext(&scheduler, &coro->ctx)
@@ -189,7 +299,7 @@ Main thread                      Coroutine stack
   │                                  │
 ```
 
-### 3.4 Signal Handling Flow
+### 3.6 Signal Handling Flow
 
 ```
 Coroutine stack overflow → access PROT_NONE page
@@ -214,25 +324,100 @@ guard_handler(sig, info, uctx)
     return LOOMWORKS_CORO_ERR_GUARD
 ```
 
+Faults outside the current coroutine's guard pages reinstall the default
+handler and re-raise, so genuine segfaults still crash normally. The handler
+is installed idempotently (`_Atomic g_guard_installed`).
+
+### 3.7 Lifecycle Rules
+
+- `NEW → resume → (yield/resume)* → terminate → destroy`
+- The **entire lifecycle must stay on one thread** (`ucontext` is not
+  thread-safe; `swapcontext` across threads is undefined). Running a
+  coroutine inside a pool worker is fine — create/resume/destroy all happen
+  inside that worker.
+
 ---
 
-## 4. Thread Safety Model
+## 4. Pipeline Architecture
 
-### 4.1 Thread Pool
+`loom_pc_t` is an application-level FIFO of `void *` items with optional
+internal consumption:
 
-- **Mutex**: Single `pthread_mutex_t` protects the queue and state, shared by all workers and the main thread
-- **Condition variables**:
-  - `cond` — workers block waiting for new tasks; main thread signals after submit
-  - `drain_cond` — main thread waits after shutdown for all workers to join
-- **Lock-free queue ops**: `loom_enqueue_unlocked()` / `loom_dequeue_unlocked()` must be called while holding the lock; both are O(1) (bucket tail append / bitmap `ctz` pop)
+- **Queue**: singly linked list under a mutex; `capacity > 0` bounds pending
+  items (`submit` waits up to 60 s when full); `capacity = 0` is unbounded.
+- **Internal consumers**: if `worker_count > 0`, `pc_create` spins up an
+  internal thread pool and submits one consumer task per worker. Each
+  consumer loops `loom_pc_take()` and **discards** the item (the node is
+  freed; the payload is not — documented behavior; use `take()` yourself if
+  you need the data).
+- **Close**: `pc_shutdown()` sets the flag, broadcasts the cond, and (with an
+  internal pool) `pool_broadcast`s it. `submit` after close →
+  `ERR_SHUTDOWN`; `take` after close → `SHUTDOWN` with `*item = NULL`.
+- **Counters**: `pending_count` under the lock; `submitted_count` /
+  `taken_count` atomics.
 
-### 4.2 Coroutines
+---
 
-- **Per-thread scheduler**: `g_scheduler` and `g_guard_jmp` are `_Thread_local`, each thread maintains its own
-- **`g_guard_installed`**: Uses `_Atomic bool`; multiple threads calling install concurrently only execute `sigaction` once
-- **`g_current`**: `_Thread_local` pointer, read directly in the signal handler without locking
+## 5. Task Group Architecture
 
-### 4.3 Why coroutines do not support cross-thread resume
+`loom_task_group_t` tracks the payloads (`user_data` pointers) of tasks
+submitted through it:
+
+- `group_submit()` / `group_submit_future()` forward to the pool and record
+  the returned `task_id` + payload pointer in an internal node list.
+- `group_cancel()` cancels every tracked pending task via `loom_pool_cancel`
+  (which matches by **pointer equality** — take care not to free/reuse the
+  payload while the group tracks it).
+- `group_destroy()` marks the group destroyed, cancels all pending tasks, and
+  frees the node list.
+- `group_wait()` calls `loom_pool_shutdown()` on the backing pool — it drains
+  the **entire** pool, not just this group's tasks.
+
+---
+
+## 6. Metrics Architecture
+
+`loom_metrics_t` exposes counters and latency stats fed by the pool:
+
+- **Events**: SUBMITTED, STARTED, COMPLETED, CANCELLED, FAILED — incremented
+  at the corresponding points in the submit funnel and worker loop.
+- **Latency**: sum (atomic add) and max (CAS loop) updated on task
+  completion; `avg_latency_ns = sum / completed`.
+- **Wiring**: `pool_set_metrics_callback(pool, cb, user_data)` makes the pool
+  fire `cb(event, pool, user_data)` on every event; `pool_set_metrics`
+  attaches the counters object; `record_latency` lets application code
+  contribute timings.
+- **Snapshot**: consistent point-in-time read of all counters under the
+  metrics lock (the counters themselves are lock-free atomics, so getters are
+  cheap).
+
+---
+
+## 7. Thread Safety Model
+
+### 7.1 Thread Pool
+
+- **Locks**: one `pthread_mutex_t` (`lock`) protects the lane buckets, submit
+  funnel, and state transitions; workers also touch the lock-free ring
+  without it. `work_sem` is a counting semaphore (post per enqueue, wait per
+  no-work); `space_cond` + `drain_cond` handle capacity waits and shutdown
+  completion.
+- **Lock-free ops**: `ring_try_enqueue` / `ring_try_dequeue` (Vyukov
+  protocol), the node-pool Treiber stack, the cancel-slot CAS claims, and the
+  queue/ring counters are all lock-free under relaxed/acquire/release
+  orders.
+
+### 7.2 Coroutines
+
+- **Per-thread scheduler**: `g_scheduler`, `g_current`, `g_guard_jmp` are
+  `_Thread_local`.
+- **`g_guard_installed`**: `_Atomic bool`; concurrent installs run
+  `sigaction` once.
+- **Registry list**: process-global, serialized by `g_scheduler_lock`
+  (concurrent `ensure_scheduler` / `loom_coro_exit` from pool workers are
+  safe).
+
+### 7.3 Why coroutines do not support cross-thread resume
 
 ```
 Thread A: coro = loom_coro_create(...)
@@ -241,60 +426,62 @@ Thread B: loom_coro_resume(coro)   ← runs on Thread B's g_scheduler
         ↑ UNSAFE: ucontext_t is not thread-safe; swapcontext across threads is undefined behavior
 ```
 
-To use a coroutine safely across threads, the entire lifecycle (create → resume → destroy) must occur within a single thread.
+To use a coroutine safely, the entire lifecycle (create → resume → destroy)
+must occur within a single thread.
 
 ---
 
-## 5. Memory Model
+## 8. Memory Model
 
-### 5.1 Thread Pool Memory Allocation
+### 8.1 Thread Pool Memory Allocation
 
 ```
 loom_pool_create()
-  ├─ calloc(1, sizeof(loom_thread_pool_t))    ← pool structure
-  ├─ calloc(worker_count, sizeof(loom_worker_ctx_t))  ← worker context array
-  ├─ calloc(worker_count, sizeof(pthread_t))     ← thread handle array
-  └─ pthread_mutex_init / pthread_cond_init × 3
+  ├─ calloc(1, sizeof(loom_thread_pool_t))
+  ├─ init lock, drain_cond, work_sem, space_cond
+  ├─ ring = next_pow2(queue_capacity) cells (4096 default when unbounded)
+  ├─ calloc cancel_slots (2 * ring_size)  — failure → lane-only mode, ring freed
+  ├─ calloc node_pool nodes; init node_stack (ABA tag)
+  └─ calloc threads array; spawn workers
 
 loom_pool_submit()
-  └─ loom_task_create(): pop from pool free_list (if any), else malloc(sizeof(loom_task_t))
+  └─ loom_task_create(): pop node_stack (if any) or malloc(sizeof(loom_task_t))
 
 loom_pool_submit_future()
-  ├─ calloc(1, sizeof(loom_future_t))          ← future structure
-  ├─ pthread_mutex_init(&fut->mutex)
-  ├─ pthread_cond_init(&fut->cond)
-  └─ malloc(sizeof(future_task_ctx_t))            ← task wrapper context
+  ├─ calloc(1, sizeof(loom_future_t)) + init mutex/cond
+  ├─ malloc(sizeof(future_task_ctx_t))  ← task wrapper context
+  └─ enqueue wrapper task with free_data = true
 
 loom_pool_destroy()
-  ├─ Traverse and free all task nodes in buckets + free_list
-  ├─ pthread_cond_destroy × 2
-  ├─ pthread_mutex_destroy
+  ├─ free lane buckets, cancel slots, ring, node pool
+  ├─ destroy space_cond, drain_cond, sem, lock
   ├─ free(threads)
-  ├─ free(workers)
   └─ free(pool)
 ```
 
-### 5.2 Coroutine Memory Allocation
+### 8.2 Coroutine Memory Allocation
 
 ```
 loom_coro_create()
-  ├─ calloc(1, sizeof(loom_coroutine_t))       ← coroutine structure
-  └─ mmap(total_sz, PROT_NONE)                   ← full stack region including guards
-     └─ mprotect(stack_start, usable_sz, RW)     ← usable region set readable/writable
+  ├─ calloc(1, sizeof(loom_coroutine_t))
+  ├─ stack pool hit? → reuse mapping (zero syscalls)
+  └─ miss → mmap(total_sz, PROT_NONE) + mprotect(usable, RW)
 
 loom_coro_resume()
-  └─ malloc(131072)                              ← scheduler stack (per-thread, allocated once)
+  └─ ensure_scheduler(): malloc(131072) scheduler stack (once per thread),
+       appended to the registry under g_scheduler_lock
 
 loom_coro_destroy()
-  ├─ munmap(mmap_base, mmap_size)                ← free entire stack region (including guards)
-  └─ free(c)                                     ← free coroutine structure
+  ├─ stack pool has room? → cache the mapping (cap 64) else munmap
+  └─ free(c)
 
-Note: The scheduler stack (g_scheduler_stack) is intentionally not freed (process-level常驻, ~128KB).
+loom_coro_exit() / coro_atexit()
+  └─ free scheduler stack (+ node) — under g_scheduler_lock for the registry
 ```
 
 ---
 
-## 6. Documentation Index
+## 9. Documentation Index
 
 | Document | Description |
 |----------|-------------|
@@ -306,18 +493,19 @@ Note: The scheduler stack (g_scheduler_stack) is intentionally not freed (proces
 
 ---
 
-## 7. Error Handling Strategy
+## 10. Error Handling Strategy
 
 | Operation | Failure behavior |
 |-----------|-----------------|
-| `pthread_mutex_init` | Return `LOOMWORKS_ERR_ALLOC`, free allocated resources |
-| `pthread_cond_init` | Return `LOOMWORKS_ERR_ALLOC`, destroy already-initialized mutex |
-| `pthread_create` | Set `shutdown=true`, broadcast cond, join created threads, free all resources |
+| `pthread_mutex_init` / `pthread_cond_init` / `sem_init` | Return `LOOMWORKS_ERR_ALLOC`, destroy already-initialized primitives |
+| `pthread_create` | Set `shutdown=true`, post `work_sem` per worker, join created threads, free all resources |
 | `malloc` / `calloc` | Return `LOOMWORKS_ERR_ALLOC` |
 | `mmap` | Return `LOOMWORKS_CORO_ERR_ALLOC` |
 | `mprotect` | munmap the already-allocated region, return `LOOMWORKS_CORO_ERR_MPROTECT` |
-| `sigaction` | Print stderr error, do not abort, continue running (no guard page protection) |
+| `ring` / cancel-slot calloc failure | Fall back to lane-only mode (correct, slower) |
+| `sigaction` | Print stderr error, do not abort, continue running (no guard protection) |
 | `swapcontext` | Set `state = LOOMWORKS_CORO_ERROR`, return `LOOMWORKS_CORO_ERR_CONTEXT` |
-| Stack overflow (guard page) | `longjmp` to `g_guard_jmp`, return `LOOMWORKS_CORO_ERR_GUARD` |
+| Stack overflow (guard page) | `longjmp` to `g_guard_jmp`, coroutine → `ERROR`, return `LOOMWORKS_CORO_ERR_GUARD` |
+| Bounded queue full, 60 s wait | Return `LOOMWORKS_ERR_TIMEOUT` |
 
 All error paths guarantee correct resource cleanup with no memory leaks.
