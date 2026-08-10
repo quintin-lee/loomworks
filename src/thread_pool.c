@@ -1515,6 +1515,11 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
     if (!pool) {
         return LOOMWORKS_ERR_INVALID;
     }
+    if (count == 0) {
+        /* Zero is auto-detect only in loom_pool_create(); here it would
+         * stop every worker and permanently break the pool. */
+        return LOOMWORKS_ERR_INVALID;
+    }
     if (count == pool->worker_count) {
         return LOOMWORKS_OK;
     }

@@ -288,7 +288,9 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
  * Must not be called after loom_pool_shutdown().
  *
  * @param pool  The pool handle.
- * @param count New number of worker threads.
+ * @param count New number of worker threads.  Must be >= 1; 0 is rejected
+ *              with LOOMWORKS_ERR_INVALID (auto-detection applies only to
+ *              loom_pool_create()).
  * @return      LOOMWORKS_OK on success, error code otherwise.
  */
 loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count);

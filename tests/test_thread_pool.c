@@ -1846,6 +1846,17 @@ static void test_resize_null_safety(void)
     ASSERT(loom_pool_resize(NULL, 4) == LOOMWORKS_ERR_INVALID, "resize null pool");
 }
 
+/* ---------- Test: loom_pool_resize rejects zero ---------- */
+static void test_resize_zero_rejected(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
+    ASSERT(loom_pool_resize(pool, 0) == LOOMWORKS_ERR_INVALID, "resize to 0 rejected");
+    ASSERT(loom_pool_worker_count(pool) > 0, "workers intact after rejected resize");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ---------- Test: metrics invariant — submitted == completed + cancelled ---------- */
 static void test_metrics_invariant(void)
 {
@@ -2567,6 +2578,7 @@ int main(void)
     test_resize_shrink();
     test_resize_after_shutdown();
     test_resize_null_safety();
+    test_resize_zero_rejected();
     test_metrics_invariant();
     test_metrics_invariant_all_complete();
     test_ring_basic();
