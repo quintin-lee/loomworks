@@ -178,3 +178,47 @@ sed -i 's/ctpool/loomworks/g' CMakeLists.txt
 ```
 
 **Note:** The automated migration assumes no custom identifiers contain `ctpool` outside of library API names. Review the diff carefully after applying.
+
+---
+
+## New APIs introduced after the rename
+
+The rename above is purely cosmetic — no behaviour changed during the
+ctpool→loomworks migration. Features added *after* the rename (not present in
+ctpool) are:
+
+### Signature change: `task_id` out-parameter
+
+All submit variants gained a trailing `uint64_t *task_id` out-parameter
+(pass `NULL` to ignore):
+
+```c
+loom_pool_submit(pool, fn, data, &task_id);
+loom_pool_submit_blocking(pool, fn, data, &task_id);
+loom_pool_submit_future(pool, fn, data, &future, &task_id);
+loom_pool_submit_priority(pool, fn, data, priority, &task_id);
+loom_pool_submit_future_priority(pool, fn, data, priority, &future, &task_id);
+```
+
+The returned ID is used with `loom_pool_cancel_by_id()`.
+
+### New functions (thread pool)
+
+`loom_pool_submit_blocking()`, `loom_pool_submit_priority()`,
+`loom_pool_submit_future_priority()`, `loom_future_wait_timeout()`,
+`loom_pool_broadcast()`, `loom_pool_cancel()`, `loom_pool_cancel_by_id()`,
+`loom_pool_cancel_all()`, `loom_pool_resize()`.
+
+### New subsystems
+
+- `loom_coro_exit()`, `loom_coro_install_guard_handler()`,
+  `loom_coro_uninstall_guard_handler()` (coroutine module).
+- Pipeline: `loom_pc_create()` / `submit` / `take` / `shutdown` / `destroy` +
+  count queries (`include/loomworks/pipeline.h`).
+- Task groups: `loom_task_group_create()` / `submit` / `submit_future` /
+  `cancel` / `wait` / `pending_count` (`include/loomworks/task_group.h`).
+- Metrics: `loom_metrics_create()` / `snapshot` / `record_latency` /
+  `loom_pool_set_metrics()` / `loom_pool_set_metrics_callback()`
+  (`include/loomworks/metrics.h`).
+
+See the [API Reference](api-reference.md) for signatures and semantics.
