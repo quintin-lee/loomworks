@@ -440,7 +440,7 @@ static void cancel_index_insert(loom_thread_pool_t *pool, loom_task_t *task)
     }
     uint64_t want = task->task_id + 1;
     uint64_t h    = cancel_index_hash(want, cap);
-    for (;;) {
+    for (uint64_t i = 0; i < cap; i++) {
         cancel_slot_t *slot = &pool->cancel_slots[h];
         uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_relaxed);
         if (cur == 0 || cur == 1) { /* EMPTY or TOMBSTONE: reusable */
@@ -451,15 +451,27 @@ static void cancel_index_insert(loom_thread_pool_t *pool, loom_task_t *task)
         }
         h = (h + 1) & (cap - 1);
     }
+    /* Bounded probe: index saturated with occupied slots.  Cannot happen
+     * while ring_size live entries < cap and removes tombstone (not empty);
+     * if it ever does, the task runs unindexed — cancel-by-id then falls
+     * back to the lane walk and reports not-found, but nothing hangs. */
 }
 
 /* Clear a dequeued task's index slot.  Runs under pool->lock, and every
  * claim (cancel_by_id / cancel_all) also runs under pool->lock, so this
- * cannot race a claim: either the slot is still occupied (we clear it) or
- * it is already a tombstone (the canceller won — the worker skips the node
- * via task->cancelled and does NOT re-account queue_len, the canceller
- * already did).  A slot not found in the index belongs to a spilled task
- * (lane path), which is never inserted. */
+ * cannot race a claim: either the slot is still occupied (we tombstone it)
+ * or it is already a tombstone (the canceller won — the worker skips the
+ * node via task->cancelled and does NOT re-account queue_len, the
+ * canceller already did).  A slot not found in the index belongs to a
+ * spilled task (lane path), which is never inserted.
+ *
+ * We write TOMBSTONE (1), NOT EMPTY (0): in an open-addressing probe chain
+ * an EMPTY hole in front of a live entry makes that entry unreachable for
+ * any later probe, so its slot leaks forever.  Under sustained load the
+ * collisions are guaranteed (task ids span far more than cap values), the
+ * leaked slots accumulate until the index is fully occupied, and every
+ * unbounded probe then wraps forever — the CI hang.  TOMBSTONE keeps the
+ * chain intact so colliding entries stay reachable. */
 static void cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task)
 {
     uint64_t cap = pool->cancel_cap;
@@ -468,11 +480,11 @@ static void cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task)
     }
     uint64_t want = task->task_id + 1;
     uint64_t h    = cancel_index_hash(want, cap);
-    for (;;) {
+    for (uint64_t i = 0; i < cap; i++) {
         cancel_slot_t *slot = &pool->cancel_slots[h];
         uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_relaxed);
         if (cur == want) {
-            atomic_compare_exchange_strong_explicit(&slot->task_id, &cur, 0,
+            atomic_compare_exchange_strong_explicit(&slot->task_id, &cur, 1,
                                                     memory_order_release,
                                                     memory_order_acquire);
             return;
@@ -482,6 +494,9 @@ static void cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task)
         }
         h = (h + 1) & (cap - 1);
     }
+    /* Bounded probe: entry absent (index fully touched, no EMPTY left to
+     * terminate on).  Nothing to clear — spilled/unindexed tasks never
+     * occupy a slot. */
 }
 
 /* Locate a live ring task by id (used by the cancel paths).  Returns NULL
@@ -495,7 +510,7 @@ static loom_task_t *cancel_index_find(loom_thread_pool_t *pool, uint64_t task_id
     }
     uint64_t want = task_id + 1;
     uint64_t h    = cancel_index_hash(want, cap);
-    for (;;) {
+    for (uint64_t i = 0; i < cap; i++) {
         cancel_slot_t *slot = &pool->cancel_slots[h];
         uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_acquire);
         if (cur == want) {
@@ -506,6 +521,7 @@ static loom_task_t *cancel_index_find(loom_thread_pool_t *pool, uint64_t task_id
         }
         h = (h + 1) & (cap - 1); /* tombstone: keep probing */
     }
+    return NULL; /* bounded probe: absent (index fully touched, no EMPTY left) */
 }
 
 /* Steal an occupied slot as a tombstone.  Returns true when this caller won
@@ -519,7 +535,7 @@ static bool cancel_index_claim(loom_thread_pool_t *pool, loom_task_t *task)
     }
     uint64_t want = task->task_id + 1;
     uint64_t h    = cancel_index_hash(want, cap);
-    for (;;) {
+    for (uint64_t i = 0; i < cap; i++) {
         cancel_slot_t *slot = &pool->cancel_slots[h];
         uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_relaxed);
         if (cur == want) { /* occupied → steal it as a tombstone */
@@ -537,6 +553,7 @@ static bool cancel_index_claim(loom_thread_pool_t *pool, loom_task_t *task)
         }
         h = (h + 1) & (cap - 1);
     }
+    return false; /* bounded probe: absent (index fully touched, no EMPTY left) */
 }
 
 /* ================================================================

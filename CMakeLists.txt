@@ -90,14 +90,17 @@ enable_testing()
 add_executable(test_thread_pool tests/test_thread_pool.c)
 target_link_libraries(test_thread_pool PRIVATE loomworks_static)
 add_test(NAME ThreadPoolTests COMMAND test_thread_pool)
+set_tests_properties(ThreadPoolTests PROPERTIES TIMEOUT 300)
 
 add_executable(test_coroutine tests/test_coroutine.c)
 target_link_libraries(test_coroutine PRIVATE loomworks_static)
 add_test(NAME CoroutineTests COMMAND test_coroutine)
+set_tests_properties(CoroutineTests PROPERTIES TIMEOUT 300)
 
 add_executable(test_integration tests/test_integration.c)
 target_link_libraries(test_integration PRIVATE loomworks_static)
 add_test(NAME IntegrationTests COMMAND test_integration)
+set_tests_properties(IntegrationTests PROPERTIES TIMEOUT 300)
 
 add_executable(example_pipeline examples/pipeline_demo.c)
 target_link_libraries(example_pipeline PRIVATE loomworks_static)
