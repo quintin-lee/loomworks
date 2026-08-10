@@ -344,6 +344,53 @@ static void test_large_stack_coroutines(void)
     ASSERT(counter == N, "large stack coroutines completed");
 }
 
+/* ---------- Test: scheduler-stack list race (regression) ----------
+ * Repro for the g_scheduler_stacks race in src/coroutine.c: concurrent
+ * ensure_scheduler() appends (a worker's FIRST loom_coro_resume) racing
+ * concurrent loom_coro_exit() unlinks (called at the top of every worker
+ * loop iteration) previously corrupted the lock-free global list and
+ * detonated in the atexit handler (double free / invalid size).
+ * A yield-coroutine forces every worker to build its scheduler stack. */
+static void scheduler_interop_task(void *arg)
+{
+    int                *counter = (int *)arg;
+    loom_coroutine_t   *coro    = NULL;
+    loom_coro_create(yield_coro_task, counter, 0, &coro);
+    if (coro) {
+        loom_coro_resume(coro);
+        loom_coro_resume(coro);
+        loom_coro_destroy(&coro);
+    }
+}
+
+static void test_scheduler_list_race_stress(void)
+{
+    const int rounds = 3;
+    for (int r = 0; r < rounds; r++) {
+        loom_thread_pool_t *pool = NULL;
+        /* 64 workers on a 32-core box: over-subscription maximises
+         * interleaving between concurrent appends and unlinks. */
+        loom_pool_config_t cfg = {.worker_count = 64, .queue_capacity = 0};
+        ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "stress: create 64-worker pool");
+        if (!pool) {
+            return;
+        }
+
+        int       counter = 0;
+        const int N       = 2000;
+        for (int i = 0; i < N; i++) {
+            ASSERT(loom_pool_submit(pool, scheduler_interop_task, &counter, NULL) == LOOMWORKS_OK,
+                   "stress: submit scheduler interop task");
+        }
+
+        loom_pool_shutdown(pool);
+        loom_pool_destroy(&pool);
+
+        /* yield_coro_task increments before AND after the yield. */
+        ASSERT(counter == N * 2, "stress: all scheduler tasks completed");
+    }
+}
+
 /* ---------- Test: concurrent metrics accuracy ---------- */
 static void noop_task(void *arg)
 {
@@ -397,6 +444,7 @@ int main(void)
     test_yield_in_pool();
     test_large_stack_coroutines();
     test_metrics_concurrent();
+    test_scheduler_list_race_stress();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
