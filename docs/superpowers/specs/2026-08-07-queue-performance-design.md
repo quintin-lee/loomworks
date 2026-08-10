@@ -150,7 +150,7 @@ micro-task throughput jitter.
     still complete correctly (allocation count is an internal detail, not
     asserted directly).
   - Cross-bucket `cancel_all` / `cancel_by_id`.
-- All existing suites (50111+ assertions) must pass unchanged — especially
+- All existing suites (≈68750 assertions) must pass unchanged — especially
   the priority-ordering tests.
 - `examples/bench.c`: `--queue-depth` scenario for the acceptance numbers.
 
@@ -160,7 +160,7 @@ micro-task throughput jitter.
 |--------|-------|--------|
 | submit+execute throughput at queue depth 10k | linear degradation (O(n)) | flat vs empty queue (±5 %) |
 | per-task overhead with no metrics attached | ~40–80 ns clock tax | ~0 |
-| all existing assertions (50111+) | pass | pass (incl. priority tests) |
+| all existing assertions (≈68750) | pass | pass (incl. priority tests) |
 | new tests (buckets / FIFO / pool / cross-bucket cancel) | — | pass |
 
 ## 8. Files touched

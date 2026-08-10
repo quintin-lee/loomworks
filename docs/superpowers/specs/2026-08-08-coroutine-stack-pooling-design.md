@@ -17,7 +17,7 @@ The thread pool received the equivalent treatment (task node pool + bucketized O
 
 **Non-Goals:**
 - Windows port (separate future item, Low priority)
-- Pooling the *scheduler* stack (per-thread, intentionally never freed — documented design decision)
+- Pooling the *scheduler* stack (per-thread, intentionally never freed — documented design decision; superseded 2026-08-10 — `loom_coro_exit()` now frees the per-thread scheduler stack at thread exit, and the process-exit destructor frees any remainder; registry mutations are serialized by `g_scheduler_lock`)
 - Pooling the `loom_coroutine_t` struct itself (`calloc`/`free` of ~100 bytes is cheap next to syscalls)
 
 ## Approach: global mutex-protected free-list, exact size matching
@@ -79,7 +79,7 @@ The existing `struct loom_coroutine` fields (`mmap_base`, `mmap_size`, `stack_st
 
 ### Regression gates
 
-- All 1571 coroutine assertions + 62749 integration assertions, zero failures
+- All 5587 coroutine assertions + ≈68750 integration assertions, zero failures
 - ASan + UBSan clean
 - `-Wall -Wextra -Werror -pedantic` + clang-tidy + clang-format clean
 

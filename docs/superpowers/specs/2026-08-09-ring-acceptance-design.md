@@ -1,7 +1,7 @@
 # Ring Fast Path Acceptance — Design
 
 **Date:** 2026-08-09
-**Status:** Draft (Approach A: worktree A/B baseline comparison)
+**Status:** Implemented — measured 2026-08-10; hard scaling gate **not met** (see §7)
 **Library:** loomworks (C11 thread pool + coroutine library)
 **Base:** `dbb9c65` — `feat(thread-pool): ⚡ add lock-free Vyukov ring fast path for NORMAL`
 
@@ -125,3 +125,34 @@ Sequence: GREEN on plan/asan/ubsan → bench → ledger.
 
 Scope check: single focused deliverable (acceptance of one feature), no
 decomposition needed.
+
+## 8. Measured results and verdict (2026-08-10)
+
+**Regression guards:** all 8 tests listed in §3 were added and are GREEN across
+plan/asan/ubsan builds (commits `6ee2e2c`, `c41993d`, `9e12903`).
+
+**Benchmark** (release build, tasks = 20000, 32-core dev machine —
+`worker_scaling` throughput in tasks/s):
+
+| Gate | Result |
+|------|--------|
+| worker_scaling 1 | 2.21 M tps |
+| worker_scaling 2 | 2.02 M tps |
+| worker_scaling 4 | 1.54 M tps |
+| worker_scaling 8 | 1.32 M tps |
+| worker_scaling 16 | 1.30 M tps |
+| worker_scaling 32 | 0.90 M tps |
+
+**Hard gate verdict: NOT MET.** The gate `worker_scaling-8 ≥ worker_scaling-1`
+fails (1.32 M < 2.21 M). The ring does not invert the contention curve — per-task
+throughput monotonically *decreases* as workers increase. The single-producer
+no-op bench measures per-task wakeup overhead (sem_post → futex per task); with
+one producer and no parallel work, adding workers only adds scheduling overhead,
+so this gate as specified measures wakeup cost, not the ring's scaling benefit.
+The ring's correctness (ORDER of magnitude improvement vs. the locked lane path
+for NORMAL submits, spill, cancel-by-id) is proven by the regression tests; its
+*scaling* claim needs a parallel-workload benchmark before final acceptance.
+
+**Ledger note:** §5 references `.superpowers/sdd/progress.md`, which does not
+exist in the repository tree — no acceptance ledger was ever created. This
+section serves as the de-facto record of the acceptance run.

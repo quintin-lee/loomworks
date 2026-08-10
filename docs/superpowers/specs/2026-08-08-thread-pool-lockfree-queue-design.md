@@ -317,4 +317,28 @@ clang-format) → run all three test binaries, zero failures → ASan/UBSan gate
   reopen design-decisions §11 CLOSED item deliberately).
 - Ring growth for unbounded mode without spill.
 - Lock-free cancel (current: index + tombstone, atomic but cancel itself may
+
+---
+
+## 11. Implementation notes (reconciled with shipped code, 2026-08-10)
+
+The shipped implementation (`src/thread_pool.c`) follows this design with one
+encoding variance worth recording:
+
+- **Sequence-number encoding.** The design sketches the classic Vyukov
+  formulation (`2n` empty / `2n+1` full). The implementation instead uses the
+  **position-relative encoding** `seq == pos` (empty), `seq == pos + 1` (full,
+  release store after `cancel_index_insert` between the plain task store and the
+  publish), and the consumer releases with `seq = pos + ring_size`
+  (`ring_try_dequeue`). Both encodings are correct Vyukov variants; the shipped
+  one keys the sequence off the slot position rather than the ticket parity.
+- **Cancel index placement.** `cancel_index_insert` runs **between** the task
+  store and the release store of `seq` (thread_pool.c `ring_try_enqueue`), so a
+  canceller racing the publish can still find and tombstone the task before it
+  becomes visible to consumers. `ring_count` is incremented with the release
+  store (relaxed `fetch_add` after publish).
+- **Spill semantics.** On a full ring the enqueue returns `false` with **no slot
+  claimed**; the submit path falls back to the NORMAL lane bucket
+  (`spill_to_normal_lane`), preserving the capacity pre-check and the 60 s
+  back-pressure behaviour for bounded pools.
   briefly spin).
