@@ -9,3 +9,18 @@ target_link_libraries(bench PRIVATE loomworks_static)
 
 add_executable(monitor_demo monitor_demo.c)
 target_link_libraries(monitor_demo PRIVATE loomworks_static)
+
+add_executable(example_priority priority_demo.c)
+target_link_libraries(example_priority PRIVATE loomworks_static)
+
+add_executable(example_cancel cancel_demo.c)
+target_link_libraries(example_cancel PRIVATE loomworks_static)
+
+add_executable(example_coroutine coroutine_demo.c)
+target_link_libraries(example_coroutine PRIVATE loomworks_static)
+
+add_executable(example_backpressure backpressure_demo.c)
+target_link_libraries(example_backpressure PRIVATE loomworks_static)
+
+add_executable(example_resize resize_demo.c)
+target_link_libraries(example_resize PRIVATE loomworks_static)
