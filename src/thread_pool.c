@@ -140,8 +140,6 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         atomic_store_explicit(&pool->nonempty_bits[w], 0, memory_order_relaxed);
     }
     atomic_store_explicit(&pool->queue_len, 0, memory_order_relaxed);
-    pool->free_list        = NULL;
-    pool->free_list_len    = 0;
     atomic_store_explicit(&pool->active_workers, 0, memory_order_relaxed);
     pool->metric_cb        = NULL;
     pool->metric_user_data = NULL;
@@ -207,13 +205,6 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
             free(t);
             t = n;
         }
-    }
-    /* Free pooled task nodes. */
-    loom_task_t *f = pool->free_list;
-    while (f) {
-        loom_task_t *n = f->next;
-        free(f);
-        f = n;
     }
     /* Free lock-free ring structures and the node pool array. */
     free(pool->cancel_slots);

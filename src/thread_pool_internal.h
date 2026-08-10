@@ -128,8 +128,6 @@ struct loom_thread_pool {
     loom_task_t *buckets_tail[256]; /**< Per-priority bucket tails. */
     _Atomic uint64_t nonempty_bits[4]; /**< Bit b set <=> buckets_head[b] != NULL. */
     _Atomic uint32_t queue_len;        /**< Current pending tasks (ring + lanes). */
-    loom_task_t *free_list;            /**< Pooled task nodes (reused, cap bounded). */
-    uint32_t     free_list_len;        /**< Number of nodes currently on free_list. */
 
     /* Lock-free Vyukov ring (NORMAL fast path). */
     _Atomic uint64_t ring_head;  /**< Consumer position (monotonic). */
@@ -143,7 +141,7 @@ struct loom_thread_pool {
     cancel_slot_t *cancel_slots; /**< NULL when ring is NULL. */
     uint64_t       cancel_cap;   /**< Power of two >= 2 * ring_size. */
 
-    /* Lock-free node pool (tagged bounded stack; replaces free_list in Task 3). */
+    /* Lock-free node pool (tagged bounded stack; the sole task-node allocator). */
     loom_task_t      *node_pool;     /**< Preallocated node array (never freed individually). */
     uint32_t          node_pool_cap; /**< == LOOMWORKS_NODE_POOL_CAP. */
     _Atomic uint64_t  node_stack;    /**< low32: top, high32: ABA tag. */
