@@ -8,15 +8,15 @@ Frequently asked questions about the loomworks library.
 
 ### Q: Can I call `loom_pool_submit()` from multiple threads concurrently?
 
-**A:** Yes. The thread pool uses a single mutex to protect the task queue, making `loom_pool_submit()` and `loom_pool_submit_future()` safe for concurrent calls from any number of threads.
+**A:** Yes. NORMAL-priority tasks use the lock-free ring fast path; other priorities go to the priority lanes under a single pool lock. Both are safe for concurrent calls from any number of threads.
 
 ### Q: Does `loom_pool_submit()` block when the queue is full?
 
-**A:** No. When `queue_capacity > 0` and the queue has reached capacity, `loom_pool_submit()` returns `LOOMWORKS_ERR_INVALID` immediately. There is no blocking behavior. If you need back-pressure, consider using a semaphore or condition variable in your application layer.
+**A:** When `queue_capacity > 0` and the queue has reached capacity, a plain `submit` waits up to 60 seconds for space, then returns `LOOMWORKS_ERR_TIMEOUT` (or `LOOMWORKS_ERR_SHUTDOWN` if the pool shut down while waiting). If you want to avoid any blocking, submit at a bounded rate from your application layer or use `queue_capacity = 0` (unbounded).
 
 ### Q: What happens to pending tasks when I call `loom_pool_shutdown()`?
 
-**A:** `loom_pool_shutdown()` enters a draining phase: it sets the `shutdown` flag, wakes all idle workers via `pthread_cond_broadcast`, and then joins all worker threads. Each worker processes any remaining tasks in the queue before exiting. After shutdown, no new tasks may be submitted.
+**A:** `loom_pool_shutdown()` enters a draining phase: it sets the `shutdown` flag, posts `work_sem` once per worker thread to wake everyone, and then joins all worker threads. Each worker processes any remaining tasks in the queue before exiting. After shutdown, no new tasks may be submitted.
 
 ### Q: Can I reuse a pool after calling `loom_pool_shutdown()`?
 
@@ -26,8 +26,8 @@ Frequently asked questions about the loomworks library.
 
 **A:** 
 - Minimum: 1 (even if `hardware_concurrency` reports 0)
-- Maximum: 64 (hard limit even if `hardware_concurrency * 2` is larger)
-- Default (when `worker_count = 0`): `min(hardware_concurrency * 2, 64)`
+- Maximum: 128 (hard limit applied after doubling)
+- Default (when `worker_count = 0`): `min(hardware_concurrency * 2, 128)`
 
 ### Q: How do I properly free the result returned by a future task?
 
@@ -68,8 +68,8 @@ The process does not crash. You should call `loom_coro_destroy()` immediately af
 
 **A:** 
 - `loom_coroutine_t` structure: ~160 bytes
-- Stack region (mmap): `requested_size + 2 * pagesize * 2` guard pages (typically 64 KiB + 32 KiB)
-- Per-thread scheduler stack: 128 KiB (allocated once per thread, shared by all coroutines on that thread)
+- Stack region (mmap): requested size plus guard pages on both sides (`LOOMWORKS_CORO_GUARD_PAGES_EACH * pagesize` per side). For the 64 KiB default that is 64 KiB + 2 guard pages.
+- Per-thread scheduler stack: 128 KiB (allocated once per thread, shared by all coroutines on that thread, freed at thread exit)
 
 ### Q: Can I nest coroutines (a coroutine that creates and resumes another)?
 
@@ -82,6 +82,17 @@ The process does not crash. You should call `loom_coro_destroy()` immediately af
 ---
 
 ## General
+
+### Q: Can I use the shared library (`.so`)?
+
+**A:** Yes. CMake builds both `libloomworks.a` and `libloomworks.so` (SOVERSION 1), and the shared library works at runtime — including the coroutine subsystem — on modern toolchains where the compiler default `-fPIC` handles `_Thread_local` correctly. Link with `-L build -lloomworks -Wl,-rpath,$PWD/build` (or install and use `find_package`).
+
+### Q: What are the pipeline / task group / metrics layers?
+
+**A:**
+- `loom_pc_t` (pipeline): a bounded/unbounded FIFO of application items. If you give it a worker count, it spins up an internal thread pool whose consumers drain the queue. Note the internal consumers *discard* items — use `loom_pc_take()` yourself if you need the data.
+- `loom_task_group_t` (task group): tracks the payloads of submitted tasks; `group_cancel()` and `group_destroy()` cancel all pending ones. Cancellation matches by *pointer equality* of the user-data pointer, so do not free/reuse the pointer until the group is done. `group_wait()` drains the backing pool via `loom_pool_shutdown()`.
+- `loom_metrics_t` (metrics): event counters (SUBMITTED/STARTED/COMPLETED/CANCELLED/FAILED) plus latency sum/max/average, wired through `loom_pool_set_metrics_callback()`.
 
 ### Q: Is loomworks portable to Windows?
 
@@ -111,6 +122,6 @@ Or run a single test:
 LD_PRELOAD=/usr/lib/libasan.so.8 ./test_integration
 ```
 
-### Q: Why does the README mention 50,511 integration tests?
+### Q: Why does the README mention ~68,750 integration assertions?
 
-**A:** The integration test suite runs a stress test with 10,000 threads each submitting 5 tasks and creating 5 coroutines, yielding 50,000 task submissions and 50,000 coroutine operations. Additional assertions bring the total to 50,511. This validates concurrent correctness under heavy load.
+**A:** The integration test suite runs stress workloads (thousands of concurrent submissions, coroutine interop inside pool workers, scheduler-stack registry churn) whose assertion totals changed as tests were added. The exact count varies slightly between runs (concurrency-dependent stress tests); the canonical verified figures are ~10455 thread pool, ~5587 coroutine, and ~68750 integration assertions. The prior "50,511" figure is outdated.

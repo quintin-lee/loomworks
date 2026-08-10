@@ -63,7 +63,9 @@ This document records key design choices and their rationales, for future mainte
 - Testing revealed: if `g_scheduler` is a global variable and coroutines are resumed from thread pool worker threads, `swapcontext` uses the main thread's scheduler context, causing a glibc malloc assertion failure (`chunk_is_mmapped` conflict)
 - `_Thread_local` ensures each thread has its own scheduler; coroutines can be used safely within thread pool workers
 
-**Performance impact:** The first coroutine API call per thread allocates a 128KB scheduler stack (`malloc`), which is then reused. The OS reclaims it when the thread exits; explicit free is omitted (standard practice).
+**Performance impact:** The first coroutine API call per thread allocates a 128KB scheduler stack (`malloc`), which is then reused across coroutines on that thread. It is freed explicitly at thread exit by `loom_coro_exit()` (called by pool workers every loop iteration), and any remaining stacks are freed at process exit by `coro_atexit()`.
+
+**Concurrency requirement:** Because pool workers may legally run coroutines, the scheduler-stack registry (a global linked list) is mutated concurrently by `ensure_scheduler()` (append) and `loom_coro_exit()` (unlink) from many threads. All registry operations are serialized by `g_scheduler_lock` — without it, concurrent list mutation corrupted `next` pointers and caused heap corruption at process exit.
 
 ---
 
@@ -96,29 +98,29 @@ This document records key design choices and their rationales, for future mainte
 
 ---
 
-## 6. Why No Dynamic Library (.so) Support?
+## 6. Shared and Static Library Support
 
-**Decision:** The library supports static linking only (`.a`), not shared libraries (`.so`).
+**Decision:** Both `libloomworks.a` (static) and `libloomworks.so` (shared, SOVERSION 1) are built by CMake and usable at runtime.
 
 **Rationale:**
-- Coroutines use `_Thread_local` variables (`g_scheduler`, `g_current`, `g_guard_jmp`); linking as a shared object produces `R_X86_64_TPOFF32` relocation errors. glibc does not support TLS `local-exec` model in shared libraries
-- Compile error: `relocation R_X86_64_TPOFF32 against 'g_current' can not be used when making a shared object`
-- Workaround: `-fPIC -ftls-model=initial-exec` enables shared library support, but adds complexity and slight performance overhead
+- Modern toolchains (`gcc`/`clang` with default `-fPIC` for `-fPIE`-linked code) handle `_Thread_local` correctly in shared objects, so the historical `R_X86_64_TPOFF32` relocation error no longer applies in practice
+- Verified on Linux/x86_64: a test program linked against the shared library successfully creates a pool, submits tasks, and runs coroutines
+- Static linking remains the default recommendation where redistribution simplicity matters; the shared library is available for plugin/dynamic-loading use cases
 
-**Current limitation:** The library is used via static linking only (`libloomworks.a`).
+**Historical note:** Earlier versions of this document claimed `.so` was unsupported because coroutines use `_Thread_local` storage and shared-object linking produced `relocation R_X86_64_TPOFF32 against 'g_current' can not be used when making a shared object`. That limitation applied to `local-exec` TLS model builds; the default CMake configuration compiles fine.
 
 ---
 
-## 7. Why Two Guard Pages Per Side Instead of One?
+## 7. Guard Page Layout — Top/Bottom Asymmetry
 
-**Decision:** Each side uses 2 PROT_NONE guard pages (`LOOMWORKS_CORO_GUARD_PAGES_EACH * 2`).
+**Decision:** Coroutine stacks use `[GUARD][usable][GUARD][GUARD]` — one guard above the usable region and two guards below (`LOOMWORKS_CORO_GUARD_PAGES_EACH = 1u`, bottom guard count `guard_nb = 2`).
 
 **Rationale:**
-- First guard page: serves as the boundary of the usable stack
-- Second guard page: acts as a "buffer" — even if the stack overflows past the first guard page, it does not immediately access other mmap regions
-- 2 guard pages provide a larger safety margin, reducing false-trigger probability
+- The top guard (high address, first to be hit by an upward overflow of a normal growing stack) is the primary detection page
+- Two guards at the bottom provide a buffer: even if the stack overflows past the first bottom guard, it does not immediately touch adjacent mmap regions before the handler fires
+- Exact guard counts are defined in `coroutine.h` (`LOOMWORKS_CORO_GUARD_PAGES_EACH`) and applied in `src/coroutine.c`
 
-**Signal handler logic:** Only access to `base` (first page) or `end-ps` (last page) triggers longjmp. If an intermediate PROT_NONE page is also accessed, the default signal handler is invoked (crash), ensuring that true out-of-bounds accesses are not silently ignored.
+**Signal handler logic:** Only access to the first page (`base`) or the last page (`end-ps`) triggers `longjmp`. Access to an intermediate PROT_NONE page re-installs the default handler and crashes, ensuring true out-of-bounds accesses are not silently ignored.
 
 ---
 
@@ -161,11 +163,16 @@ The following enhancements are planned for future releases:
 | Item | Description | Priority |
 |------|-------------|----------|
 | **Task priority queue** | Bucketized per-priority FIFO queue (256 buckets + occupancy bitmap), O(1) enqueue/dequeue — **DONE (2026-08-08)** | — |
+| **Lock-free NORMAL fast path** | Vyukov bounded ring with spill to the priority lanes — **DONE (2026-08-09)** | — |
+| **Task cancellation** | Open-addressing cancel index: `cancel` / `cancel_by_id` / `cancel_all` — **DONE (2026-08-09)** | — |
+| **Semaphore wakeup** | POSIX counting semaphore replaces condvar-based worker wakeup — **DONE (2026-08-08)** | — |
 | **Profiling hooks** | Metrics API: submitted/started/completed/cancelled/failed counters, latency, snapshot — **DONE (2026-08-08)** | — |
 | **Pool runtime health** | `loom_pool_active_count` / `idle_count` / `utilization` — **DONE (2026-08-08)** | — |
 | **Resizable worker pool** | `loom_pool_resize()` implemented and tested — **DONE** | — |
-| **Epoch-based reclamation** | Superseded by the bucketized O(1) queue + bounded node pool (no linked-list tail scan to reclaim) — **CLOSED (2026-08-08)** | — |
-| **Coroutine pooling** | Pre-allocate and reuse coroutine contexts to reduce mmap overhead | Medium |
+| **Coroutine stack pooling** | Reuse mmap'd coroutine stacks across create/destroy (cap 64, exact-size match) — **DONE (2026-08-10)** | — |
+| **Scheduler-stack lifecycle** | Explicit per-thread free (`loom_coro_exit`) + locked registry — **DONE (2026-08-10)** | — |
+| **Epoch-based reclamation** | Superseded by the bucketized O(1) queue + lock-free node pool — **CLOSED (2026-08-08)** | — |
+| **Ring acceptance scaling gate** | "worker_scaling-8 ≥ worker_scaling-1" — measured but NOT met (see ring-acceptance spec); needs a parallel-workload benchmark | High |
 | **Windows support** | Port to Windows using SwitchToThread + VirtualAlloc | Low |
 | **Valgrind integration** | Register coroutine stacks with Valgrind to eliminate false leaks | Medium |
 
@@ -180,17 +187,25 @@ The following enhancements are planned for future releases:
 - Multi-threaded concurrent access to different fields in the same cache line causes false sharing, with 10–100× performance degradation
 - Queue head/tail pointers are separated from locks onto different cache lines, ensuring worker dequeue operations do not contend with main-thread lock operations
 
-**Layout verification:**
+**Layout verification (current):**
 ```c
 struct loom_thread_pool {
-    pthread_mutex_t lock              ← cache line 0 (64B)
-    pthread_cond_t  cond              ← cache line 1 (64B)
-    pthread_cond_t  drain_cond        ← cache line 2 (64B)
-    bool            shutdown          ← shares cache line 2 with drain_cond
-    bool            draining
-    ...
-    loom_task_t  *queue_head        ← cache line 3 (8B + padding)
-    loom_task_t  *queue_tail        ← same cache line as queue_head
-    uint32_t        queue_len
+    // scalars: worker_count, stack_size, queue_capacity, …
+    __attribute__((aligned(64)))
+    pthread_mutex_t lock;       // cache line 0 — lane buckets, submit funnel
+    pthread_cond_t  drain_cond; // cache line 1 — shutdown completion
+    sem_t           work_sem;   // counting semaphore — worker wakeup
+    pthread_cond_t  space_cond; // bounded-queue capacity wait
+    _Atomic bool shutdown; _Atomic bool draining; _Atomic bool joined;
+    loom_task_t *buckets_head[256]; loom_task_t *buckets_tail[256];
+    _Atomic uint64_t nonempty_bits[4]; _Atomic uint32_t queue_len;
+    // ring (head/tail/cells/mask/count), cancel slots, node pool (ABA stack)
+    _Atomic uint32_t active_workers; _Atomic uint64_t next_task_id;
+    pthread_t *threads; uint32_t max_worker_count;
 };
 ```
+
+Note: per-worker context structures (`loom_worker_ctx_t`) were a design
+experiment and were removed; workers now share one queue layer (lanes + ring)
+and one `work_sem`, which simplifies the memory model and eliminates
+per-worker false-sharing concerns.
