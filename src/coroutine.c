@@ -20,6 +20,12 @@
 
 /* ================================================================
  *  Globals
+ *
+ *  All scheduler state is _Thread_local so that any thread can create
+ *  and drive coroutines independently: there is no global "current
+ *  coroutine" — g_current belongs to whichever thread is executing.
+ *  g_guard_installed is the one process-global atomic (signal handlers
+ *  are process-wide).
  * ================================================================ */
 static _Thread_local loom_coroutine_t *g_current = NULL;
 static _Thread_local ucontext_t        g_scheduler; /* per-thread scheduler context */
@@ -71,6 +77,18 @@ static pthread_mutex_t    g_stack_pool_lock  = PTHREAD_MUTEX_INITIALIZER;
 static size_t             g_stack_pool_count = 0;
 /* ================================================================
  *  Guard-page signal handler
+ *
+ *  SIGSEGV/SIGBUS land here when a coroutine overflows its stack.
+ *  A fault is attributed to our coroutine only if it falls inside the
+ *  current coroutine's mmap region AND on the first/last page (the
+ *  PROT_NONE guards).  Anything else (wild pointer, unrelated SEGV)
+ *  is re-raised with the default handler so the process still dies
+ *  with a normal core dump.
+ *
+ *  On a genuine guard hit the handler records LOOMWORKS_CORO_ERROR and
+ *  longjmps out of the coroutine's context back into the setjmp in
+ *  loom_coro_resume() — the coroutine is effectively dead after this,
+ *  and only loom_coro_destroy() may be used on it.
  * ================================================================ */
 static void guard_handler(int sig, siginfo_t *info, void *uctx)
 {
@@ -106,6 +124,7 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
 
 void loom_coro_install_guard_handler(void)
 {
+    /* Idempotent, process-global: installing once covers every thread. */
     if (atomic_load_explicit(&g_guard_installed, memory_order_relaxed)) {
         return;
     }
@@ -122,6 +141,7 @@ void loom_coro_install_guard_handler(void)
 
 void loom_coro_uninstall_guard_handler(void)
 {
+    /* Revert to SIG_DFL; only meaningful for the installing process. */
     if (!atomic_load_explicit(&g_guard_installed, memory_order_relaxed)) {
         return;
     }
@@ -218,7 +238,10 @@ static void deallocate_stack(loom_coroutine_t *c)
 #ifdef VALGRIND_STACK_DEREGISTER
         VALGRIND_STACK_DEREGISTER((unsigned)c->valgrind_stack_id);
 #endif
-        /* Fast path: cache the mapping for reuse (respecting the cap). */
+        /* Fast path: cache the mapping for reuse (respecting the cap).
+         * The mapping keeps its guard pages and RW permissions, so a
+         * future loom_coro_create() with the same stack_size can adopt
+         * it with zero syscalls. */
         pthread_mutex_lock(&g_stack_pool_lock);
         if (g_stack_pool_count < LOOMWORKS_CORO_STACK_POOL_CAP) {
             coro_stack_node_t *node = (coro_stack_node_t *)malloc(sizeof(*node));
@@ -294,6 +317,11 @@ static bool ensure_scheduler(void)
 
 /* ================================================================
  *  Coroutine entry point
+ *
+ *  Runs on the coroutine's own stack via makecontext().  Normal return
+ *  (no yield) flips state to DONE and swaps back to the scheduler
+ *  through uc_link.  A guard-page fault instead longjmps out of this
+ *  frame, so this function never completes in that path.
  * ================================================================ */
 static void coro_entry(void *arg)
 {
@@ -327,6 +355,9 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
     c->state       = LOOMWORKS_CORO_NEW;
     c->entry_fn    = fn;
     c->user_data   = data;
+    /* 0 means "use the default" (LOOMWORKS_CORO_DEFAULT_STACK_SIZE); the
+     * stack itself is not mapped until the first resume, via allocate_stack
+     * which may serve it from the reuse pool. */
     c->stack_size  = (stack_size > 0) ? stack_size : LOOMWORKS_CORO_DEFAULT_STACK_SIZE;
     c->mmap_base   = NULL;
     c->mmap_size   = 0;
@@ -350,6 +381,9 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
     }
 
     loom_coro_install_guard_handler();
+    /* Guard-page longjmp target: a stack overflow inside this coroutine
+     * (or any coroutine on this thread) unwinds here with a nonzero
+     * setjmp value, reporting LOOMWORKS_CORO_ERR_GUARD. */
     if (setjmp(g_guard_jmp) != 0) {
         return LOOMWORKS_CORO_ERR_GUARD;
     }
@@ -362,6 +396,9 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
     }
 
     if (coro->state == LOOMWORKS_CORO_NEW) {
+        /* First run: bind the coroutine context to its mmap'd stack and
+         * point uc_link at this thread's scheduler so a natural return
+         * hops back to swapcontext() below. */
         if (getcontext(&coro->ctx) != 0) {
             return LOOMWORKS_CORO_ERR_CONTEXT;
         }
@@ -382,10 +419,13 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
 
 void loom_coro_yield(void)
 {
+    /* Only meaningful inside a running coroutine on this thread. */
     loom_coroutine_t *cur = g_current;
     if (cur == NULL || cur->state != LOOMWORKS_CORO_RUNNING) {
         return;
     }
+    /* Pause here: save our context, switch to the scheduler, and
+     * resume when the caller next invokes loom_coro_resume(). */
     cur->state = LOOMWORKS_CORO_SUSPENDED;
     if (swapcontext(&cur->ctx, &g_scheduler) != 0) {
         cur->state = LOOMWORKS_CORO_ERROR;
@@ -405,6 +445,10 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro)
     if (coro->state == LOOMWORKS_CORO_DONE || coro->state == LOOMWORKS_CORO_ERROR) {
         return LOOMWORKS_CORO_OK;
     }
+    /* Mark done.  If the coroutine is calling terminate() on itself
+     * (g_current), switch back to the scheduler — the swapcontext below
+     * returns the coroutine's stack to the scheduler's, unwinding the
+     * coroutine's own frame permanently. */
     coro->state = LOOMWORKS_CORO_DONE;
     if (coro == g_current) {
         g_current = NULL;
@@ -513,6 +557,10 @@ static void free_all_pooled_stacks(void)
     }
 }
 
+/* Runs at process exit (via __attribute__((destructor))).  By then every
+ * worker thread has been joined, so the per-thread scheduler stacks that
+ * loom_coro_exit() did not already free are reclaimed here, along with any
+ * coroutine stacks still sitting in the reuse pool. */
 static __attribute__((destructor)) void coro_atexit(void)
 {
     free_all_scheduler_stacks();

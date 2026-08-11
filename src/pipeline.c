@@ -9,6 +9,11 @@
  *
  * When worker_count > 0 at creation, an internal loom_thread_pool_t
  * is created to run consumer tasks.
+ *
+ * Synchronization model: ONE mutex (p->lock) guards head/tail/len/shutdown
+ * plus the condvar.  Every state mutation holds the lock; every wait loop
+ * re-checks its predicate after wakeup (spurious-wakeup safe).  The
+ * submitted/taken counters are lock-free atomics updated outside the lock.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/pipeline.h"
@@ -22,22 +27,25 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Intrusive singly-linked queue node: data is the caller's opaque payload,
+ * next chains the FIFO.  Nodes are allocated per submit and freed either by
+ * the consuming thread (loom_pc_take) or the drain loop in destroy(). */
 typedef struct pc_item {
     void           *data;
     struct pc_item *next;
 } pc_item_t;
 
 struct loom_pc {
-    loom_thread_pool_t *pool;
-    uint32_t            capacity;
-    pthread_mutex_t     lock;
-    pc_item_t          *head;
-    pc_item_t          *tail;
-    uint32_t            len;
-    pthread_cond_t      cond;
-    bool                shutdown;
-    _Atomic uint64_t    submitted;
-    _Atomic uint64_t    taken;
+    loom_thread_pool_t *pool; /* Optional internal consumer pool (NULL = caller takes). */
+    uint32_t            capacity; /* Max queued items; 0 = unbounded. */
+    pthread_mutex_t     lock;     /* Guards head/tail/len/shutdown/cond. */
+    pc_item_t          *head;     /* FIFO head (oldest item). */
+    pc_item_t          *tail;     /* FIFO tail (newest item). */
+    uint32_t            len;      /* Current queue occupancy (guarded by lock). */
+    pthread_cond_t      cond;     /* Notified on enqueue/dequeue/shutdown. */
+    bool                shutdown; /* Set once by shutdown(); submits then fail. */
+    _Atomic uint64_t    submitted; /* Total successful enqueues (lock-free). */
+    _Atomic uint64_t    taken;     /* Total successful dequeues (lock-free). */
 };
 
 static pc_item_t *pc_item_create(void *data)
@@ -81,6 +89,9 @@ loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t
     if (pthread_mutex_init(&p->lock, NULL) != 0) { free(p); return LOOMWORKS_ERR_ALLOC; }
     if (pthread_cond_init(&p->cond, NULL) != 0)  { pthread_mutex_destroy(&p->lock); free(p); return LOOMWORKS_ERR_ALLOC; }
 
+    /* Internal-consumer mode: spin up worker_count pool threads, each
+     * looping on take() until shutdown.  The pool owns no queue of its
+     * own here — every consumer task parks in loom_pc_take(). */
     if (worker_count > 0) {
         loom_pool_config_t cfg = {
             .worker_count   = worker_count,
@@ -147,12 +158,17 @@ loom_result_t loom_pc_submit(loom_pc_t *pc, void *item)
     if (pc->shutdown) { pthread_mutex_unlock(&pc->lock); return LOOMWORKS_ERR_SHUTDOWN; }
     pc_item_t *pi = pc_item_create(item);
     if (!pi) { pthread_mutex_unlock(&pc->lock); return LOOMWORKS_ERR_ALLOC; }
+    /* Bounded mode: if the queue is full, wait up to 60 s for a consumer to
+     * drain.  The item is pre-allocated so we never allocate while holding
+     * the lock.  deadline is computed once from CLOCK_REALTIME (the condvar
+     * clock); timedwait may return spuriously, hence the while loop. */
     if (pc->capacity > 0 && pc->len >= pc->capacity) {
         struct timespec deadline;
         clock_gettime(CLOCK_REALTIME, &deadline);
         deadline.tv_sec += 60;
         while (pc->len >= pc->capacity && !pc->shutdown) {
             int rc = pthread_cond_timedwait(&pc->cond, &pc->lock, &deadline);
+            /* EINTR/spurious wakeups loop; only ETIMEDOUT or shutdown exit. */
             if (rc == ETIMEDOUT || pc->shutdown) {
                 pc_item_destroy(pi);
                 pthread_mutex_unlock(&pc->lock);
@@ -165,6 +181,8 @@ loom_result_t loom_pc_submit(loom_pc_t *pc, void *item)
             return LOOMWORKS_ERR_SHUTDOWN;
         }
     }
+    /* Append to tail; broadcast (not signal) because a full queue can have
+     * multiple waiters that each need to retry their capacity check. */
     if (pc->tail) { pc->tail->next = pi; } else { pc->head = pi; }
     pc->tail = pi;
     pc->len++;
@@ -179,6 +197,9 @@ loom_result_t loom_pc_take(loom_pc_t *pc, void **item)
     if (!pc || !item) return LOOMWORKS_ERR_INVALID;
     *item = NULL;
     pthread_mutex_lock(&pc->lock);
+    /* Wait while empty; wake on enqueue or shutdown.  CLOCK_MONOTONIC with a
+     * 100 ms slice — a timed poll rather than an unbounded wait, so a leaked
+     * producer cannot wedge consumers forever after shutdown races. */
     while (pc->head == NULL) {
         if (pc->shutdown) {
             pthread_mutex_unlock(&pc->lock);
@@ -193,10 +214,12 @@ loom_result_t loom_pc_take(loom_pc_t *pc, void **item)
         }
         pthread_cond_timedwait(&pc->cond, &pc->lock, &ts);
     }
+    /* Unlink head; keep the node alive only for its data, then free it. */
     pc_item_t *pi  = pc->head;
     pc->head = pi->next;
     if (pc->head == NULL) pc->tail = NULL;
     pc->len--;
+    /* Consumers waking a blocked bounded producer. */
     pthread_cond_broadcast(&pc->cond);
     pthread_mutex_unlock(&pc->lock);
     *item = pi->data;
@@ -213,6 +236,8 @@ void loom_pc_shutdown(loom_pc_t *pc)
     pthread_cond_broadcast(&pc->cond);
     pthread_mutex_unlock(&pc->lock);
     if (pc->pool) {
+        /* Wake the internal pool's workers so they observe shutdown while
+         * parked in take() — otherwise they sleep until the next 100 ms poll. */
         loom_pool_broadcast(pc->pool);
     }
 }

@@ -5,6 +5,11 @@
  * A task group tracks submitted tasks via a linked list of user_data
  * pointers.  loom_task_group_cancel() walks this list and calls
  * loom_pool_cancel() for each entry.
+ *
+ * Tracking key: the group records the *user_data* pointer (not the task_id),
+ * because that is what loom_pool_cancel() matches.  Consequence: tasks
+ * submitted with data == NULL are NOT tracked and cannot be cancelled via
+ * the group — cancellation of a NULL pointer would be ambiguous.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/task_group.h"
@@ -24,6 +29,10 @@ typedef struct task_group_node {
 
 /* ================================================================
  *  loom_task_group — internal structure.
+ *
+ *  The node list is append-mostly: entries are added on submit and
+ *  wholesale-removed by cancel()/destroy().  A mutex keeps concurrent
+ *  submitters and cancels from racing on the same list.
  * ================================================================ */
 struct loom_task_group {
     loom_thread_pool_t *pool;       /**< Backing thread pool. */
@@ -92,7 +101,9 @@ void loom_task_group_destroy(loom_task_group_t **group)
     loom_task_group_t *g = *group;
     pthread_mutex_lock(&g->lock);
     g->destroyed = true;
-    /* Cancel any remaining tracked tasks. */
+    /* Cancel any remaining tracked tasks.  Cancelling an already-cancelled
+     * or already-running task is a no-op inside loom_pool_cancel(), so this
+     * is safe even if some tasks have been individually cancelled first. */
     task_group_node_t *cur = g->head;
     while (cur) {
         task_group_node_t *next = cur->next;
@@ -125,7 +136,8 @@ loom_task_group_submit(loom_task_group_t *group, loom_task_fn fn, void *data, ui
     }
     loom_result_t rc = loom_pool_submit(group->pool, fn, data, task_id);
     if (rc == LOOMWORKS_OK && data != NULL) {
-        /* Track the submission so we can cancel it later. */
+        /* Track the submission so we can cancel it later.
+         * data == NULL tasks are intentionally not tracked (see file doc). */
         task_group_node_t *node = task_group_node_create(data);
         if (node) {
             if (group->tail) {
@@ -184,6 +196,11 @@ void loom_task_group_cancel(loom_task_group_t *group)
         return;
     }
     pthread_mutex_lock(&group->lock);
+    /* Walk and cancel every tracked task, freeing nodes as we go.
+     * Destructive: the tracking list is emptied, so tasks submitted AFTER
+     * this call start a fresh tracking set and are NOT cancelled here.
+     * Concurrent safety: loom_pool_cancel() is a no-op for already-running
+     * or already-cancelled tasks, so racing submitters cannot be corrupted. */
     task_group_node_t *cur = group->head;
     while (cur) {
         task_group_node_t *next = cur->next;
@@ -205,6 +222,10 @@ void loom_task_group_wait(loom_task_group_t *group)
     if (!group) {
         return;
     }
+    /* Drains the backing pool via loom_pool_shutdown().  After this call
+     * the pool is shut down and CANNOT accept new tasks — wait() is a
+     * terminal operation, so it must be the last thing a caller does with
+     * the group's pool. */
     loom_pool_shutdown(group->pool);
 }
 

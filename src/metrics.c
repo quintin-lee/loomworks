@@ -1,6 +1,13 @@
 /**
  * @file metrics.c
  * @brief Task execution metrics implementation.
+ *
+ * Design: worker threads update the counters lock-free via C11 atomics so
+ * the hot path never contends; the embedded mutex exists solely to give
+ * loom_metrics_snapshot() a consistent cross-section of every counter at
+ * once (a single atomic load per counter is not a coherent snapshot).
+ * The callback (cb) is invoked by loom_metrics_fire() on the *worker*
+ * thread, so it must be cheap and non-blocking.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/metrics.h"
@@ -10,18 +17,18 @@
 #include <stdlib.h>
 
 struct loom_metrics {
-    loom_thread_pool_t *pool;
-    loom_metric_fn      cb;
-    void               *user_data;
-    pthread_mutex_t     lock;
-    /* Thread-safe counters, updated via atomic ops in worker threads */
+    loom_thread_pool_t *pool; /* Pool that generated the events (for callbacks). */
+    loom_metric_fn      cb;   /* Optional per-event callback, fired on worker threads. */
+    void               *user_data; /* Opaque argument passed to cb. */
+    pthread_mutex_t     lock;      /* Guards snapshot() reads only — never the hot path. */
+    /* Lock-free counters, updated with relaxed/fetch_add by workers. */
     _Atomic uint64_t submitted;
     _Atomic uint64_t completed;
     _Atomic uint64_t cancelled;
     _Atomic uint64_t started;
     _Atomic uint64_t failed;
-    _Atomic uint64_t latency_sum_ns;
-    _Atomic uint64_t latency_max_ns;
+    _Atomic uint64_t latency_sum_ns; /* Sum of per-task execution latencies. */
+    _Atomic uint64_t latency_max_ns; /* High-water mark, CAS-guarded. */
 };
 
 loom_result_t
@@ -37,6 +44,7 @@ loom_metrics_create(loom_thread_pool_t *pool, loom_metric_fn cb, void *data, loo
     m->pool      = pool;
     m->cb        = cb;
     m->user_data = data;
+    /* calloc zeroed the counters; the stores keep the intent explicit. */
     atomic_store(&m->submitted, 0);
     atomic_store(&m->completed, 0);
     atomic_store(&m->cancelled, 0);
@@ -130,6 +138,8 @@ uint64_t loom_metrics_avg_latency_ns(const loom_metrics_t *metrics)
     if (!metrics) {
         return 0;
     }
+    /* Sum and count may momentarily disagree (two separate atomic loads);
+     * that is fine for an average, unlike a strict invariant check. */
     uint64_t completed = atomic_load(&metrics->completed);
     if (completed == 0) {
         return 0;
@@ -145,6 +155,11 @@ loom_metrics_snapshot(const loom_metrics_t *metrics, loom_metrics_snapshot_t *ou
     }
     /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast) */
     loom_metrics_t *m = (loom_metrics_t *)metrics;
+    /* The mutex serializes snapshot() readers against each other.  It does
+     * NOT lock out counter updates (workers never take it), so the snapshot
+     * is "torn" across events but each field is a valid value; this is the
+     * documented trade-off — a fully coherent snapshot would need the lock
+     * on every worker update. */
     pthread_mutex_lock(&m->lock);
     out->submitted      = atomic_load(&m->submitted);
     out->started        = atomic_load(&m->started);
@@ -162,7 +177,11 @@ void loom_metrics_record_latency(loom_metrics_t *metrics, uint64_t latency_ns)
     if (!metrics) {
         return;
     }
+    /* Sum is a plain monotonic accumulation — no contention concern. */
     atomic_fetch_add(&metrics->latency_sum_ns, latency_ns);
+    /* Max is a lock-free high-water mark: optimistic read, then CAS only
+     * when we actually beat the current value.  The loop retries on lost
+     * races; on success latency_max only ever increases. */
     uint64_t old_max = atomic_load(&metrics->latency_max_ns);
     while (latency_ns > old_max &&
            !atomic_compare_exchange_weak(&metrics->latency_max_ns, &old_max, latency_ns))
@@ -174,6 +193,8 @@ void loom_metrics_fire(loom_metrics_t *metrics, loom_metric_event_t event)
     if (!metrics) {
         return;
     }
+    /* Every event type maps to exactly one counter; the callback (if any)
+     * runs synchronously on the firing thread, so keep it short. */
     switch (event) {
     case LOOMWORKS_METRIC_SUBMITTED:
         atomic_fetch_add(&metrics->submitted, 1);

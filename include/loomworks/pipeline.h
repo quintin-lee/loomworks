@@ -65,11 +65,13 @@ void loom_pc_destroy(loom_pc_t **pc);
  * @brief Submit an item into the pipeline.
  *
  * Blocks until the item is enqueued (when capacity > 0) or the
- * pipeline is shut down.
+ * pipeline is shut down.  With a bounded queue, a submit that cannot
+ * complete within 60 seconds returns LOOMWORKS_ERR_TIMEOUT.
  *
  * @param pc     The pipeline handle.
  * @param item   Opaque item pointer (owned by caller; returned via loom_pc_take()).
- * @return       LOOMWORKS_OK on success, LOOMWORKS_ERR_SHUTDOWN if closed.
+ * @return       LOOMWORKS_OK on success, LOOMWORKS_ERR_SHUTDOWN if closed,
+ *               LOOMWORKS_ERR_TIMEOUT if a bounded queue stays full for 60 s.
  */
 loom_result_t loom_pc_submit(loom_pc_t *pc, void *item);
 
