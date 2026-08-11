@@ -670,9 +670,22 @@ static void test_task_group_submit_after_destroy(void)
 static void test_bucket_priority_edges(void)
 {
     g_exec_count = 0;
+    g_gate_started = 0;
+    g_gate_release = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create single-worker pool");
+
+    /* Occupy the only worker with a gate task so every priority task is
+     * queued BEFORE any of them can run.  Without the gate, the worker can
+     * dequeue the first task (prio 255) before the higher-priority tasks
+     * are submitted — and a running task cannot be preempted, so priority
+     * ordering among queued tasks does not apply.  The order assertion
+     * below would then fail nondeterministically. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "submit gate task");
+    while (!g_gate_started) {
+        /* wait until the worker is inside the gate */
+    }
 
     struct {
         uint8_t prio;
@@ -687,6 +700,7 @@ static void test_bucket_priority_edges(void)
                    (void *)(intptr_t)seq[i].slot, seq[i].prio, NULL) == LOOMWORKS_OK,
                "submit priority edge");
     }
+    g_gate_release = 1;
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 
