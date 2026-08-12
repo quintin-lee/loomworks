@@ -66,7 +66,7 @@ typedef struct cancel_slot {
  * the bottom (LIFO, cache-friendly); idle thieves CAS the top for FIFO
  * steal.  bottom is private to the owner; top is shared. */
 typedef struct loom_work_deque {
-    _Alignas(64) size_t       bottom;   /* owner-private write index */
+    _Alignas(64) _Atomic size_t bottom; /* owner-private write index */
     _Alignas(64) _Atomic size_t top;    /* shared read index (CAS by thieves) */
     loom_task_t           **slots;      /* ring buffer, capacity slots */
     size_t                  capacity;  /* power of two */
@@ -188,5 +188,30 @@ void loom_enqueue_unlocked(loom_thread_pool_t *pool, loom_task_t *task);
  * @return The dequeued task, or NULL if the queue is empty.
  */
 loom_task_t *loom_dequeue_unlocked(loom_thread_pool_t *pool);
+
+/* ================================================================
+ *  Chase-Lev work-stealing deque operations.
+ *  Owner thread: deque_push / deque_pop (LIFO at the bottom).
+ *  Idle thieves: deque_steal (FIFO from the top).
+ * ================================================================ */
+
+/**
+ * @brief Push a task onto the owner's deque bottom (LIFO side).
+ * @return false if the deque is full (caller must spill to shared queues).
+ */
+bool deque_push(loom_work_deque_t *d, loom_task_t *task);
+
+/**
+ * @brief Pop the most-recent task from the owner's bottom (LIFO).
+ * @return The task, or NULL if the deque is empty.
+ */
+loom_task_t *deque_pop(loom_work_deque_t *d);
+
+/**
+ * @brief Steal the oldest task from @p d's top (FIFO side).  Called by
+ * idle workers; CAS-protected against the owner and other thieves.
+ * @return The task, or NULL if nothing could be stolen.
+ */
+loom_task_t *deque_steal(loom_work_deque_t *d);
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */

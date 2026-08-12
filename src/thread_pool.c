@@ -177,6 +177,35 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->node_stack, 0, memory_order_relaxed);
 
     pool->max_worker_count = pool->worker_count;
+
+    /* --- Work-stealing deques (one Chase-Lev deque per worker slot) --- */
+    pool->deques = (loom_work_deque_t *)calloc(pool->max_worker_count,
+                                               sizeof(loom_work_deque_t));
+    if (pool->deques != NULL) {
+        bool ok = true;
+        for (uint32_t i = 0; i < pool->max_worker_count; i++) {
+            pool->deques[i].capacity = LOOMWORKS_DEQUE_CAPACITY;
+            pool->deques[i].mask     = LOOMWORKS_DEQUE_CAPACITY - 1;
+            pool->deques[i].bottom   = 0;
+            atomic_store_explicit(&pool->deques[i].top, 0, memory_order_relaxed);
+            atomic_store_explicit(&pool->deques[i].len, 0, memory_order_relaxed);
+            pool->deques[i].slots = (loom_task_t **)calloc(LOOMWORKS_DEQUE_CAPACITY,
+                                                           sizeof(loom_task_t *));
+            if (pool->deques[i].slots == NULL) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            for (uint32_t i = 0; i < pool->max_worker_count; i++) {
+                free((void *)pool->deques[i].slots);
+            }
+            free(pool->deques);
+            pool->deques = NULL; /* lane-only mode */
+        }
+    }
+    atomic_store_explicit(&pool->deque_total, 0, memory_order_relaxed);
+
     pool->threads          = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
     if (!pool->threads) {
         pool_destroy_internal(pool);
@@ -417,6 +446,78 @@ static void task_destroy(loom_thread_pool_t *pool, loom_task_t *t)
     } else {
         free(t);
     }
+}
+
+/* ================================================================
+ *  Chase-Lev work-stealing deque (Le, Popa, Amarasinghe — SPAA'05).
+ *
+ *  Owner thread pushes and pops at the BOTTOM (LIFO, cache-friendly,
+ *  recent-first).  Idle thieves CAS the TOP to steal the OLDEST task
+ *  (FIFO — a task sits longest at the top, so it is the fairest to
+ *  redistribute).  bottom is owner-private; top is shared.
+ * ================================================================ */
+bool deque_push(loom_work_deque_t *d, loom_task_t *task)
+{
+    size_t b = atomic_load_explicit(&d->bottom, memory_order_relaxed);
+    size_t t = atomic_load_explicit(&d->top, memory_order_relaxed);
+    if (b - t >= d->capacity) {
+        return false; /* full */
+    }
+    d->slots[b & d->mask] = task;
+    atomic_thread_fence(memory_order_release);
+    atomic_store_explicit(&d->bottom, b + 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&d->len, 1, memory_order_relaxed);
+    return true;
+}
+
+loom_task_t *deque_pop(loom_work_deque_t *d)
+{
+    size_t b = atomic_load_explicit(&d->bottom, memory_order_relaxed);
+    if (b == 0) {
+        return NULL;
+    }
+    b -= 1;
+    atomic_store_explicit(&d->bottom, b, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+    size_t t = atomic_load_explicit(&d->top, memory_order_acquire);
+    if (b < t) {
+        /* Thief took our element (top moved past us): resync bottom. */
+        atomic_store_explicit(&d->bottom, t, memory_order_relaxed);
+        return NULL;
+    }
+    loom_task_t *task = d->slots[b & d->mask];
+    if (b > t) {
+        /* More than one element left: no thief race, safe LIFO pop. */
+        atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        return task;
+    }
+    /* b == t: last element — race with a thief. */
+    if (atomic_compare_exchange_strong_explicit(
+            &d->top, &t, t + 1, memory_order_seq_cst, memory_order_relaxed)) {
+        atomic_store_explicit(&d->bottom, t + 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        return task;
+    }
+    /* Lost to a thief; we own the slot but it is gone. */
+    atomic_store_explicit(&d->bottom, t, memory_order_relaxed);
+    return NULL;
+}
+
+loom_task_t *deque_steal(loom_work_deque_t *d)
+{
+    size_t t = atomic_load_explicit(&d->top, memory_order_acquire);
+    atomic_thread_fence(memory_order_seq_cst);
+    size_t b = atomic_load_explicit(&d->bottom, memory_order_acquire);
+    if (t >= b) {
+        return NULL; /* empty */
+    }
+    loom_task_t *task = d->slots[t & d->mask];
+    if (atomic_compare_exchange_strong_explicit(
+            &d->top, &t, t + 1, memory_order_seq_cst, memory_order_relaxed)) {
+        atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        return task;
+    }
+    return NULL;
 }
 
 /* ================================================================

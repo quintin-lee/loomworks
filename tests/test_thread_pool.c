@@ -2,6 +2,9 @@
 #include "loomworks/pipeline.h"
 #include "loomworks/thread_pool.h"
 
+/* Internal struct access for work-stealing deque unit tests. */
+#include "../src/thread_pool_internal.h"
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -2513,6 +2516,62 @@ static void test_pipeline_stress(void)
 }
 
 /* ================================================================
+ *  Work-stealing deque unit tests (internal loom_work_deque_t)
+ * ================================================================ */
+static void test_deque_basic_lifo(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "deque test: pool create");
+    ASSERT(pool->deques != NULL, "deque test: deques allocated (not lane-only mode)");
+
+    loom_work_deque_t *d = &pool->deques[0];
+
+    /* LIFO: push t1 t2 t3 -> pop t3 -> t2 -> t1 -> NULL */
+    loom_task_t t1 = {0}, t2 = {0}, t3 = {0};
+    ASSERT(deque_push(d, &t1), "deque: push t1");
+    ASSERT(deque_push(d, &t2), "deque: push t2");
+    ASSERT(deque_push(d, &t3), "deque: push t3");
+    ASSERT(deque_pop(d) == &t3, "deque: LIFO pop returns t3 (newest)");
+    ASSERT(deque_pop(d) == &t2, "deque: LIFO pop returns t2");
+    ASSERT(deque_pop(d) == &t1, "deque: LIFO pop returns t1 (oldest)");
+    ASSERT(deque_pop(d) == NULL, "deque: pop empty returns NULL");
+
+    /* Steal is FIFO: push 5, pop 3 off bottom, steal oldest remaining */
+    loom_task_t s[5] = {{0}};
+    for (int i = 0; i < 5; i++) {
+        ASSERT(deque_push(d, &s[i]), "deque: steal-setup push");
+    }
+    ASSERT(deque_pop(d) == &s[4], "deque: pop newest after setup");
+    ASSERT(deque_pop(d) == &s[3], "deque: pop 2nd newest after setup");
+    ASSERT(deque_pop(d) == &s[2], "deque: pop 3rd newest after setup");
+    ASSERT(deque_steal(d) == &s[0], "deque: steal returns oldest remaining (FIFO)");
+    ASSERT(deque_steal(d) == &s[1], "deque: steal returns next oldest (FIFO)");
+    ASSERT(deque_steal(d) == NULL, "deque: steal empty returns NULL");
+
+    /* Capacity: 256 pushes OK, 257th rejected */
+    loom_task_t *cap = (loom_task_t *)calloc(LOOMWORKS_DEQUE_CAPACITY + 1,
+                                             sizeof(loom_task_t));
+    ASSERT(cap != NULL, "deque: cap array alloc");
+    for (int i = 0; i < LOOMWORKS_DEQUE_CAPACITY; i++) {
+        ASSERT(deque_push(d, &cap[i]), "deque: push to capacity");
+    }
+    ASSERT(!deque_push(d, &cap[LOOMWORKS_DEQUE_CAPACITY]),
+           "deque: push over capacity rejected");
+    /* Drain to confirm all pushed tasks are retrievable. */
+    for (int i = LOOMWORKS_DEQUE_CAPACITY - 1; i >= 0; i--) {
+        ASSERT(deque_pop(d) == &cap[i], "deque: drain LIFO order");
+    }
+    ASSERT(deque_pop(d) == NULL, "deque: drained empty");
+    free(cap);
+
+    ASSERT(atomic_load_explicit(&d->len, memory_order_relaxed) == 0,
+           "deque: len back to 0 after drain");
+
+    loom_pool_destroy(&pool);
+}
+
+/* ================================================================
  *  Main
  * ================================================================ */
 
@@ -2605,6 +2664,7 @@ int main(void)
     test_ring_cancel_data();
     test_ring_priority_preempt();
     test_ring_shutdown_drains();
+    test_deque_basic_lifo();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
