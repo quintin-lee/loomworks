@@ -214,4 +214,12 @@ loom_task_t *deque_pop(loom_work_deque_t *d);
  */
 loom_task_t *deque_steal(loom_work_deque_t *d);
 
+/**
+ * @brief Bulk-dequeue up to @p max consecutive tasks from the Vyukov ring
+ * with a single CAS on ring_head.  Slots are claimed in submission order.
+ * @return The number of tasks claimed (0 if empty or CAS lost).  Caller
+ *         owns ring_count/queue_len accounting.
+ */
+size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
+
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */

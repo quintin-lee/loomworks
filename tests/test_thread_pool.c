@@ -2626,6 +2626,53 @@ static void test_cancel_in_deque(void)
     ASSERT(g_cancel_hit == 0, "cancel-in-deque: cancelled task never ran");
 }
 
+/* ---------- Test: bulk dequeue from the Vyukov ring ---------- */
+static void test_deque_bulk_dequeue(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "bulk-dequeue: pool create");
+    ASSERT(pool->deques != NULL, "bulk-dequeue: deques allocated");
+
+    /* Occupy the only worker so submitted tasks stay resident in the ring. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "bulk-dequeue: submit gate");
+    while (!g_gate_started) {
+    }
+
+    /* Submit NORMAL tasks -> ring fast path; capture their task ids. */
+    uint64_t ids[LOOMWORKS_BULK_DEQUEUE] = {0};
+    int      counter                     = 0;
+    for (int i = 0; i < LOOMWORKS_BULK_DEQUEUE; i++) {
+        ASSERT(loom_pool_submit(pool, simple_task, &counter, &ids[i]) == LOOMWORKS_OK,
+               "bulk-dequeue: submit task");
+    }
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed)
+               == (size_t)LOOMWORKS_BULK_DEQUEUE,
+           "bulk-dequeue: all N tasks resident in ring");
+
+    /* Claim all N with a single CAS; order must be submission order. */
+    loom_task_t *out[LOOMWORKS_BULK_DEQUEUE] = {0};
+    size_t       n                           = ring_bulk_try_dequeue(pool, out, LOOMWORKS_BULK_DEQUEUE);
+    ASSERT(n == (size_t)LOOMWORKS_BULK_DEQUEUE, "bulk-dequeue: claimed all N");
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,
+           "bulk-dequeue: ring drained");
+    for (int i = 0; i < LOOMWORKS_BULK_DEQUEUE; i++) {
+        ASSERT(out[i] != NULL && out[i]->task_id == ids[i],
+               "bulk-dequeue: submission order preserved");
+    }
+
+    /* Account like the worker's run boundary would (queue_len--) so the
+     * shutdown drain check sees consistent state. */
+    atomic_fetch_sub_explicit(&pool->queue_len, n, memory_order_relaxed);
+
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -2721,6 +2768,7 @@ int main(void)
     test_ring_shutdown_drains();
     test_deque_basic_lifo();
     test_cancel_in_deque();
+    test_deque_bulk_dequeue();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

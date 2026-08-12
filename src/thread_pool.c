@@ -62,6 +62,7 @@ static loom_task_t *
 dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool, unsigned max_priority);
 static loom_task_t *ring_try_dequeue(loom_thread_pool_t *pool);
 static bool ring_has_work(loom_thread_pool_t *pool);
+size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
 static void cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task);
 
 /* ================================================================
@@ -705,30 +706,62 @@ static bool ring_try_enqueue(loom_thread_pool_t *pool, loom_task_t *task)
     }
 }
 
-static loom_task_t *ring_try_dequeue(loom_thread_pool_t *pool)
+/**
+ * @brief Bulk-dequeue up to @p max consecutive tasks from the Vyukov ring
+ * with a single CAS on ring_head.
+ *
+ * The producer claims slots sequentially (tail + n), so slots [head, head+n)
+ * hold tasks in submission order; the consumer claims a whole run in one
+ * CAS and publishes each slot with the standard released sequence number.
+ *
+ * NOTE: the cancel-index entry is NOT removed here — it lives from submit
+ * until the worker's run boundary so tasks sitting in a per-worker deque
+ * stay cancellable.  The worker removes it (cancel_index_remove) right
+ * before running the task.
+ *
+ * @return The number of tasks actually claimed (0 if the head is empty or
+ *         the CAS lost).  The caller is responsible for ring_count/queue_len
+ *         accounting.
+ */
+size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max)
 {
     uint64_t head = atomic_load_explicit(&pool->ring_head, memory_order_relaxed);
-    for (;;) {
-        uint64_t pos = head & pool->ring_mask;
-        if (atomic_load_explicit(&pool->ring[pos].seq, memory_order_acquire) != head + 1) {
-            return NULL; /* empty at this position */
+    size_t   n    = 0;
+    for (; n < max; n++) {
+        uint64_t pos = (head + n) & pool->ring_mask;
+        if (atomic_load_explicit(&pool->ring[pos].seq, memory_order_acquire) != head + n + 1) {
+            break; /* empty at this position */
         }
-        uint64_t want = head;
-        if (atomic_compare_exchange_weak_explicit(&pool->ring_head, &head, head + 1,
-                                                  memory_order_relaxed,
-                                                  memory_order_relaxed)) {
-            loom_task_t *task = (loom_task_t *)atomic_load_explicit(
-                &pool->ring[want & pool->ring_mask].task, memory_order_relaxed);
-            /* NOTE: the cancel-index entry is NOT removed here — it lives
-             * from submit until the worker's run boundary so tasks sitting
-             * in a per-worker deque stay cancellable.  The worker removes
-             * it (cancel_index_remove) right before running the task. */
-            atomic_store_explicit(&pool->ring[want & pool->ring_mask].seq,
-                                  want + pool->ring_size, memory_order_release);
-            atomic_fetch_sub_explicit(&pool->ring_count, 1, memory_order_relaxed);
-            return task;
-        }
+        out[n] = (loom_task_t *)atomic_load_explicit(&pool->ring[pos].task,
+                                                     memory_order_relaxed);
     }
+    if (n == 0) {
+        return 0;
+    }
+    uint64_t want = head;
+    if (!atomic_compare_exchange_weak_explicit(&pool->ring_head, &head, head + n,
+                                               memory_order_acq_rel,
+                                               memory_order_relaxed)) {
+        return 0; /* another consumer won; retry on next loop iteration */
+    }
+    for (size_t k = 0; k < n; k++) {
+        /* Canonical release: slot at absolute position (want + k) is
+         * released to seq = (want + k) + ring_size, so after one full
+         * revolution the producer's empty-check (seq == tail) matches
+         * again.  Adding +1 here would make the next consumer round
+         * ghost-claim the slot and double-free the stale task node. */
+        atomic_store_explicit(&pool->ring[(want + k) & pool->ring_mask].seq,
+                              want + k + pool->ring_size, memory_order_release);
+    }
+    atomic_fetch_sub_explicit(&pool->ring_count, n, memory_order_relaxed);
+    return n;
+}
+
+static loom_task_t *ring_try_dequeue(loom_thread_pool_t *pool)
+{
+    loom_task_t *task = NULL;
+    size_t       n    = ring_bulk_try_dequeue(pool, &task, 1);
+    return n ? task : NULL;
 }
 
 static bool ring_has_work(loom_thread_pool_t *pool)
