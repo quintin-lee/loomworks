@@ -66,16 +66,25 @@ existing ring demoted to the *cross-worker submission + overflow* path.
 Worker loop becomes:
 
 ```
-lock-free:
-  if own deque non-empty → pop LIFO (most-recent-first), run it
-else (own deque empty):
-  Step 1: lane_has_priority(pool, 4) → dequeue p ≤ 4 under lock (REALTIME/HIGH)
-  Step 2: bulk dequeue from ring into own deque (N slots, one head CAS each —
-          head CAS count ÷ N)
-  Step 3: pop LIFO from own deque; if still empty → steal from a random victim
-          worker's deque tail (FIFO, oldest-first) via CAS on bottom
-  Step 4: if still empty → sem_wait(work_sem), retry
+Step 0 (lock-free, cheap): relaxed-load nonempty_bits[0..1] — any REALTIME/HIGH
+        bit set?
+        yes → acquire pool->lock, dequeue lowest p ≤ 4 from lanes, run it
+        (lane path is identical to today's Step 1; happens BEFORE any deque
+        pop so priority tasks always preempt local work)
+Step 1: own deque non-empty → pop LIFO (most-recent-first), run it
+Step 2: own deque empty → bulk dequeue N slots from ring into own deque
+        (one head CAS each; head CAS count ÷ N), then pop LIFO and run
+Step 3: still empty → steal FIFO (oldest-first) from a random victim's deque
+        tail via CAS on bottom; run the stolen task
+Step 4: still empty → lock, check lanes p ≥ 5, unlock; if none →
+        sem_wait(work_sem), retry
 ```
+
+**Priority ordering invariant (corrected):** REALTIME/HIGH tasks are checked
+**first** (Step 0), before the local deque — otherwise a busy worker with a
+full deque would starve submitted priority tasks, violating the priority
+contract. This matches today's `lane_has_priority(pool, 4)` precedence.
+LOW (p=10) tasks remain last (Step 4 lanes), same as today.
 
 Key properties:
 
@@ -155,20 +164,37 @@ today. **No new allocation path is introduced.**
 worker loop — priority tasks always preempt local LIFO execution. Lanes remain
 the low-level fallback for all priorities when the deque and ring are empty.
 
-### 4.2 Cancellation (cancel index, unchanged + tombstone check on pop)
+### 4.2 Cancellation (index removal DEFERRED to run time — design change)
 
-The open-addressing cancel index (`id & (cap-1)`, 0=EMPTY / 1=TOMBSTONE /
-id+1=OCCUPIED) is keyed by global `task_id` — it is **unaffected by where a
-task sits**. Two additions:
+**Why this differs from the status quo:** today `ring_try_dequeue` calls
+`cancel_index_remove` ([thread_pool.c:606](src/thread_pool.c)) the moment a
+task leaves the ring, so a task that has been *transferred into a worker's
+deque* has **no cancel-index entry** — `cancel()`/`cancel_by_id()` (which
+probe the index) would never find it, and the task would run uncancelled.
+This is a real semantic break, not an implementation detail.
 
-1. When a worker **pops a task from its own deque** it must check the cancel
-   slot (same tombstone check as the ring path today: claim → free task node →
-   continue). Cost: one indexed atomic load per executed task. Acceptable;
-   alternative (generation counters per deque) rejected as over-engineering.
-2. **cancel() semantics for stolen-but-not-yet-run tasks**: unchanged — the
-   worker that eventually pops the tombstoned slot frees the node. `cancel_all`
-   drains index slots; deque-resident tasks are covered because the index
-   claims them before a worker pops.
+**Fix:** defer `cancel_index_remove` from ring dequeue to the **run boundary**
+— the index entry lives from submit until the worker *commits to executing*
+the task (immediately after the tombstone check). Consequences:
+
+1. Ring **dequeue no longer removes the index entry**; the entry is removed
+   when the task is popped from a deque and passes the `task->cancelled`
+   check. A task sitting in any deque remains discoverable and claimable by
+   the canceller exactly as a ring-resident task is today.
+2. **Index capacity must grow** to cover tasks resident in deques:
+   `cancel_cap ≥ ring_size + Σ(worker deque capacity)`. The current
+   `2 * ring_size` sizing is insufficient once deques hold tasks. Resize
+   `cancel_slots` accordingly at pool create.
+3. **Tombstone claim vs. in-flight race** (unchanged semantics): the
+   canceller CASes `id+1 → 1`; if the worker has already passed the
+   tombstone check and is running, the claim CAS fails (`cur == 0` after
+   removal) and cancellation is correctly lost. The check order in the
+   worker is: pop → check `task->cancelled` → **then** remove index entry →
+   run.
+4. `cancel_all` drains index slots as today; deque-resident tasks are covered
+   because their entries still exist.
+5. **Steal does not touch the index** — the entry follows the task node; the
+   thief simply inherits it and removes it at its own run boundary.
 
 ### 4.3 Shutdown drain (the hard part — `deque_total`)
 
@@ -191,11 +217,20 @@ worker_deque_t.len           /* _Atomic size_t, per-worker live count */
   path.**
 - Shutdown empty-condition becomes:
   `queue_len == 0 && ring_count == 0 && Σ workers' deque.len == 0`.
+  **Read order matters:** the lazy sum must be read *under* `pool->lock`
+  (as the existing check at [thread_pool.c:257-261](src/thread_pool.c) is),
+  so a worker cannot be mid-transfer between ring and deque while the sum is
+  being taken — the lock serializes the check against any worker that is
+  about to spill or bulk-dequeue.
 - **Spill-back on exit**: before a worker exits (shutdown complete, or
   resize-down), it must push its remaining deque contents back into the ring
   (or lanes by priority) so no task is stranded. Order: drain deque → push back
-  to ring → only then exit. This is the invariant that makes the empty-check
-  sound: a worker never exits with a non-empty deque.
+  to ring → only then exit. **Accounting:** each spilled task must
+  `queue_len++` (ring submit path) *before* its `deque.len--` — so a
+  concurrent empty-check never observes the task in neither counter.
+  This is the invariant that makes the empty-check sound: a worker never exits
+  with a non-empty deque, and every transfer is double-accounted during the
+  transition.
 
 ### 4.4 Resize (down)
 
@@ -265,7 +300,16 @@ sanity checks that the rewrite did not regress the paths it does not target.
   doing the same — the ring's CAS protocol already serializes producers; a
   worker spilling is just another producer. No new race, but the *order* of
   exit checks (drain deque before exiting) must be locked by
-  `test_shutdown_drains_deque` / `test_resize_down_spills_deque`.
+  `test_shutdown_drains_deque` / `test_resize_down_spills_deque`. **Accounting
+  order (§4.3) is the trap**: `queue_len++` must precede `deque.len--` during
+  spill, or a concurrent empty-check sees the task in neither counter.
+- **Cancel index size (§4.2)**: deferring removal to run time means index
+  entries live longer (submit → run, not submit → ring dequeue). `cancel_cap`
+  must be `≥ ring_size + Σ deque capacities` or the open-addressing probe can
+  miss. Locked by a `test_cancel_in_deque` under a full index.
+- **Priority preemption order (§2.2 Step 0)**: the REALTIME/HIGH bitmap check
+  must precede any deque pop — a regression here silently breaks the priority
+  contract (test_priority_preempts_deque locks it).
 - **Cache-line layout**: `worker_deque_t` must be cacheline-aligned (64 B,
   matching `LOOMWORKS_CACHELINE_ALIGN`) so thief CAS on `top` does not
   invalidate the owner's `bottom` line and vice versa.
