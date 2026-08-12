@@ -156,7 +156,7 @@ struct loom_thread_pool {
 
     /* Lock-free task_id → slot index for ring cancel (open addressing). */
     cancel_slot_t *cancel_slots; /**< NULL when ring is NULL. */
-    uint64_t       cancel_cap;   /**< Power of two >= 2 * ring_size. */
+    uint64_t       cancel_cap;   /**< Power of two >= ring_size + total deque slots. */
 
     /* Lock-free node pool (tagged bounded stack; the sole task-node allocator). */
     loom_task_t      *node_pool;     /**< Preallocated node array (never freed individually). */

@@ -62,6 +62,7 @@ static loom_task_t *
 dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool, unsigned max_priority);
 static loom_task_t *ring_try_dequeue(loom_thread_pool_t *pool);
 static bool ring_has_work(loom_thread_pool_t *pool);
+static void cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task);
 
 /* ================================================================
  *  pool_init — initialise locks, defaults, and worker thread array
@@ -156,7 +157,15 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         for (uint64_t i = 0; i < pool->ring_size; i++) {
             atomic_store_explicit(&pool->ring[i].seq, i, memory_order_relaxed);
         }
-        pool->cancel_cap  = pool->ring_size * 2;
+        /* Cancel index capacity must cover every task that can hold an
+         * index entry: ring slots + all per-worker deques (a task's entry
+         * now lives from submit until its run boundary). */
+        size_t deque_slots = (size_t)pool->worker_count * LOOMWORKS_DEQUE_CAPACITY;
+        size_t need        = pool->ring_size + deque_slots;
+        pool->cancel_cap   = 1;
+        while (pool->cancel_cap < need) {
+            pool->cancel_cap <<= 1;
+        }
         pool->cancel_slots = (cancel_slot_t *)calloc(pool->cancel_cap, sizeof(cancel_slot_t));
         if (pool->cancel_slots == NULL) {
             free(pool->ring);
@@ -314,6 +323,12 @@ static void *worker_entry(void *arg)
             }
             continue;
         }
+        /* Run boundary: remove the cancel-index entry (deferred from the
+         * ring->deque transfer).  After this, cancel()/cancel_by_id()
+         * probing the index can no longer find the task; it is committed
+         * to run (or was already cancelled -> the check below catches it).
+         * Lock contract: cancel_index_remove assumes pool->lock is held. */
+        cancel_index_remove(pool, task);
         if (task->cancelled) {
             /* Tombstone won: the canceller already accounted queue_len;
              * release the node (and any owned data) and continue. */
@@ -704,7 +719,10 @@ static loom_task_t *ring_try_dequeue(loom_thread_pool_t *pool)
                                                   memory_order_relaxed)) {
             loom_task_t *task = (loom_task_t *)atomic_load_explicit(
                 &pool->ring[want & pool->ring_mask].task, memory_order_relaxed);
-            cancel_index_remove(pool, task);
+            /* NOTE: the cancel-index entry is NOT removed here — it lives
+             * from submit until the worker's run boundary so tasks sitting
+             * in a per-worker deque stay cancellable.  The worker removes
+             * it (cancel_index_remove) right before running the task. */
             atomic_store_explicit(&pool->ring[want & pool->ring_mask].seq,
                                   want + pool->ring_size, memory_order_release);
             atomic_fetch_sub_explicit(&pool->ring_count, 1, memory_order_relaxed);

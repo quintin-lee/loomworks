@@ -46,6 +46,8 @@ static void record_exec(void *arg)
 
 static volatile int g_gate_started = 0;
 static volatile int g_gate_release = 0;
+static volatile int g_cancel_hit    = 0;
+static volatile uint64_t g_cancel_target_id = 0;
 
 static void gate_task(void *arg)
 {
@@ -2571,6 +2573,59 @@ static void test_deque_basic_lifo(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: cancel-index entry lives from submit to run boundary ---------- */
+static void cancel_in_deque_task(void *arg)
+{
+    /* Only the specifically-cancelled task must NOT run; all others may. */
+    if ((uint64_t)(uintptr_t)arg == (uint64_t)g_cancel_target_id) {
+        g_cancel_hit = 1;
+    }
+}
+
+static void test_cancel_in_deque(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_cancel_hit   = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-in-deque: pool create");
+    ASSERT(pool->deques != NULL, "cancel-in-deque: deques allocated");
+
+    /* Cancel index capacity must cover ring + all deque slots. */
+    size_t need = pool->ring_size + (size_t)pool->max_worker_count * LOOMWORKS_DEQUE_CAPACITY;
+    ASSERT(pool->cancel_cap >= need && (pool->cancel_cap & (pool->cancel_cap - 1)) == 0,
+           "cancel-in-deque: cancel_cap covers ring + deques and is power of two");
+
+    /* Occupy the only worker with a gate so submitted tasks stay queued. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "cancel-in-deque: submit gate");
+    while (!g_gate_started) {
+    }
+
+    /* Fill the ring past a single deque's worth so a worker pulling into
+     * its deque would leave the LAST-submitted id resident there. */
+    uint64_t last_id = 0;
+    for (int i = 0; i < LOOMWORKS_DEQUE_CAPACITY + 64; i++) {
+        ASSERT(loom_pool_submit(pool, cancel_in_deque_task,
+                                /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+                                (void *)(intptr_t)(i + 1), &last_id) == LOOMWORKS_OK,
+               "cancel-in-deque: submit cancellable task");
+    }
+    g_cancel_target_id = last_id;
+
+    /* The last-submitted task must not run after being cancelled. */
+    ASSERT(loom_pool_cancel_by_id(pool, last_id) == LOOMWORKS_OK,
+           "cancel-in-deque: cancel by id succeeds");
+    ASSERT(loom_pool_pending_count(pool) > 0, "cancel-in-deque: pending reflects queue");
+
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    ASSERT(g_cancel_hit == 0, "cancel-in-deque: cancelled task never ran");
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -2665,6 +2720,7 @@ int main(void)
     test_ring_priority_preempt();
     test_ring_shutdown_drains();
     test_deque_basic_lifo();
+    test_cancel_in_deque();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
