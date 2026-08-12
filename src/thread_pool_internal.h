@@ -21,6 +21,11 @@
 /* Ring size for unbounded-mode pools (queue_capacity == 0). */
 #define LOOMWORKS_RING_DEFAULT_SLOTS 4096u
 
+/* Work-stealing scheduler tuning. */
+#define LOOMWORKS_BULK_DEQUEUE 8    /* ring -> local deque batch size */
+#define LOOMWORKS_DEQUE_CAPACITY 256 /* per-worker Chase-Lev deque slots (pow2) */
+#define LOOMWORKS_STEAL_TRIES 3     /* random victims tried before blocking */
+
 /* ================================================================
  *  Task node — element of a per-priority FIFO bucket in the queue.
  * ================================================================ */
@@ -56,6 +61,18 @@ typedef struct cancel_slot {
     loom_task_t     *task;    /* owning task (for the cancelled flag) */
     void            *data;    /* task user_data (for loom_pool_cancel) */
 } cancel_slot_t;
+
+/* Per-worker Chase-Lev work-stealing deque.  Owner thread pushes/pops at
+ * the bottom (LIFO, cache-friendly); idle thieves CAS the top for FIFO
+ * steal.  bottom is private to the owner; top is shared. */
+typedef struct loom_work_deque {
+    _Alignas(64) size_t       bottom;   /* owner-private write index */
+    _Alignas(64) _Atomic size_t top;    /* shared read index (CAS by thieves) */
+    loom_task_t           **slots;      /* ring buffer, capacity slots */
+    size_t                  capacity;  /* power of two */
+    size_t                  mask;      /* capacity - 1 */
+    _Atomic size_t          len;       /* tasks currently resident */
+} loom_work_deque_t;
 
 /* ================================================================
  *  Future task context — bridges a loom_future_t to the pool's
@@ -147,6 +164,10 @@ struct loom_thread_pool {
     _Atomic uint64_t  node_stack;    /**< low32: top, high32: ABA tag. */
 
     _Atomic uint32_t active_workers; /**< Workers currently executing a task. */
+
+    /* Work-stealing: per-worker Chase-Lev deques + aggregate resident count. */
+    loom_work_deque_t *deques;         /**< Array sized max_worker_count. NULL = lane-only mode. */
+    _Atomic size_t     deque_total;    /**< Total tasks resident in all deques. */
 
     pthread_t       *threads;          /**< pthread_t array (one per worker). */
     uint32_t         max_worker_count; /**< Max capacity of threads array. */
