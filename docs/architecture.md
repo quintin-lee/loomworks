@@ -52,9 +52,11 @@ coroutine internals must be concurrency-safe even from many worker threads.
                                                        └──────────────┘
 ```
 
-### 2.2 Queue Layer — Two Paths
+### 2.2 Queue Layer — Two Paths Plus Per-Worker Deques
 
-The task queue is a **single shared structure** with two insertion paths:
+The task queue is a **single shared structure** with two insertion paths,
+plus a **per-worker Chase-Lev work-stealing deque** layered on top for
+NORMAL-priority throughput:
 
 1. **Priority lanes** (all non-NORMAL priorities; NORMAL when no ring is
    configured): 256 FIFO buckets (`buckets_head[256]` / `buckets_tail[256]`)
@@ -77,24 +79,44 @@ The task queue is a **single shared structure** with two insertion paths:
    `seq = want + ring_size`. When the ring is full, submission **spills to
    the NORMAL lane bucket** instead of blocking.
 
+3. **Per-worker Chase-Lev deques** (`deques[worker_count]`, allocated in
+   lockstep with the thread array): each worker owns a bounded array-based
+   deque (256 slots, `bottom`/`top` atomics). Workers bulk-claim up to
+   `LOOMWORKS_BULK_DEQUEUE` (8) tasks from the ring into their own deque and
+   pop from the bottom (LIFO, newest first — cache friendly). Idle workers
+   **steal from a random victim's deque top** (FIFO, oldest first). A pool
+   aggregate `deque_total` tracks the number of deque-resident tasks so the
+   shutdown drain check is O(1).
+
 ### 2.3 Worker Drain Order
 
 `worker_entry()` (one thread per worker index) runs this loop:
 
 ```
 lock
-  ├─ exit if (idx >= worker_count && !shutdown)      // resized down
-  ├─ exit if (shutdown && queue_len == 0 && ring_count == 0)  // drained
+  ├─ re-read deques (resize may realloc the array, moving it in memory)
+  ├─ exit if (idx >= worker_count && !shutdown)      // resized down (spill own deque first)
+  ├─ exit if (shutdown && queue_len == 0 && ring_count == 0 && deque_total == 0)  // drained
   ├─ loom_coro_exit()        // free this thread's coroutine scheduler stack, if any
-  ├─ Step 1: lane_has_priority(pool, 4)  → dequeue lowest-priority task with p <= 4 (REALTIME/HIGH) under the lock
-  ├─ Step 2: ring_try_dequeue()          → lock-free pop from the Vyukov ring
-  ├─ Step 3: if ring empty → dequeue_lowest_priority_unlocked(255) from lanes
-  └─ none available → unlock, sem_wait(&pool->work_sem) (EINTR → retry)
+  ├─ Step 0: lane_has_priority(pool, 4) → dequeue lowest-priority task with p <= 4
+  │           (REALTIME/HIGH) under the lock — a full local deque must never
+  │           starve high-priority work
+  ├─ Step 1: deque_pop(pool, my)        → LIFO pop from own deque (newest first)
+  ├─ Step 2: ring_bulk_try_dequeue()    → claim up to 8 from the Vyukov ring into
+  │           own deque, then pop one (deque full → spill back to the shared queue)
+  ├─ Step 3: if worker_count > 1 → steal deque_steal() from victim
+  │           (idx+1+2*try) % worker_count, FIFO (oldest first), LOOMWORKS_STEAL_TRIES tries
+  ├─ Step 4: if ring empty → dequeue_lowest_priority_unlocked(255) from lanes
+  └─ none available → unlock, sem_wait(&pool->work_sem) (EINTR → retry;
+                        after shutdown: sched_yield + continue — never re-sleep)
 run fn(data) with active_workers++/-- and metrics around it
 ```
 
 The priority-aware ordering means REALTIME/HIGH tasks bypass the ring, so a
-flood of NORMAL tasks cannot starve high-priority work.
+flood of NORMAL tasks cannot starve high-priority work. Deque tasks were
+ring-accounted at submit (`queue_len++`); the run boundary decrements
+`queue_len` and (only for ring-sourced tasks) removes the cancel-index entry
+exactly once.
 
 The wakeup primitive is a **POSIX counting semaphore** (`work_sem`): every
 successful enqueue posts exactly one token, so there are no lost wakeups;
@@ -145,6 +167,8 @@ struct loom_thread_pool {
     // node pool: node_pool array, _Atomic node_stack (top|ABA tag)
     _Atomic uint32_t active_workers; _Atomic uint64_t next_task_id;
     pthread_t *threads; uint32_t max_worker_count;
+    // Chase-Lev deques: loom_work_deque_t *deques; _Atomic uint32_t deque_total;
+    // thread liveness: _Atomic bool *thread_alive (parallel to threads[])
     // metrics pointer + callback + user data
 };
 ```
@@ -184,15 +208,28 @@ pool_destroy()
   └─ free(pool)
 ```
 
-Shutdown drains all pending tasks (including cancelled ring tasks awaiting a
-tombstone drain) and is safe to call after `resize`.
+Shutdown drains all pending tasks — including cancelled ring tasks awaiting a
+tombstone drain and tasks still resident in per-worker deques — and is safe to
+call after `resize`. Workers never re-sleep after shutdown: every shutdown token
+is posted exactly once per worker, and a worker that slept again could consume
+a token meant for a still-sleeping peer, exhausting the supply and deadlocking
+the join. Instead, workers that find no work post-shutdown `sched_yield()` and
+loop until the drain check fires.
 
 ### 2.9 Resize
 
 `resize(count)` grows or shrinks the worker set: the thread array is
-reallocated if needed, `worker_count` is updated, new workers are spawned
-(failure rolls back), and `work_sem` is posted `worker_count` times. Workers
-whose index falls beyond the new count self-exit at the top of their loop.
+reallocated if needed (the deques array grows in lockstep, initialized like
+`pool_init`), `worker_count` is updated, new workers are spawned (failure
+rolls back), and `work_sem` is posted `old_count` times — enough to wake every
+live worker including displaced ones. Workers whose index falls beyond the new
+count **spill their deque back to the shared queue** then self-exit at the top
+of their loop; the shrinking side joins them with `pthread_tryjoin_np`,
+re-posting wake tokens until each displaced thread actually exits (a surviving
+worker that wakes and finds no work may sleep again, consuming a token, so a
+naive single round of posts can starve a displaced worker forever). A parallel
+`thread_alive[]` atomic array tracks which slots have live threads so
+shutdown/join skip slots whose workers already exited.
 
 ---
 
@@ -402,9 +439,11 @@ submitted through it:
   without it. `work_sem` is a counting semaphore (post per enqueue, wait per
   no-work); `space_cond` + `drain_cond` handle capacity waits and shutdown
   completion.
-- **Lock-free ops**: `ring_try_enqueue` / `ring_try_dequeue` (Vyukov
-  protocol), the node-pool Treiber stack, the cancel-slot CAS claims, and the
-  queue/ring counters are all lock-free under relaxed/acquire/release
+- **Lock-free ops**: `ring_try_enqueue` / `ring_bulk_try_dequeue` (Vyukov
+  protocol), the per-worker Chase-Lev deques (`deque_push`/`deque_pop`/
+  `deque_steal` with the classic seq_cst-fence slow path for the last-element
+  race), the node-pool Treiber stack, the cancel-slot CAS claims, and the
+  queue/ring/deque counters are all lock-free under relaxed/acquire/release
   orders.
 
 ### 7.2 Coroutines

@@ -493,11 +493,11 @@ Build: `cc -std=c11 -Iinclude example.c -Lbuild -lloomworks -lpthread` (or `-llo
 | API | Thread-safe | Notes |
 |-----|-------------|-------|
 | `loom_pool_create` | ✅ Yes | Call within a single thread |
-| `loom_pool_submit` / `submit_blocking` / `submit_priority` | ✅ Yes | Safe for concurrent calls; lock-free ring + locked lanes |
+| `loom_pool_submit` / `submit_blocking` / `submit_priority` | ✅ Yes | Safe for concurrent calls; lock-free ring + locked lanes + per-worker deques |
 | `loom_pool_submit_future` / `submit_future_priority` | ✅ Yes | Safe for concurrent calls |
-| `loom_pool_cancel` / `cancel_by_id` / `cancel_all` | ✅ Yes | Safe concurrently with submits (cancel-index CAS) |
+| `loom_pool_cancel` / `cancel_by_id` / `cancel_all` | ✅ Yes | Safe concurrently with submits (cancel-index CAS); tasks resident in worker deques are found until the worker pops them |
 | `loom_pool_broadcast` | ✅ Yes | Safe on any valid pool |
-| `loom_pool_resize` | ⚠️ Usually | Must not race with `shutdown`; other operations safe |
+| `loom_pool_resize` | ⚠️ Usually | Must not race with `shutdown`; other operations safe. Displaced workers spill their deques back to the shared queue before exiting |
 | `loom_pool_shutdown` | ⚠️ Call once only | Must be called after all submits are complete; idempotent |
 | `loom_pool_destroy` | ✅ Yes (NULL-safe) | Must be called after shutdown |
 | `loom_pool_worker/pending/active/idle_count` / `utilization` | ✅ Yes | Locked or relaxed atomic reads |
