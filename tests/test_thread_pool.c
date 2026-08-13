@@ -46,15 +46,82 @@ static void record_exec(void *arg)
 
 static volatile int g_gate_started = 0;
 static volatile int g_gate_release = 0;
+static volatile int g_gate_parked  = 0; /* gate_task entry count (multi-worker) */
+static volatile int g_gate_release2 = 0;
+static volatile int g_gate_parked2  = 0; /* gate_task2 entry count */
 static volatile int g_cancel_hit    = 0;
+
+/* Steal tests: per-task owner thread records (append via atomic index;
+ * slots written exactly once, so no torn reads).  Each task busy-spins
+ * ~1ms BEFORE recording, so a full deque of these drains slowly and a
+ * parked thief has a wide window to steal from it. */
+#define STEAL_MAX_TASKS 512
+static pthread_t    g_steal_owner[STEAL_MAX_TASKS];
+static volatile int g_steal_owner_count = 0;
+
+static void record_owner_task(void *arg)
+{
+    (void)arg;
+    /* ~1ms dwell: keeps the deque non-empty long enough for a thief
+     * to arrive even on a loaded machine. */
+    for (volatile int spin = 0; spin < 3000000; spin++) {
+    }
+    int idx = __sync_fetch_and_add(&g_steal_owner_count, 1);
+    if (idx < STEAL_MAX_TASKS) {
+        g_steal_owner[idx] = pthread_self();
+    }
+}
+
+static int count_distinct_owner_threads(void)
+{
+    int n = 0;
+    int count = g_steal_owner_count;
+    for (int i = 0; i < count; i++) {
+        int dup = 0;
+        for (int j = 0; j < i && !dup; j++) {
+            if (pthread_equal(g_steal_owner[i], g_steal_owner[j])) {
+                dup = 1;
+            }
+        }
+        n += !dup;
+    }
+    return n;
+}
+
+/* Steal stress: producer threads submit N tasks each to a shared pool. */
+static volatile int g_steal_stress_counter = 0;
+
+typedef struct {
+    loom_thread_pool_t *pool;
+    int                 n;
+} steal_producer_arg_t;
+
+static void *steal_producer_thread(void *arg)
+{
+    steal_producer_arg_t *pa = (steal_producer_arg_t *)arg;
+    for (int i = 0; i < pa->n; i++) {
+        loom_pool_submit(pa->pool, simple_task, (void *)&g_steal_stress_counter, NULL);
+    }
+    return NULL;
+}
 static volatile uint64_t g_cancel_target_id = 0;
 
 static void gate_task(void *arg)
 {
     (void)arg;
     g_gate_started = 1;
+    g_gate_parked++;
     while (!g_gate_release) {
         /* spin: occupy the only worker so later tasks stay queued */
+    }
+}
+
+static void gate_task2(void *arg)
+{
+    (void)arg;
+    g_gate_parked2++;
+    while (!g_gate_release2) {
+        /* spin: occupy the second worker while the first drains */
     }
 }
 
@@ -2545,40 +2612,40 @@ static void test_deque_basic_lifo(void)
 
     /* LIFO: push t1 t2 t3 -> pop t3 -> t2 -> t1 -> NULL */
     loom_task_t t1 = {0}, t2 = {0}, t3 = {0};
-    ASSERT(deque_push(d, &t1), "deque: push t1");
-    ASSERT(deque_push(d, &t2), "deque: push t2");
-    ASSERT(deque_push(d, &t3), "deque: push t3");
-    ASSERT(deque_pop(d) == &t3, "deque: LIFO pop returns t3 (newest)");
-    ASSERT(deque_pop(d) == &t2, "deque: LIFO pop returns t2");
-    ASSERT(deque_pop(d) == &t1, "deque: LIFO pop returns t1 (oldest)");
-    ASSERT(deque_pop(d) == NULL, "deque: pop empty returns NULL");
+    ASSERT(deque_push(pool, d, &t1), "deque: push t1");
+    ASSERT(deque_push(pool, d, &t2), "deque: push t2");
+    ASSERT(deque_push(pool, d, &t3), "deque: push t3");
+    ASSERT(deque_pop(pool, d) == &t3, "deque: LIFO pop returns t3 (newest)");
+    ASSERT(deque_pop(pool, d) == &t2, "deque: LIFO pop returns t2");
+    ASSERT(deque_pop(pool, d) == &t1, "deque: LIFO pop returns t1 (oldest)");
+    ASSERT(deque_pop(pool, d) == NULL, "deque: pop empty returns NULL");
 
     /* Steal is FIFO: push 5, pop 3 off bottom, steal oldest remaining */
     loom_task_t s[5] = {{0}};
     for (int i = 0; i < 5; i++) {
-        ASSERT(deque_push(d, &s[i]), "deque: steal-setup push");
+        ASSERT(deque_push(pool, d, &s[i]), "deque: steal-setup push");
     }
-    ASSERT(deque_pop(d) == &s[4], "deque: pop newest after setup");
-    ASSERT(deque_pop(d) == &s[3], "deque: pop 2nd newest after setup");
-    ASSERT(deque_pop(d) == &s[2], "deque: pop 3rd newest after setup");
-    ASSERT(deque_steal(d) == &s[0], "deque: steal returns oldest remaining (FIFO)");
-    ASSERT(deque_steal(d) == &s[1], "deque: steal returns next oldest (FIFO)");
-    ASSERT(deque_steal(d) == NULL, "deque: steal empty returns NULL");
+    ASSERT(deque_pop(pool, d) == &s[4], "deque: pop newest after setup");
+    ASSERT(deque_pop(pool, d) == &s[3], "deque: pop 2nd newest after setup");
+    ASSERT(deque_pop(pool, d) == &s[2], "deque: pop 3rd newest after setup");
+    ASSERT(deque_steal(pool, d) == &s[0], "deque: steal returns oldest remaining (FIFO)");
+    ASSERT(deque_steal(pool, d) == &s[1], "deque: steal returns next oldest (FIFO)");
+    ASSERT(deque_steal(pool, d) == NULL, "deque: steal empty returns NULL");
 
     /* Capacity: 256 pushes OK, 257th rejected */
     loom_task_t *cap = (loom_task_t *)calloc(LOOMWORKS_DEQUE_CAPACITY + 1,
                                              sizeof(loom_task_t));
     ASSERT(cap != NULL, "deque: cap array alloc");
     for (int i = 0; i < LOOMWORKS_DEQUE_CAPACITY; i++) {
-        ASSERT(deque_push(d, &cap[i]), "deque: push to capacity");
+        ASSERT(deque_push(pool, d, &cap[i]), "deque: push to capacity");
     }
-    ASSERT(!deque_push(d, &cap[LOOMWORKS_DEQUE_CAPACITY]),
+    ASSERT(!deque_push(pool, d, &cap[LOOMWORKS_DEQUE_CAPACITY]),
            "deque: push over capacity rejected");
     /* Drain to confirm all pushed tasks are retrievable. */
     for (int i = LOOMWORKS_DEQUE_CAPACITY - 1; i >= 0; i--) {
-        ASSERT(deque_pop(d) == &cap[i], "deque: drain LIFO order");
+        ASSERT(deque_pop(pool, d) == &cap[i], "deque: drain LIFO order");
     }
-    ASSERT(deque_pop(d) == NULL, "deque: drained empty");
+    ASSERT(deque_pop(pool, d) == NULL, "deque: drained empty");
     free(cap);
 
     ASSERT(atomic_load_explicit(&d->len, memory_order_relaxed) == 0,
@@ -2759,6 +2826,261 @@ static void test_priority_preempts_deque(void)
     ASSERT(g_exec_order[0] == 0, "preempt-deque: REALTIME ran before deque tasks");
 }
 
+/* ---------- Test: shutdown drains worker deques ---------- */
+static void test_shutdown_drains_deque(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "shutdown-drain: pool create");
+    ASSERT(pool->deques != NULL, "shutdown-drain: deques allocated");
+
+    /* Occupy the sole worker so all NORMAL tasks stay queued in the ring. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "shutdown-drain: submit gate");
+    while (!g_gate_started) {
+    }
+
+    /* The worker bulk-dequeues these into its local deque after release. */
+    int counter = 0;
+    for (int i = 0; i < 300; i++) {
+        ASSERT(loom_pool_submit(pool, simple_task, &counter, NULL) == LOOMWORKS_OK,
+               "shutdown-drain: submit task");
+    }
+
+    g_gate_release = 1;
+    /* Spin until the sole worker has pulled tasks into its deque: shutdown
+     * is then called with deque-resident work that MUST be drained (the
+     * old exit check only knew queue_len/ring_count and would hang or
+     * drop them). */
+    uint64_t spins = 0;
+    while (atomic_load_explicit(&pool->deques[0].len, memory_order_relaxed) == 0) {
+        if (++spins > 40000000ULL) {
+            break; /* safety valve — never spin forever */
+        }
+    }
+    ASSERT(spins < 40000000ULL, "shutdown-drain: observed deque-resident tasks");
+
+    loom_pool_shutdown(pool); /* must drain deque then exit, not hang */
+
+    ASSERT(counter == 300, "shutdown-drain: all 300 tasks ran");
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,
+           "shutdown-drain: ring drained");
+    ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
+           "shutdown-drain: deques drained");
+    ASSERT(atomic_load_explicit(&pool->deques[0].len, memory_order_relaxed) == 0,
+           "shutdown-drain: worker deque empty");
+    loom_pool_destroy(&pool);
+}
+
+static void test_resize_down_spills_deque(void)
+{
+    g_gate_parked  = 0;
+    g_gate_started = 0;
+    g_gate_release = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "resize-spill: pool create");
+    ASSERT(pool->deques != NULL, "resize-spill: deques allocated");
+
+    /* Park BOTH workers in gates so all NORMAL tasks pile in the ring. */
+    for (int i = 0; i < 2; i++) {
+        ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+               "resize-spill: submit gate");
+    }
+    uint64_t spins = 0;
+    while (g_gate_parked < 2) {
+        if (++spins > 40000000ULL) {
+            break; /* safety valve — never spin forever */
+        }
+    }
+    ASSERT(spins < 40000000ULL, "resize-spill: both workers parked");
+
+    int counter = 0;
+    for (int i = 0; i < 300; i++) {
+        ASSERT(loom_pool_submit(pool, simple_task, &counter, NULL) == LOOMWORKS_OK,
+               "resize-spill: submit task");
+    }
+
+    /* Release: both workers drain the ring into their deques.  Resize-down
+     * from 2 -> 1 must make the displaced worker (idx 1) spill its
+     * deque-resident tasks back to the shared queue before exiting, or
+     * they would be lost. */
+    g_gate_release = 1;
+    spins          = 0;
+    while (atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0) {
+        if (++spins > 40000000ULL) {
+            break; /* safety valve — never spin forever */
+        }
+    }
+    ASSERT(spins < 40000000ULL, "resize-spill: observed deque-resident tasks");
+
+    ASSERT(loom_pool_resize(pool, 1) == LOOMWORKS_OK, "resize-spill: resize to 1");
+    loom_pool_shutdown(pool);
+
+    ASSERT(counter == 300, "resize-spill: all 300 tasks ran exactly once");
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,
+           "resize-spill: ring drained");
+    ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
+           "resize-spill: deques drained");
+    loom_pool_destroy(&pool);
+}
+
+/* ------------------------------------------------------------------
+ *  Task 3.3: steal semantics — trigger, FIFO order, stress
+ * ------------------------------------------------------------------ */
+static void test_steal_trigger(void)
+{
+    g_gate_started     = 0;
+    g_gate_release     = 0;
+    g_gate_parked      = 0;
+    g_gate_release2    = 0;
+    g_gate_parked2     = 0;
+    g_steal_owner_count = 0;
+
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "steal: pool create");
+    ASSERT(pool->deques != NULL, "steal: deques allocated");
+
+    /* Park BOTH workers on gate tasks: the pool is now frozen, so the
+     * ring below fills completely and nothing drains. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "steal: park worker 1");
+    ASSERT(loom_pool_submit(pool, gate_task2, NULL, NULL) == LOOMWORKS_OK,
+           "steal: park worker 2");
+    uint64_t spins = 0;
+    while (g_gate_parked < 1 || g_gate_parked2 < 1) {
+        if (++spins > 40000000ULL) {
+            break;
+        }
+    }
+    ASSERT(spins < 40000000ULL, "steal: both workers parked");
+
+    /* Flood the ring while both workers are frozen. */
+    for (int i = 0; i < STEAL_MAX_TASKS; i++) {
+        ASSERT(loom_pool_submit(pool, record_owner_task, NULL, NULL) == LOOMWORKS_OK,
+               "steal: submit owner-record task");
+    }
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) ==
+               (size_t)STEAL_MAX_TASKS,
+           "steal: all 512 tasks resident in ring");
+
+    /* Release worker 2 only: it drains the ring into its deque and runs
+     * ~1ms dwell tasks, keeping the deque non-empty.  The first worker
+     * stays parked until we release it, so it can only get work by
+     * stealing.  Time-based deadline (not a fixed spin count): on a
+     * loaded box the draining worker may be preempted mid-drain. */
+    g_gate_release2 = 1;
+    struct timespec wait_deadline;
+    clock_gettime(CLOCK_MONOTONIC, &wait_deadline);
+    wait_deadline.tv_sec += 10;
+    bool ring_drained = false;
+    while (!ring_drained) {
+        if (atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0 &&
+            atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0) {
+            ring_drained = true;
+        } else {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec > wait_deadline.tv_sec ||
+                (now.tv_sec == wait_deadline.tv_sec && now.tv_nsec >= wait_deadline.tv_nsec)) {
+                break;
+            }
+            sched_yield();
+        }
+    }
+    ASSERT(ring_drained, "steal: ring drained into worker deque");
+
+    /* Release worker 1: own deque empty, ring empty, worker_count > 1 ->
+     * it MUST steal from worker 2's deque to run anything at all. */
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
+
+    ASSERT(g_steal_owner_count == STEAL_MAX_TASKS,
+           "steal: all 512 owner tasks ran exactly once");
+    ASSERT(count_distinct_owner_threads() >= 2,
+           "steal: parked worker stole from free worker (>= 2 threads ran)");
+    ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
+           "steal: deques drained");
+    loom_pool_destroy(&pool);
+}
+
+static void test_steal_fifo_order(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "steal-fifo: pool create");
+    ASSERT(pool->deques != NULL, "steal-fifo: deques allocated");
+
+    /* Hold the sole worker hostage so it cannot race the direct deque poke. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "steal-fifo: submit gate");
+    while (!g_gate_started) {
+    }
+
+    loom_work_deque_t *d = &pool->deques[0];
+    loom_task_t        t[6] = {{0}};
+    for (int i = 0; i < 6; i++) {
+        ASSERT(deque_push(pool, d, &t[i]), "steal-fifo: setup push");
+    }
+    /* Owner (test acting as the single thief) pops LIFO from the bottom,
+     * then steals remaining oldest-first. */
+    ASSERT(deque_pop(pool, d) == &t[5], "steal-fifo: owner pop newest");
+    ASSERT(deque_steal(pool, d) == &t[0], "steal-fifo: steal oldest (FIFO)");
+    ASSERT(deque_steal(pool, d) == &t[1], "steal-fifo: steal 2nd oldest (FIFO)");
+    ASSERT(deque_steal(pool, d) == &t[2], "steal-fifo: steal 3rd oldest (FIFO)");
+    ASSERT(deque_steal(pool, d) == &t[3], "steal-fifo: steal 4th oldest (FIFO)");
+    ASSERT(deque_steal(pool, d) == &t[4], "steal-fifo: steal last remaining (FIFO)");
+    ASSERT(deque_steal(pool, d) == NULL, "steal-fifo: empty after 5 steals");
+    ASSERT(deque_pop(pool, d) == NULL, "steal-fifo: bottom empty too");
+    ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
+           "steal-fifo: deque_total drained");
+
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_steal_stress(void)
+{
+    const int n_producers = 4;
+    const int per_prod    = 5000;
+    const int total       = n_producers * per_prod;
+
+    for (int rep = 0; rep < 3; rep++) {
+        g_steal_stress_counter = 0;
+        loom_thread_pool_t *pool = NULL;
+        loom_pool_config_t  cfg  = {.worker_count = 8, .queue_capacity = 0};
+        ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "steal-stress: pool create");
+
+        pthread_t            threads[4];
+        steal_producer_arg_t args[4];
+        for (int p = 0; p < n_producers; p++) {
+            args[p].pool = pool;
+            args[p].n    = per_prod;
+            ASSERT(pthread_create(&threads[p], NULL, steal_producer_thread, &args[p]) == 0,
+                   "steal-stress: producer create");
+        }
+        for (int p = 0; p < n_producers; p++) {
+            pthread_join(threads[p], NULL);
+        }
+        loom_pool_shutdown(pool);
+
+        ASSERT(g_steal_stress_counter == total,
+               "steal-stress: all 20000 tasks ran exactly once");
+        ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
+               "steal-stress: deques drained");
+        ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,
+               "steal-stress: ring drained");
+        loom_pool_destroy(&pool);
+    }
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -2857,6 +3179,11 @@ int main(void)
     test_deque_bulk_dequeue();
     test_deque_lifo_drain();
     test_priority_preempts_deque();
+    test_shutdown_drains_deque();
+    test_resize_down_spills_deque();
+    test_steal_trigger();
+    test_steal_fifo_order();
+    test_steal_stress();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
