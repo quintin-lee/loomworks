@@ -578,10 +578,25 @@ loom_task_t *deque_pop(loom_work_deque_t *d)
     if (b == 0) {
         return NULL;
     }
+    size_t t = atomic_load_explicit(&d->top, memory_order_acquire);
+    if (b - 1 > t) {
+        /* Fast path (no fence): two or more elements.  A thief can only
+         * take the OLDEST element (index t); with b-1 > t the element we
+         * pop at b-1 is out of any thief's reach, so no seq_cst fence is
+         * needed to order slots vs top — the slot was already published
+         * by push()'s release fence before bottom was incremented. */
+        b -= 1;
+        atomic_store_explicit(&d->bottom, b, memory_order_relaxed);
+        loom_task_t *task = d->slots[b & d->mask];
+        atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        return task;
+    }
+    /* Slow path: possibly the last element (b-1 == t) — must fence so a
+     * thief reading bottom sees our decrement, then resolve the race. */
     b -= 1;
     atomic_store_explicit(&d->bottom, b, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
-    size_t t = atomic_load_explicit(&d->top, memory_order_acquire);
+    t = atomic_load_explicit(&d->top, memory_order_relaxed);
     if (b < t) {
         /* Thief took our element (top moved past us): resync bottom. */
         atomic_store_explicit(&d->bottom, t, memory_order_relaxed);
