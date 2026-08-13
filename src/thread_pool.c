@@ -299,7 +299,7 @@ static void *worker_entry(void *arg)
         if (idx >= pool->worker_count && !pool->shutdown) {
             if (my != NULL) {
                 loom_task_t *t;
-                while ((t = deque_pop(my)) != NULL) {
+                while ((t = deque_pop(pool, my)) != NULL) {
                     /* Deque tasks are ring-accounted (queue_len++ at submit);
                      * undo that so the lane enqueue counts them exactly once.
                      * They were also cancel-index-inserted at ring submit —
@@ -338,7 +338,7 @@ static void *worker_entry(void *arg)
         }
         /* Step 1: own deque, LIFO (newest first — cache friendly). */
         if (task == NULL && my != NULL) {
-            task      = deque_pop(my);
+            task      = deque_pop(pool, my);
             from_ring = (task != NULL);
         }
         /* Step 2: bulk-dequeue from the ring into the deque, then pop one. */
@@ -346,7 +346,7 @@ static void *worker_entry(void *arg)
             loom_task_t *batch[LOOMWORKS_BULK_DEQUEUE];
             size_t       n = ring_bulk_try_dequeue(pool, batch, LOOMWORKS_BULK_DEQUEUE);
             for (size_t i = 0; i < n; i++) {
-                if (!deque_push(my, batch[i])) {
+                if (!deque_push(pool, my, batch[i])) {
                     /* deque full: spill back to the shared queue.  Ring
                      * tasks are queue_len++ at submit; undo that so the
                      * lane enqueue counts them exactly once.  They were
@@ -363,7 +363,7 @@ static void *worker_entry(void *arg)
                 }
             }
             if (task == NULL) {
-                task      = deque_pop(my);
+                task      = deque_pop(pool, my);
                 from_ring = (task != NULL);
             }
         }
@@ -374,7 +374,7 @@ static void *worker_entry(void *arg)
                 if (victim == idx) {
                     continue;
                 }
-                task      = deque_steal(&pool->deques[victim]);
+                task      = deque_steal(pool, &pool->deques[victim]);
                 from_ring = (task != NULL);
             }
         }
@@ -558,7 +558,7 @@ static void task_destroy(loom_thread_pool_t *pool, loom_task_t *t)
  *  (FIFO — a task sits longest at the top, so it is the fairest to
  *  redistribute).  bottom is owner-private; top is shared.
  * ================================================================ */
-bool deque_push(loom_work_deque_t *d, loom_task_t *task)
+bool deque_push(loom_thread_pool_t *pool, loom_work_deque_t *d, loom_task_t *task)
 {
     size_t b = atomic_load_explicit(&d->bottom, memory_order_relaxed);
     size_t t = atomic_load_explicit(&d->top, memory_order_relaxed);
@@ -569,10 +569,11 @@ bool deque_push(loom_work_deque_t *d, loom_task_t *task)
     atomic_thread_fence(memory_order_release);
     atomic_store_explicit(&d->bottom, b + 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&d->len, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&pool->deque_total, 1, memory_order_relaxed);
     return true;
 }
 
-loom_task_t *deque_pop(loom_work_deque_t *d)
+loom_task_t *deque_pop(loom_thread_pool_t *pool, loom_work_deque_t *d)
 {
     size_t b = atomic_load_explicit(&d->bottom, memory_order_relaxed);
     if (b == 0) {
@@ -589,6 +590,7 @@ loom_task_t *deque_pop(loom_work_deque_t *d)
         atomic_store_explicit(&d->bottom, b, memory_order_relaxed);
         loom_task_t *task = d->slots[b & d->mask];
         atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&pool->deque_total, 1, memory_order_relaxed);
         return task;
     }
     /* Slow path: possibly the last element (b-1 == t) — must fence so a
@@ -606,6 +608,7 @@ loom_task_t *deque_pop(loom_work_deque_t *d)
     if (b > t) {
         /* More than one element left: no thief race, safe LIFO pop. */
         atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&pool->deque_total, 1, memory_order_relaxed);
         return task;
     }
     /* b == t: last element — race with a thief. */
@@ -613,6 +616,7 @@ loom_task_t *deque_pop(loom_work_deque_t *d)
             &d->top, &t, t + 1, memory_order_seq_cst, memory_order_relaxed)) {
         atomic_store_explicit(&d->bottom, t + 1, memory_order_relaxed);
         atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&pool->deque_total, 1, memory_order_relaxed);
         return task;
     }
     /* Lost to a thief; we own the slot but it is gone. */
@@ -620,7 +624,7 @@ loom_task_t *deque_pop(loom_work_deque_t *d)
     return NULL;
 }
 
-loom_task_t *deque_steal(loom_work_deque_t *d)
+loom_task_t *deque_steal(loom_thread_pool_t *pool, loom_work_deque_t *d)
 {
     size_t t = atomic_load_explicit(&d->top, memory_order_acquire);
     atomic_thread_fence(memory_order_seq_cst);
@@ -632,6 +636,7 @@ loom_task_t *deque_steal(loom_work_deque_t *d)
     if (atomic_compare_exchange_strong_explicit(
             &d->top, &t, t + 1, memory_order_seq_cst, memory_order_relaxed)) {
         atomic_fetch_sub_explicit(&d->len, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&pool->deque_total, 1, memory_order_relaxed);
         return task;
     }
     return NULL;

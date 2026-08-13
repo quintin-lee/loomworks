@@ -200,20 +200,20 @@ loom_task_t *loom_dequeue_unlocked(loom_thread_pool_t *pool);
  * @brief Push a task onto the owner's deque bottom (LIFO side).
  * @return false if the deque is full (caller must spill to shared queues).
  */
-bool deque_push(loom_work_deque_t *d, loom_task_t *task);
+bool deque_push(loom_thread_pool_t *pool, loom_work_deque_t *d, loom_task_t *task);
 
 /**
  * @brief Pop the most-recent task from the owner's bottom (LIFO).
  * @return The task, or NULL if the deque is empty.
  */
-loom_task_t *deque_pop(loom_work_deque_t *d);
+loom_task_t *deque_pop(loom_thread_pool_t *pool, loom_work_deque_t *d);
 
 /**
  * @brief Steal the oldest task from @p d's top (FIFO side).  Called by
  * idle workers; CAS-protected against the owner and other thieves.
  * @return The task, or NULL if nothing could be stolen.
  */
-loom_task_t *deque_steal(loom_work_deque_t *d);
+loom_task_t *deque_steal(loom_thread_pool_t *pool, loom_work_deque_t *d);
 
 /**
  * @brief Bulk-dequeue up to @p max consecutive tasks from the Vyukov ring
