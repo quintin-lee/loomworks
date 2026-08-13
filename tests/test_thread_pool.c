@@ -727,9 +727,12 @@ static void test_bucket_fifo_within_priority(void)
 
     const int N = 100;
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit(pool, record_exec,
-                                /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-                                (void *)(intptr_t)i, NULL) == LOOMWORKS_OK,
+        /* Priority 6 (lane path, p >= 5): bucket FIFO semantics live on the
+         * lane side.  NORMAL (5) takes the lock-free ring fast path, which
+         * after work-stealing drains LIFO through per-worker deques. */
+        ASSERT(loom_pool_submit_priority(pool, record_exec,
+                                         /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+                                         (void *)(intptr_t)i, 6, NULL) == LOOMWORKS_OK,
                "submit FIFO task");
     }
     loom_pool_shutdown(pool);
@@ -2522,10 +2525,21 @@ static void test_pipeline_stress(void)
  * ================================================================ */
 static void test_deque_basic_lifo(void)
 {
+    g_gate_started = 0;
+    g_gate_release = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "deque test: pool create");
     ASSERT(pool->deques != NULL, "deque test: deques allocated (not lane-only mode)");
+
+    /* Hold the only worker hostage in a gate task: with work-stealing the
+     * worker loop pops deques[0] (Step 1), which would race with this test
+     * poking the deque directly — and stealing the stack-allocated test
+     * tasks would free() them, corrupting the heap. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "deque test: submit gate");
+    while (!g_gate_started) {
+    }
 
     loom_work_deque_t *d = &pool->deques[0];
 
@@ -2570,6 +2584,8 @@ static void test_deque_basic_lifo(void)
     ASSERT(atomic_load_explicit(&d->len, memory_order_relaxed) == 0,
            "deque: len back to 0 after drain");
 
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
 
@@ -2673,6 +2689,76 @@ static void test_deque_bulk_dequeue(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: worker deque drains LIFO (work-stealing order) ---------- */
+static void test_deque_lifo_drain(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_exec_count   = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "deque-lifo: pool create");
+    ASSERT(pool->deques != NULL, "deque-lifo: deques allocated");
+
+    /* Occupy the sole worker so submissions stay queued in the ring. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "deque-lifo: submit gate");
+    while (!g_gate_started) {
+    }
+
+    /* NORMAL tasks take the ring fast path; after the gate they are
+     * bulk-dequeued into the worker's deque and run LIFO (newest first). */
+    for (int i = 1; i <= 3; i++) {
+        ASSERT(loom_pool_submit(pool, record_exec,
+                                /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+                                (void *)(intptr_t)i, NULL) == LOOMWORKS_OK,
+               "deque-lifo: submit task");
+    }
+
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    ASSERT(g_exec_count == 3, "deque-lifo: all tasks executed");
+    ASSERT(g_exec_order[0] == 3 && g_exec_order[1] == 2 && g_exec_order[2] == 1,
+           "deque-lifo: LIFO drain order (newest first)");
+}
+
+/* ---------- Test: REALTIME preempts deque-resident NORMAL tasks ---------- */
+static void test_priority_preempts_deque(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_exec_count   = 0;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "preempt-deque: pool create");
+    ASSERT(pool->deques != NULL, "preempt-deque: deques allocated");
+
+    /* Occupy the sole worker; NORMAL tasks queue in the ring. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
+           "preempt-deque: submit gate");
+    while (!g_gate_started) {
+    }
+    for (int i = 1; i <= 3; i++) {
+        ASSERT(loom_pool_submit(pool, record_exec,
+                                /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+                                (void *)(intptr_t)i, NULL) == LOOMWORKS_OK,
+               "preempt-deque: submit NORMAL task");
+    }
+    /* REALTIME task must run before the deque-resident NORMAL tasks. */
+    ASSERT(loom_pool_submit_priority(pool, record_exec, (void *)(intptr_t)0,
+                                     LOOMWORKS_PRIORITY_REALTIME, NULL) == LOOMWORKS_OK,
+           "preempt-deque: submit REALTIME task");
+
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    ASSERT(g_exec_count == 4, "preempt-deque: all tasks executed");
+    ASSERT(g_exec_order[0] == 0, "preempt-deque: REALTIME ran before deque tasks");
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -2769,6 +2855,8 @@ int main(void)
     test_deque_basic_lifo();
     test_cancel_in_deque();
     test_deque_bulk_dequeue();
+    test_deque_lifo_drain();
+    test_priority_preempts_deque();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
