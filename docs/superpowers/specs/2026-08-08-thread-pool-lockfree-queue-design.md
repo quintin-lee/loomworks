@@ -4,6 +4,13 @@
 **Status:** Approved (Approach A: hybrid two-tier — Vyukov ring for NORMAL + bucketized priority lanes)
 **Library:** loomworks (C11 thread pool + coroutine library)
 
+> **Superseded (partially) by the work-stealing scheduler (2026-08-12).** The ring + lanes
+> design described here remains the submission/overflow layer, but the worker drain path
+> changed: workers now bulk-claim batches of 8 from the ring into per-worker Chase-Lev
+> deques (LIFO local pops, FIFO cross-worker steal) instead of popping the ring directly.
+> See [2026-08-12-work-stealing-design.md](2026-08-12-work-stealing-design.md) for the
+> current worker loop order.
+
 ## 1. Motivation
 
 The benchmark worker-scaling scenario exposes a hard scaling ceiling:

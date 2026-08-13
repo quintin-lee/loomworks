@@ -3,7 +3,7 @@
 Industrial-grade C11 concurrency library featuring a **thread pool**, a **stackful coroutine** subsystem, and higher-level **pipeline**, **task group**, and **metrics** layers.
 
 ```
-Tests: ~10455 pool + ~5587 coroutine + ~68750 integration — all passing
+Tests: ~12547 pool + ~5587 coroutine + ~68750 integration — all passing
 Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 ```
 
@@ -17,6 +17,7 @@ Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 | Configurable workers | `0` auto-detected as `hardware_concurrency * 2`, clamped to 128 |
 | Priority scheduling | 256 priority buckets (REALTIME=0 … LOW=10) with O(1) occupancy bitmap scan |
 | Lock-free fast path | Vyukov bounded ring for NORMAL-priority tasks, with spill to the lanes |
+| Work stealing | Per-worker Chase-Lev deques: LIFO local pops, FIFO cross-worker steal, bulk ring→deque batches of 8 |
 | Future return values | `loom_pool_submit_future()` + `loom_future_wait()` for async results |
 | Cancellation | `loom_pool_cancel()` / `cancel_by_id()` / `cancel_all()` via an open-addressing cancel index |
 | Task node pooling | Lock-free ABA-tagged Treiber stack recycles `loom_task_t` nodes |
@@ -82,7 +83,7 @@ loomworks/
 │   ├── task_group.c           # Task group implementation
 │   └── metrics.c              # Metrics implementation
 ├── tests/
-│   ├── test_thread_pool.c     # ~10455 assertions
+│   ├── test_thread_pool.c     # ~12547 assertions
 │   ├── test_coroutine.c       # ~5587 assertions
 │   └── test_integration.c     # ~68750 assertions
 ├── examples/

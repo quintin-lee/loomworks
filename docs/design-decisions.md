@@ -71,15 +71,15 @@ This document records key design choices and their rationales, for future mainte
 
 ## 4. Why Single Lock Instead of Sharded Locks?
 
-**Decision:** The entire queue is protected by a single `pthread_mutex_t`.
+**Decision (2026-08-07, superseded for the hot path):** The priority lanes were originally protected by a single `pthread_mutex_t`. The hot path has since moved off this lock entirely: NORMAL-priority tasks go through a lock-free Vyukov ring, and workers drain the ring in batches into lock-free per-worker Chase-Lev deques (see the work-stealing spec). The single pool lock now serializes only the non-NORMAL lanes, shutdown/resize coordination, and spill-back.
 
-**Rationale:**
-- Queue operations are O(1) linked-list insert/delete; lock hold time is short
+**Historical rationale (why a single lock was right at the time):**
+- Queue operations were O(1) linked-list insert/delete; lock hold time was short
 - Multi-lock/sharded-lock designs add code complexity and bug risk, plus require additional routing logic
 - For most application scenarios (tasks with significant granularity), a single lock is not a bottleneck
 - Cache-line alignment ensures locks and other hot fields do not share cache lines, reducing false sharing
 
-**When to consider sharded locks:** If task granularity is extremely small (nanosecond-level) and concurrency is very high (thousands of workers), consider splitting the queue into N independent locks. This design does not apply to the current use case.
+**When to consider sharded locks:** If task granularity is extremely small (nanosecond-level) and concurrency is very high (thousands of workers), consider splitting the queue into N independent locks. The lock-free ring + per-worker deques already provide this sharding without explicit lock partitioning.
 
 ---
 
@@ -172,7 +172,8 @@ The following enhancements are planned for future releases:
 | **Coroutine stack pooling** | Reuse mmap'd coroutine stacks across create/destroy (cap 64, exact-size match) — **DONE (2026-08-10)** | — |
 | **Scheduler-stack lifecycle** | Explicit per-thread free (`loom_coro_exit`) + locked registry — **DONE (2026-08-10)** | — |
 | **Epoch-based reclamation** | Superseded by the bucketized O(1) queue + lock-free node pool — **CLOSED (2026-08-08)** | — |
-| **Ring acceptance scaling gate** | "worker_scaling-8 ≥ worker_scaling-1" — measured but NOT met (see ring-acceptance spec); needs a parallel-workload benchmark | High |
+| **Ring acceptance scaling gate** | "worker_scaling-8 ≥ worker_scaling-1" — met under the parallel-workload benchmark (see ring-acceptance spec §8); residual single-producer inversion addressed by the work-stealing scheduler — **DONE** | — |
+| **Work-stealing scheduler** | Per-worker Chase-Lev deques + bulk ring→deque batches + FIFO cross-worker steal — **DONE (2026-08-12)** | — |
 | **Windows support** | Port to Windows using SwitchToThread + VirtualAlloc | Low |
 | **Valgrind integration** | Register coroutine stacks with Valgrind to eliminate false leaks | Medium |
 
@@ -205,7 +206,11 @@ struct loom_thread_pool {
 };
 ```
 
-Note: per-worker context structures (`loom_worker_ctx_t`) were a design
-experiment and were removed; workers now share one queue layer (lanes + ring)
-and one `work_sem`, which simplifies the memory model and eliminates
-per-worker false-sharing concerns.
+Note: per-worker context structures (`loom_worker_ctx_t`) were an early
+design experiment and were removed; workers initially shared one queue layer
+(lanes + ring) and one `work_sem`. The work-stealing scheduler (2026-08-12)
+re-introduced per-worker state in lock-free form: each worker owns a Chase-Lev
+deque (256 slots, `_Atomic top` + relaxed `bottom`), so the per-worker state
+carries no mutex and false-sharing is contained by the deque's cache-line
+padding. The queue layer is now three-tier: priority lanes (locked), Vyukov
+ring (lock-free), per-worker deques (lock-free).

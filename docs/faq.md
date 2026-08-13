@@ -8,7 +8,7 @@ Frequently asked questions about the loomworks library.
 
 ### Q: Can I call `loom_pool_submit()` from multiple threads concurrently?
 
-**A:** Yes. NORMAL-priority tasks use the lock-free ring fast path; other priorities go to the priority lanes under a single pool lock. Both are safe for concurrent calls from any number of threads.
+**A:** Yes. NORMAL-priority tasks use the lock-free ring fast path; other priorities go to the priority lanes under a single pool lock. Workers drain the ring in batches of 8 into per-worker Chase-Lev deques (LIFO local pops) and steal FIFO from idle peers. All paths are safe for concurrent calls from any number of threads.
 
 ### Q: Does `loom_pool_submit()` block when the queue is full?
 
@@ -16,7 +16,7 @@ Frequently asked questions about the loomworks library.
 
 ### Q: What happens to pending tasks when I call `loom_pool_shutdown()`?
 
-**A:** `loom_pool_shutdown()` enters a draining phase: it sets the `shutdown` flag, posts `work_sem` once per worker thread to wake everyone, and then joins all worker threads. Each worker processes any remaining tasks in the queue before exiting. After shutdown, no new tasks may be submitted.
+**A:** `loom_pool_shutdown()` enters a draining phase: it sets the `shutdown` flag, posts `work_sem` once per worker thread to wake everyone, and then joins all worker threads. Each worker processes any remaining tasks in the ring, the priority lanes, and its own deque (a `deque_total` counter keeps the exit check accurate for deque-resident work) before exiting. After shutdown, no new tasks may be submitted.
 
 ### Q: Can I reuse a pool after calling `loom_pool_shutdown()`?
 
@@ -124,4 +124,4 @@ LD_PRELOAD=/usr/lib/libasan.so.8 ./test_integration
 
 ### Q: Why does the README mention ~68,750 integration assertions?
 
-**A:** The integration test suite runs stress workloads (thousands of concurrent submissions, coroutine interop inside pool workers, scheduler-stack registry churn) whose assertion totals changed as tests were added. The exact count varies slightly between runs (concurrency-dependent stress tests); the canonical verified figures are ~10455 thread pool, ~5587 coroutine, and ~68750 integration assertions. The prior "50,511" figure is outdated.
+**A:** The integration test suite runs stress workloads (thousands of concurrent submissions, coroutine interop inside pool workers, scheduler-stack registry churn, work-stealing steal/stress tests) whose assertion totals changed as tests were added. The exact count varies slightly between runs (concurrency-dependent stress tests); the canonical verified figures are ~12547 thread pool, ~5587 coroutine, and ~68750 integration assertions. The prior "50,511" figure is outdated.

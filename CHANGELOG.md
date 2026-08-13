@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Work-stealing scheduler**: per-worker Chase-Lev deques (256 slots) with LIFO local pops and FIFO cross-worker stealing, plus bulk ring→deque batches (`LOOMWORKS_BULK_DEQUEUE` = 8) replacing the single-shared-queue drain path — eliminates the 16–32 worker scaling plateau
+- `deque_total` aggregate counter: shutdown waits for deque-resident tasks, not just ring + lanes
+- Regression tests: shutdown-drains-deque, resize-down-spills-deque, steal-trigger, steal-FIFO-order, steal-stress (worker_count=2/8, 20k tasks)
 - Bucketized priority queue: 256 O(1) FIFO buckets with 256-bit occupancy bitmap (replaces the single linked list)
 - Lock-free node pool: ABA-tagged Treiber stack recycles task nodes (`LOOMWORKS_NODE_POOL_CAP`)
 - Lock-free Vyukov bounded ring as the NORMAL-priority fast path, spilling to the priority lanes when full
@@ -31,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI performance gate (`perf.yml`) — compares queue-depth throughput against base ref at a 15% regression threshold
 
 ### Changed
+- Worker drain order: priority lanes (REALTIME/HIGH) → own deque (LIFO) → bulk ring claim → steal from random victim → p≥5 lanes; workers never re-sleep after shutdown
+- `deque_pop()` fast path: Chase-Lev canonical optimization — skip the `seq_cst` fence when more than one element remains
 - All API prefixes: `ctpool_` -> `loom_`, `CTPPOOL_` -> `LOOMWORKS_`
 - Include directory: `include/ctpool/` -> `include/loomworks/`
 - Main header: `ctpool.h` -> `loomworks.h`
@@ -42,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shared library (`libloomworks.so`, SOVERSION 1) now builds and works at runtime, including coroutines
 
 ### Fixed
+- Shutdown hang when tasks sat in per-worker deques: exit check now accounts `deque_total`; workers that re-sleep after shutdown steal shutdown tokens and starve the join (never re-sleep — `sched_yield()` instead)
+- Resize-down hang: displaced workers could starve for wake tokens; now joined via `pthread_tryjoin_np` with token re-posting until exit, and their deque contents spill back to the shared queue first
+- `deque_total` was dead (initialized 0, never updated by deque ops) — now maintained by every push/pop/steal
+- Deques grow in lockstep with the threads array on `loom_pool_resize()` grow (realloc could move the array under live workers)
 - Fixed misleading blocks syntax (`^()`) in README examples; replaced with standard C function pointers
 - `bench_future_overhead` hung at shutdown: future pool destroyed without a prior `loom_pool_shutdown` (contract violation); now shuts down before destroy
 - Scheduler-stack registry race: concurrent `loom_coro_exit()` / `ensure_scheduler()` from pool worker threads corrupted the global list, causing heap corruption at process exit. List mutations are now serialized by `g_scheduler_lock`.
