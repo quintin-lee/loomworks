@@ -7,9 +7,11 @@
 #         tools/tag-release.sh -h | --help
 #         tools/tag-release.sh --version
 #
-# -n / --dry-run runs every guard and shows exactly what would change
-# (real diffs, generated against temp files) but modifies NOTHING and
-# does not commit or tag.
+# -n / --dry-run is a PURE PREVIEW: it executes nothing and modifies
+# nothing.  It only prints the action list — which files would change
+# (with old -> new values) and which commands would run.  No guards are
+# enforced (dirty tree / branch / existing tag / version order all
+# tolerated); a note is printed when the real run would abort.
 # Guarantees that EVERY version number in the repo is consistent before
 # creating the release tag:
 #
@@ -46,16 +48,6 @@ say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m(!)\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# render_diff <file> <tmp-file> — print a unified diff of file vs tmp (stdout).
-render_diff() {
-    if diff -q "$1" "$2" >/dev/null 2>&1; then
-        printf '   (dry-run) %-30s no change\n' "$1"
-    else
-        printf '   (dry-run) %-30s would change:\n' "$1"
-        diff -u "$1" "$2" | tail -n +3 | sed 's/^/     /' || true
-    fi
-}
-
 usage() {
     cat <<'EOF'
 tag-release.sh — bump the loomworks version, keep every version number
@@ -64,9 +56,10 @@ consistent, then commit and create the annotated release tag.
 USAGE
     tools/tag-release.sh X.Y.Z      create release vX.Y.Z
     tools/tag-release.sh -n | --dry-run X.Y.Z
-                                    show exactly what would change
-                                    (real diffs, temp-file generated)
-                                    without modifying/committing/tagging
+                                    print WHAT WOULD change (files with
+                                    old -> new values) and the commands
+                                    that would run, WITHOUT executing
+                                    or modifying anything
     tools/tag-release.sh -h | --help
     tools/tag-release.sh --version  print the current version and exit
 
@@ -132,7 +125,48 @@ if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Git preconditions
+# Read the current version from the single source of truth (shared by both
+# the dry-run preview and the real run).
+# ---------------------------------------------------------------------------
+CURRENT_VERSION="$(sed -n 's/^project(loomworks VERSION \([0-9][0-9.]*\) LANGUAGES C).*/\1/p' "$SRC")"
+[[ -n "$CURRENT_VERSION" ]] || die "could not parse current version from $SRC"
+TODAY="$(date +%F)"
+
+# ---------------------------------------------------------------------------
+# Dry-run: pure preview.  Nothing is executed, no file is touched, no git
+# command runs.  Only the action list is printed.
+# ---------------------------------------------------------------------------
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    NEWER="$(printf '%s\n%s\n' "$CURRENT_VERSION" "$NEW_VERSION" | sort -V | tail -n1)"
+    if [[ "$NEWER" != "$NEW_VERSION" ]]; then
+        warn "the real run would ABORT: version $NEW_VERSION is not strictly greater than current $CURRENT_VERSION"
+    elif [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
+        warn "the real run would ABORT: new version equals current version ($CURRENT_VERSION) — nothing to do"
+    fi
+
+    cat <<EOF
+Dry run — nothing was executed or modified.
+
+Current version: ${CURRENT_VERSION}   requested: ${NEW_VERSION}
+
+Would change:
+  1. ${SRC}                     project() VERSION ${CURRENT_VERSION} -> ${NEW_VERSION}
+  2. ${CHANGELOG}               insert "## [${NEW_VERSION}] - ${TODAY}" section under [Unreleased]
+  3. ${MIGRATION}               project() example lines ${CURRENT_VERSION} -> ${NEW_VERSION}
+  4. build_*/                   regenerate loomworksConfigVersion.cmake
+                                (cmake -S . -B <dir> for each configured build tree)
+
+Would run:
+  cmake -S . -B build*                      # regenerate ConfigVersion files
+  git add ${SRC} ${CHANGELOG} ${MIGRATION}
+  git commit -m "chore: 🏷️ release v${NEW_VERSION}"
+  git tag -a v${NEW_VERSION} -m "Release v${NEW_VERSION}"
+EOF
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Git preconditions (real run only)
 # ---------------------------------------------------------------------------
 say "checking git preconditions"
 BRANCH="$(git branch --show-current)"
@@ -146,11 +180,6 @@ if git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null; then
     die "tag v${NEW_VERSION} already exists"
 fi
 
-# ---------------------------------------------------------------------------
-# 3. Read the current version from the single source of truth
-# ---------------------------------------------------------------------------
-CURRENT_VERSION="$(sed -n 's/^project(loomworks VERSION \([0-9][0-9.]*\) LANGUAGES C).*/\1/p' "$SRC")"
-[[ -n "$CURRENT_VERSION" ]] || die "could not parse current version from $SRC"
 say "current version: $CURRENT_VERSION   new version: $NEW_VERSION"
 
 if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
@@ -162,24 +191,14 @@ if [[ "$NEWER" != "$NEW_VERSION" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Update every version location
+# 3. Update every version location
 # ---------------------------------------------------------------------------
 say "updating $SRC"
-if [[ "$DRY_RUN" -eq 1 ]]; then
-    tmp="$(mktemp)"
-    sed \
-        "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C)/" \
-        "$SRC" >"$tmp"
-    render_diff "$SRC" "$tmp"
-    rm -f "$tmp"
-else
-    sed -i \
-        "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C)/" \
-        "$SRC"
-fi
+sed -i \
+    "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C)/" \
+    "$SRC"
 
-say "updating $CHANGELOG  ([Unreleased] -> [${NEW_VERSION}] - $(date +%F))"
-TODAY="$(date +%F)"
+say "updating $CHANGELOG  ([Unreleased] -> [${NEW_VERSION}] - $TODAY)"
 awk_bump() { # awk_bump <src> <dst> — [Unreleased] -> [ver] - today transform
     awk -v ver="$NEW_VERSION" -v today="$TODAY" '
         NR == 1 { print; next }                          # keep "# Changelog"
@@ -191,31 +210,15 @@ awk_bump() { # awk_bump <src> <dst> — [Unreleased] -> [ver] - today transform
         { print }
     ' "$1" > "$2"
 }
-if [[ "$DRY_RUN" -eq 1 ]]; then
-    tmp="$(mktemp)"
-    awk_bump "$CHANGELOG" "$tmp"
-    render_diff "$CHANGELOG" "$tmp"
-    rm -f "$tmp"
-else
-    awk_bump "$CHANGELOG" "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
-fi
+awk_bump "$CHANGELOG" "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
 
 say "updating $MIGRATION (project() example lines)"
-if [[ "$DRY_RUN" -eq 1 ]]; then
-    tmp="$(mktemp)"
-    sed \
-        "/^project(/s/VERSION [0-9][0-9.]* LANGUAGES C/VERSION ${NEW_VERSION} LANGUAGES C/" \
-        "$MIGRATION" >"$tmp"
-    render_diff "$MIGRATION" "$tmp"
-    rm -f "$tmp"
-else
-    sed -i \
-        "/^project(/s/VERSION [0-9][0-9.]* LANGUAGES C/VERSION ${NEW_VERSION} LANGUAGES C/" \
-        "$MIGRATION"
-fi
+sed -i \
+    "/^project(/s/VERSION [0-9][0-9.]* LANGUAGES C/VERSION ${NEW_VERSION} LANGUAGES C/" \
+    "$MIGRATION"
 
 # ---------------------------------------------------------------------------
-# 5. Reconfigure every build tree so the generated ConfigVersion files
+# 4. Reconfigure every build tree so the generated ConfigVersion files
 #    (build_*/loomworksConfigVersion.cmake) track the new version.  These
 #    are written by write_basic_package_version_file at configure time and
 #    must never be hand-edited — but they MUST be regenerated before we
@@ -224,29 +227,12 @@ fi
 for dir in build build_asan build_tsan build_ubsan build_release build_cmake; do
     if [[ -d "$dir" && -f "$dir/CMakeCache.txt" ]]; then
         say "reconfigure $dir (regenerates ${dir}/loomworksConfigVersion.cmake)"
-        if [[ "$DRY_RUN" -eq 1 ]]; then
-            printf '   (dry-run) cmake -S . -B %s  [skipped]\n' "$dir"
-        else
-            cmake -S . -B "$dir" >/dev/null
-        fi
+        cmake -S . -B "$dir" >/dev/null
     fi
 done
 
-if [[ "$DRY_RUN" -eq 1 ]]; then
-    cat <<EOF
-
-Dry run complete — nothing was modified, committed, or tagged.
-Would have run:
-  cmake -S . -B build*                      # regenerate ConfigVersion files
-  git add ${SRC} ${CHANGELOG} ${MIGRATION}
-  git commit -m "chore: 🏷️ release v${NEW_VERSION}"
-  git tag -a v${NEW_VERSION} -m "Release v${NEW_VERSION}"
-EOF
-    exit 0
-fi
-
 # ---------------------------------------------------------------------------
-# 6. Verify: every version location must show the new version
+# 5. Verify: every version location must show the new version
 # ---------------------------------------------------------------------------
 say "verifying version consistency"
 check() { # check <description> <file> <regex>
@@ -275,7 +261,7 @@ check "migration.md ctpool example" "$MIGRATION" \
 say "all version numbers consistent at v${NEW_VERSION}"
 
 # ---------------------------------------------------------------------------
-# 7. Commit
+# 6. Commit
 # ---------------------------------------------------------------------------
 say "committing release bump"
 git add "$SRC" "$CHANGELOG" "$MIGRATION"
@@ -283,14 +269,14 @@ git commit -m "chore: 🏷️ release v${NEW_VERSION}" >/dev/null
 printf '   ✓ commit %s\n' "$(git rev-parse --short HEAD)"
 
 # ---------------------------------------------------------------------------
-# 8. Tag (annotated)
+# 7. Tag (annotated)
 # ---------------------------------------------------------------------------
 say "creating annotated tag"
 git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
 printf '   ✓ tag v%s\n' "$NEW_VERSION"
 
 # ---------------------------------------------------------------------------
-# 9. Summary + how to proceed
+# 8. Summary + how to proceed
 # ---------------------------------------------------------------------------
 cat <<EOF
 
