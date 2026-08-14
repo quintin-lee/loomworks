@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-14
+
 ### Added
 - **Work-stealing scheduler**: per-worker Chase-Lev deques (256 slots) with LIFO local pops and FIFO cross-worker stealing, plus bulk ring→deque batches (`LOOMWORKS_BULK_DEQUEUE` = 8) replacing the single-shared-queue drain path — eliminates the 16–32 worker scaling plateau
 - `deque_total` aggregate counter: shutdown waits for deque-resident tasks, not just ring + lanes

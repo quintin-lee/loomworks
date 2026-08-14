@@ -131,7 +131,7 @@ The loomworks project is a direct rename of ctpool. All functionality, behavior,
 **Before (ctpool):**
 ```cmake
 cmake_minimum_required(VERSION 3.16)
-project(ctpool VERSION 1.0.0 LANGUAGES C)
+project(ctpool VERSION 1.0.1 LANGUAGES C)
 
 add_library(ctpool_static STATIC src/thread_pool.c src/coroutine.c)
 target_include_directories(ctpool_static PUBLIC
@@ -145,7 +145,7 @@ set_target_properties(ctpool_static PROPERTIES OUTPUT_NAME ctpool)
 **After (loomworks):**
 ```cmake
 cmake_minimum_required(VERSION 3.16)
-project(loomworks VERSION 1.0.0 LANGUAGES C)
+project(loomworks VERSION 1.0.1 LANGUAGES C)
 
 add_library(loomworks_static STATIC src/thread_pool.c src/coroutine.c)
 target_include_directories(loomworks_static PUBLIC
