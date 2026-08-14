@@ -32,6 +32,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--queue-depth` benchmark scenario with JSON output (`examples/bench`)
 - `tools/bench_compare.py` — A/B queue-depth regression comparator
 - CI performance gate (`perf.yml`) — compares queue-depth throughput against base ref at a 15% regression threshold
+- Thread pool with configurable worker count, stack size, and bounded/unbounded queue
+- Future-based async result retrieval (`loom_pool_submit_future` + `loom_future_wait`)
+- Stackful coroutine subsystem with mmap-allocated stacks
+- PROT_NONE guard pages for stack overflow detection
+- SIGSEGV/SIGBUS signal handler for safe stack overflow recovery
+- Per-thread scheduler context (`_Thread_local`) for cross-thread safety
+- Cache-line aligned structures to prevent false sharing
+- Comprehensive test suite: ~12547 pool assertions, ~5587 coroutine assertions, ~68750 integration assertions
+- Full API documentation in `docs/api-reference.md`
+- Architecture documentation in `docs/architecture.md`
+- Design decisions documentation in `docs/design-decisions.md`
+- Contributing guide in `docs/contributing.md`
+- Pure C11 implementation (no C++ dependencies)
+- Graceful shutdown with task draining
+- Opaque pointer API — internal struct definitions hidden from users
+- 64-bit safe `makecontext` argument passing
+- POSIX.1-2008 compliant (`_POSIX_C_SOURCE 200809L`); the pool additionally uses `_GNU_SOURCE` for `pthread_tryjoin_np` in the resize-shrink path
+- CMake build system with static and shared library targets
+- Test integration via CTest
+- gcc and clang compatible with `-Wall -Wextra -Werror -pedantic`
 
 ### Changed
 - Worker drain order: priority lanes (REALTIME/HIGH) → own deque (LIFO) → bulk ring claim → steal from random victim → p≥5 lanes; workers never re-sleep after shutdown
@@ -54,36 +74,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed misleading blocks syntax (`^()`) in README examples; replaced with standard C function pointers
 - `bench_future_overhead` hung at shutdown: future pool destroyed without a prior `loom_pool_shutdown` (contract violation); now shuts down before destroy
 - Scheduler-stack registry race: concurrent `loom_coro_exit()` / `ensure_scheduler()` from pool worker threads corrupted the global list, causing heap corruption at process exit. List mutations are now serialized by `g_scheduler_lock`.
-
----
-
-## [1.0.0]
-
-### Added
-- Thread pool with configurable worker count, stack size, and bounded/unbounded queue
-- Future-based async result retrieval (`loom_pool_submit_future` + `loom_future_wait`)
-- Stackful coroutine subsystem with mmap-allocated stacks
-- PROT_NONE guard pages for stack overflow detection
-- SIGSEGV/SIGBUS signal handler for safe stack overflow recovery
-- Per-thread scheduler context (`_Thread_local`) for cross-thread safety
-- Cache-line aligned structures to prevent false sharing
-- Comprehensive test suite: ~10455 pool assertions, ~5587 coroutine assertions, ~68750 integration assertions
-- Full API documentation in `docs/api-reference.md`
-- Architecture documentation in `docs/architecture.md`
-- Design decisions documentation in `docs/design-decisions.md`
-- Contributing guide in `docs/contributing.md`
-
-### Features
-- Pure C11 implementation (no C++ dependencies)
-- Graceful shutdown with task draining
-- Opaque pointer API — internal struct definitions hidden from users
-- 64-bit safe `makecontext` argument passing
-- POSIX.1-2008 compliant (`_POSIX_C_SOURCE 200809L`)
-
-### Build
-- CMake build system with static and shared library targets
-- Test integration via CTest
-- gcc and clang compatible with `-Wall -Wextra -Werror -pedantic`
-
-[Unreleased]: https://github.com/.../loomworks/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/.../loomworks/releases/tag/v1.0.0
