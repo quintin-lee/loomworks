@@ -3,9 +3,13 @@
 # tag-release.sh — fully automated release tagging for loomworks.
 #
 # Usage:  tools/tag-release.sh X.Y.Z
+#         tools/tag-release.sh -n | --dry-run X.Y.Z
 #         tools/tag-release.sh -h | --help
 #         tools/tag-release.sh --version
 #
+# -n / --dry-run runs every guard and shows exactly what would change
+# (real diffs, generated against temp files) but modifies NOTHING and
+# does not commit or tag.
 # Guarantees that EVERY version number in the repo is consistent before
 # creating the release tag:
 #
@@ -36,10 +40,21 @@ NEW_VERSION="${1:-}"
 SRC="CMakeLists.txt"
 CHANGELOG="CHANGELOG.md"
 MIGRATION="docs/migration.md"
+DRY_RUN=0
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m(!)\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# render_diff <file> <tmp-file> — print a unified diff of file vs tmp (stdout).
+render_diff() {
+    if diff -q "$1" "$2" >/dev/null 2>&1; then
+        printf '   (dry-run) %-30s no change\n' "$1"
+    else
+        printf '   (dry-run) %-30s would change:\n' "$1"
+        diff -u "$1" "$2" | tail -n +3 | sed 's/^/     /' || true
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -48,6 +63,10 @@ consistent, then commit and create the annotated release tag.
 
 USAGE
     tools/tag-release.sh X.Y.Z      create release vX.Y.Z
+    tools/tag-release.sh -n | --dry-run X.Y.Z
+                                    show exactly what would change
+                                    (real diffs, temp-file generated)
+                                    without modifying/committing/tagging
     tools/tag-release.sh -h | --help
     tools/tag-release.sh --version  print the current version and exit
 
@@ -81,7 +100,7 @@ BAIL-OUT CONDITIONS (any -> abort, nothing modified)
 EOF
 }
 
-# Handle -h/--help/--version before anything else (no side effects).
+# Handle -h/--help/--version/--dry-run before anything else (no side effects).
 case "${1:-}" in
     -h | --help)
         usage
@@ -94,6 +113,10 @@ case "${1:-}" in
             exit 0
         fi
         die "could not parse current version from $SRC"
+        ;;
+    -n | --dry-run)
+        DRY_RUN=1
+        NEW_VERSION="${2:-}"
         ;;
 esac
 
@@ -142,26 +165,54 @@ fi
 # 4. Update every version location
 # ---------------------------------------------------------------------------
 say "updating $SRC"
-sed -i \
-    "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C)/" \
-    "$SRC"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    tmp="$(mktemp)"
+    sed \
+        "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C)/" \
+        "$SRC" >"$tmp"
+    render_diff "$SRC" "$tmp"
+    rm -f "$tmp"
+else
+    sed -i \
+        "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C)/" \
+        "$SRC"
+fi
 
 say "updating $CHANGELOG  ([Unreleased] -> [${NEW_VERSION}] - $(date +%F))"
 TODAY="$(date +%F)"
-awk -v ver="$NEW_VERSION" -v today="$TODAY" '
-    NR == 1 { print; next }                            # keep "# Changelog"
-    /^## \[Unreleased\]/ && !done {
-        print "## [Unreleased]"; print "";
-        print "## [" ver "] - " today;
-        done = 1; next
-    }
-    { print }
-' "$CHANGELOG" > "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
+awk_bump() { # awk_bump <src> <dst> — [Unreleased] -> [ver] - today transform
+    awk -v ver="$NEW_VERSION" -v today="$TODAY" '
+        NR == 1 { print; next }                          # keep "# Changelog"
+        /^## \[Unreleased\]/ && !done {
+            print "## [Unreleased]"; print "";
+            print "## [" ver "] - " today;
+            done = 1; next
+        }
+        { print }
+    ' "$1" > "$2"
+}
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    tmp="$(mktemp)"
+    awk_bump "$CHANGELOG" "$tmp"
+    render_diff "$CHANGELOG" "$tmp"
+    rm -f "$tmp"
+else
+    awk_bump "$CHANGELOG" "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
+fi
 
 say "updating $MIGRATION (project() example lines)"
-sed -i \
-    "/^project(/s/VERSION [0-9][0-9.]* LANGUAGES C/VERSION ${NEW_VERSION} LANGUAGES C/" \
-    "$MIGRATION"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    tmp="$(mktemp)"
+    sed \
+        "/^project(/s/VERSION [0-9][0-9.]* LANGUAGES C/VERSION ${NEW_VERSION} LANGUAGES C/" \
+        "$MIGRATION" >"$tmp"
+    render_diff "$MIGRATION" "$tmp"
+    rm -f "$tmp"
+else
+    sed -i \
+        "/^project(/s/VERSION [0-9][0-9.]* LANGUAGES C/VERSION ${NEW_VERSION} LANGUAGES C/" \
+        "$MIGRATION"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Reconfigure every build tree so the generated ConfigVersion files
@@ -172,10 +223,27 @@ sed -i \
 # ---------------------------------------------------------------------------
 for dir in build build_asan build_tsan build_ubsan build_release build_cmake; do
     if [[ -d "$dir" && -f "$dir/CMakeCache.txt" ]]; then
-        say "reconfiguring $dir (regenerates ${dir}/loomworksConfigVersion.cmake)"
-        cmake -S . -B "$dir" >/dev/null
+        say "reconfigure $dir (regenerates ${dir}/loomworksConfigVersion.cmake)"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            printf '   (dry-run) cmake -S . -B %s  [skipped]\n' "$dir"
+        else
+            cmake -S . -B "$dir" >/dev/null
+        fi
     fi
 done
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    cat <<EOF
+
+Dry run complete — nothing was modified, committed, or tagged.
+Would have run:
+  cmake -S . -B build*                      # regenerate ConfigVersion files
+  git add ${SRC} ${CHANGELOG} ${MIGRATION}
+  git commit -m "chore: 🏷️ release v${NEW_VERSION}"
+  git tag -a v${NEW_VERSION} -m "Release v${NEW_VERSION}"
+EOF
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Verify: every version location must show the new version
