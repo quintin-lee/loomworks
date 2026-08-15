@@ -363,8 +363,8 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
     c->user_data   = data;
     c->owner       = pthread_self();
     /* 0 means "use the default" (LOOMWORKS_CORO_DEFAULT_STACK_SIZE); the
-     * stack itself is not mapped until the first resume, via allocate_stack
-     * which may serve it from the reuse pool. */
+     * stack is mapped right here in create via allocate_stack, which may
+     * serve it from the exact-size reuse pool. */
     c->stack_size  = (stack_size > 0) ? stack_size : LOOMWORKS_CORO_DEFAULT_STACK_SIZE;
     c->mmap_base   = NULL;
     c->mmap_size   = 0;
