@@ -658,6 +658,9 @@ static void test_task_group_submit(void)
 
     loom_task_group_wait(group);
     ASSERT(counter == 10, "all tasks executed");
+    /* pending_count tracks the submission history, not running tasks: it is
+     * not reset by wait(). */
+    ASSERT(loom_task_group_pending_count(group) == 10, "tracked count survives wait");
 
     loom_task_group_destroy(&group);
     loom_pool_shutdown(pool);

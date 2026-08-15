@@ -104,10 +104,16 @@ void loom_task_group_cancel(loom_task_group_t *group);
 void loom_task_group_wait(loom_task_group_t *group);
 
 /**
- * @brief Get the number of pending (not yet started) tasks in the group.
+ * @brief Get the number of tasks currently tracked by the group.
+ *
+ * Tracks the count of submitted tasks that have not yet been cancelled or
+ * dropped from the tracking set — it is NOT reset by wait().  wait() blocks
+ * until every tracked task finishes, but the tracking set is preserved for
+ * the group's lifetime so this count reflects the group's submission history
+ * minus cancelled tasks, not "currently running".
  *
  * @param group  The task group.
- * @return       Pending task count, or 0 if group is NULL.
+ * @return       Currently tracked task count, or 0 if group is NULL.
  */
 uint32_t loom_task_group_pending_count(const loom_task_group_t *group);
 
