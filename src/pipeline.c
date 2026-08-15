@@ -14,6 +14,12 @@
  * plus the condvar.  Every state mutation holds the lock; every wait loop
  * re-checks its predicate after wakeup (spurious-wakeup safe).  The
  * submitted/taken counters are lock-free atomics updated outside the lock.
+ *
+ * Don't-do: take() used to poll with a 100 ms CLOCK_MONOTONIC slice so a
+ * leaked producer could not wedge consumers forever.  With shutdown() we
+ * always broadcast, so every blocked consumer is guaranteed to wake; the
+ * "lost wakeup" the polling dodged cannot happen, and unbounded
+ * pthread_cond_wait() below is safe.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/pipeline.h"
@@ -25,7 +31,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 /* Intrusive singly-linked queue node: data is the caller's opaque payload,
  * next chains the FIFO.  Nodes are allocated per submit and freed either by
@@ -46,6 +51,13 @@ struct loom_pc {
     bool                shutdown; /* Set once by shutdown(); submits then fail. */
     _Atomic uint64_t    submitted; /* Total successful enqueues (lock-free). */
     _Atomic uint64_t    taken;     /* Total successful dequeues (lock-free). */
+    /* Optional discard handler: called for payloads that are dropped instead
+     * of handed to a consumer — i.e. items still queued when destroy() drains
+     * the pipeline (the historical behaviour leaked them).  Used by internal
+     * pool consumers too.  NULL keeps the old free() behaviour for internal
+     * consumers and a leak-free-with-caller-ownership drain. */
+    void (*on_discard)(void *data, void *ctx);
+    void  *discard_ctx;
 };
 
 static pc_item_t *pc_item_create(void *data)
@@ -68,8 +80,14 @@ static void consumer_pool_task(void *arg)
     loom_pc_t *pc = (loom_pc_t *)arg;
     void      *item = NULL;
     while (loom_pc_take(pc, &item) == LOOMWORKS_OK) {
-        /* Discard item — internal consumers just keep workers alive */
-        free(item);
+        /* Discard item — internal consumers just keep workers alive.  If the
+         * caller registered a discard handler the payload goes to it (it owns
+         * cleanup); otherwise the historical free() is kept. */
+        if (pc->on_discard) {
+            pc->on_discard(item, pc->discard_ctx);
+        } else {
+            free(item);
+        }
     }
 }
 
@@ -135,12 +153,15 @@ void loom_pc_destroy(loom_pc_t **pc)
     }
 
     /* Now safe to drain: no consumer tasks are running.
-     * Free pc_item_t nodes; data pointers are owned by consumers
-     * (who freed them) or by the caller (leaked here — acceptable
-     * for a demo; production code should track ownership). */
+     * Free pc_item_t nodes.  Queued payloads go to the discard handler if one
+     * was registered (this is where destroy() used to LEAK them); otherwise
+     * the caller keeps ownership, matching the pre-handler API contract. */
     pc_item_t *item = p->head;
     while (item) {
         pc_item_t *next = item->next;
+        if (p->on_discard) {
+            p->on_discard(item->data, p->discard_ctx);
+        }
         pc_item_destroy(item);
         item = next;
     }
@@ -197,22 +218,16 @@ loom_result_t loom_pc_take(loom_pc_t *pc, void **item)
     if (!pc || !item) return LOOMWORKS_ERR_INVALID;
     *item = NULL;
     pthread_mutex_lock(&pc->lock);
-    /* Wait while empty; wake on enqueue or shutdown.  CLOCK_MONOTONIC with a
-     * 100 ms slice — a timed poll rather than an unbounded wait, so a leaked
-     * producer cannot wedge consumers forever after shutdown races. */
+    /* Wait while empty; wake on enqueue or shutdown.  Unbounded wait: every
+     * producer exit path goes through shutdown(), which broadcasts under the
+     * lock, so a consumer can never sleep past a shutdown — no timed poll
+     * (and its 100 ms latency) needed. */
     while (pc->head == NULL) {
         if (pc->shutdown) {
             pthread_mutex_unlock(&pc->lock);
             return LOOMWORKS_ERR_SHUTDOWN;
         }
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        ts.tv_nsec += 100000000L;
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec++;
-            ts.tv_nsec -= 1000000000L;
-        }
-        pthread_cond_timedwait(&pc->cond, &pc->lock, &ts);
+        pthread_cond_wait(&pc->cond, &pc->lock);
     }
     /* Unlink head; keep the node alive only for its data, then free it. */
     pc_item_t *pi  = pc->head;
@@ -235,11 +250,20 @@ void loom_pc_shutdown(loom_pc_t *pc)
     pc->shutdown = true;
     pthread_cond_broadcast(&pc->cond);
     pthread_mutex_unlock(&pc->lock);
-    if (pc->pool) {
-        /* Wake the internal pool's workers so they observe shutdown while
-         * parked in take() — otherwise they sleep until the next 100 ms poll. */
-        loom_pool_broadcast(pc->pool);
-    }
+    /* Internal pool consumers are parked inside loom_pc_take() on pc->cond,
+     * which the broadcast above already wakes — no separate pool broadcast
+     * (that was only needed to cut the old 100 ms poll latency). */
+}
+
+void loom_pc_set_discard_handler(loom_pc_t                     *pc,
+                                 void (*discard)(void *data, void *ctx),
+                                 void                          *ctx)
+{
+    if (!pc) return;
+    /* Handler swap is not synchronized with running consumers: call this
+     * before submitting anything / before destroy, not beside take(). */
+    pc->on_discard  = discard;
+    pc->discard_ctx = ctx;
 }
 
 uint32_t loom_pc_pending_count(const loom_pc_t *pc)

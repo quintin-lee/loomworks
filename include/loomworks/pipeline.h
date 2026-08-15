@@ -54,12 +54,33 @@ loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t
 /**
  * @brief Destroy the pipeline and free all resources.
  *
- * Must be called after loom_pc_shutdown() and after all consumers
- * have finished their take() loops.
+ * Stops the internal consumer pool (if any) and releases the queue.
+ * Items still queued at destroy() time are handed to the discard handler
+ * registered via loom_pc_set_discard_handler(), if any — this is the hook
+ * that lets callers reclaim payloads that would otherwise be dropped.
  *
  * @param pc  Pointer to the pipeline handle (NULL-safe).
  */
 void loom_pc_destroy(loom_pc_t **pc);
+
+/**
+ * @brief Register a callback for payloads that are dropped without being
+ *        dequeued.
+ *
+ * Destroyed pipelines and internal pool consumers discard queued items.
+ * Without a handler, internal consumers free() the payload and destroy()
+ * simply drops it (losing the caller's pointer).  Register this handler to
+ * take over payload cleanup — e.g. free(), refcount decrement, or a log.
+ *
+ * Not synchronized with concurrent take()/submit(): install it once, right
+ * after create(), before producers start.
+ *
+ * @param pc       The pipeline handle.
+ * @param discard  Callback invoked as discard(data, ctx) for each dropped
+ *                 payload.  May be NULL to restore the default behaviour.
+ * @param ctx      Opaque context passed verbatim to the callback.
+ */
+void loom_pc_set_discard_handler(loom_pc_t *pc, void (*discard)(void *data, void *ctx), void *ctx);
 
 /**
  * @brief Submit an item into the pipeline.
