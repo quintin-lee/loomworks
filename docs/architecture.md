@@ -372,6 +372,11 @@ is installed idempotently (`_Atomic g_guard_installed`).
   thread-safe; `swapcontext` across threads is undefined). Running a
   coroutine inside a pool worker is fine — create/resume/destroy all happen
   inside that worker.
+- A coroutine records the `pthread_t owner` that created it; `resume()` and
+  `terminate()` from any other thread are rejected with
+  `LOOMWORKS_CORO_ERR_INVALID`. `destroy()` is deliberately not guarded
+  (stack reclamation is internally synchronized) but is only valid once the
+  coroutine is `DONE`/`ERROR`.
 
 ---
 
@@ -384,12 +389,18 @@ internal consumption:
   items (`submit` waits up to 60 s when full); `capacity = 0` is unbounded.
 - **Internal consumers**: if `worker_count > 0`, `pc_create` spins up an
   internal thread pool and submits one consumer task per worker. Each
-  consumer loops `loom_pc_take()` and **discards** the item (the node is
-  freed; the payload is not — documented behavior; use `take()` yourself if
-  you need the data).
-- **Close**: `pc_shutdown()` sets the flag, broadcasts the cond, and (with an
-  internal pool) `pool_broadcast`s it. `submit` after close →
-  `ERR_SHUTDOWN`; `take` after close → `SHUTDOWN` with `*item = NULL`.
+  consumer loops `loom_pc_take()` and hands the item to the registered
+  discard handler for reclamation: `loom_pc_set_discard_handler(pc, discard,
+  ctx)` makes `discard(item, ctx)` run instead of the historical bare
+  `free(item)`. The handler is not synchronized with concurrent
+  `take()`/`submit()` — install it once, right after `create()` — and, when
+  set, is also called by `pc_destroy()` on every item still queued at close,
+  so no payload leaks on teardown. Callers that `take()` themselves typically
+  skip the handler and own the items they receive.
+- **Close**: `pc_shutdown()` sets the flag and broadcasts the cond; the
+  broadcast is what wakes blocked `take()` calls, so no polling or pool
+  broadcast is needed. `submit` after close → `ERR_SHUTDOWN`; `take` after
+  close → `SHUTDOWN` with `*item = NULL`.
 - **Counters**: `pending_count` under the lock; `submitted_count` /
   `taken_count` atomics.
 
@@ -397,18 +408,31 @@ internal consumption:
 
 ## 5. Task Group Architecture
 
-`loom_task_group_t` tracks the payloads (`user_data` pointers) of tasks
-submitted through it:
+`loom_task_group_t` tracks the `task_id` of every task submitted through it
+(not the payload pointer, so tasks with `NULL` data are tracked and
+cancellable too):
 
-- `group_submit()` / `group_submit_future()` forward to the pool and record
-  the returned `task_id` + payload pointer in an internal node list.
-- `group_cancel()` cancels every tracked pending task via `loom_pool_cancel`
-  (which matches by **pointer equality** — take care not to free/reuse the
-  payload while the group tracks it).
-- `group_destroy()` marks the group destroyed, cancels all pending tasks, and
-  frees the node list.
-- `group_wait()` calls `loom_pool_shutdown()` on the backing pool — it drains
-  the **entire** pool, not just this group's tasks.
+- `group_submit()` / `group_submit_future()` submit a completion wrapper to
+  the pool and record the returned `task_id` in an internal node list. A
+  per-task `pending` counter is incremented on submit. Each wrapper runs the
+  real function on a worker thread, decrements `pending` under the group
+  lock, broadcasts the done cond when it reaches zero, then frees itself.
+- `group_cancel()` cancels every tracked pending task via
+  `loom_pool_cancel_by_id()`. A successful cancel (`ERR_OK`) means the task
+  never runs: the group reclaims the wrapper and drops `pending`. A
+  `ERR_INVALID` result means the task is running or already finished — the
+  group only drops the tracking node and leaves reclamation to the wrapper,
+  so the wrapper is never double-freed.
+- `group_destroy()` marks the group destroyed, cancels all tracked tasks,
+  then **blocks until every in-flight wrapped task finishes** (`pending`
+  reaches zero) before releasing the group, so no worker can touch a freed
+  group. It does not touch the backing pool.
+- `group_wait()` blocks until `pending` reaches zero and returns; it does
+  **not** shut down the backing pool — the pool stays fully usable for new
+  submissions afterwards.
+- `group_pending_count()` returns the number of tasks **currently tracked**
+  (submitted but not yet cancelled or completed-tracking-dropped); it is not
+  reset by `wait()`.
 
 ---
 
