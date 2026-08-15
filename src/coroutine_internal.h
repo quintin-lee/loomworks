@@ -2,9 +2,9 @@
 #define LOOMWORKS_COROUTINE_INTERNAL_H
 
 #include "loomworks/coroutine.h"
+#include "coro_ctx.h"
 #include <pthread.h>
 #include <stdbool.h>
-#include <ucontext.h>
 
 /* One cache line on modern x86-64.  Fields that are accessed by
  * different threads concurrently (e.g. the mutex, condition variables)
@@ -21,9 +21,10 @@
  * at 64 mappings); a pooled mapping is reused with zero syscalls on
  * the next create of the same requested size.
  *
- * Context switching uses POSIX ucontext(3).  The scheduler context
- * (g_scheduler) is thread-local and persistent across all coroutines
- * created on the same thread.
+ * Context switching goes through the pluggable backend in coro_ctx.h
+ * (default: POSIX ucontext(3); see "Context backend" there).  The
+ * scheduler context (g_scheduler) is thread-local and persistent across
+ * all coroutines created on the same thread.
  */
 struct loom_coroutine {
     loom_coro_state_t state;      /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR). */
@@ -37,7 +38,7 @@ struct loom_coroutine {
      * LOOMWORKS_CORO_ERR_INVALID in coroutine.c because the ucontext
      * machinery is not safe to touch from multiple threads. */
 
-    ucontext_t ctx; /**< Saved context for swapcontext(). */
+    loom_coro_ctx_t ctx; /**< Saved context (abstracted backend). */
 
     void  *mmap_base;   /**< Base address from mmap(). */
     size_t mmap_size;   /**< Total size of the mmap region (includes guards). */

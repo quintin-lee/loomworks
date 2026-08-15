@@ -28,7 +28,7 @@
  *  are process-wide).
  * ================================================================ */
 static _Thread_local loom_coroutine_t *g_current = NULL;
-static _Thread_local ucontext_t        g_scheduler; /* per-thread scheduler context */
+static _Thread_local loom_coro_ctx_t   g_scheduler; /* per-thread scheduler context */
 static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
@@ -291,16 +291,14 @@ static bool ensure_scheduler(void)
     if (!g_scheduler_stack) {
         return false;
     }
-    if (getcontext(&g_scheduler) != 0) {
+    if (loom_coro_ctx_get(&g_scheduler) != 0) {
         free(g_scheduler_stack);
         g_scheduler_stack = NULL;
         return false;
     }
-    g_scheduler.uc_stack.ss_sp    = g_scheduler_stack;
-    g_scheduler.uc_stack.ss_size  = 131072;
-    g_scheduler.uc_stack.ss_flags = 0;
-    g_scheduler.uc_link           = NULL;
-    g_scheduler_inited            = true;
+    loom_coro_ctx_set_stack(&g_scheduler, g_scheduler_stack, 131072);
+    loom_coro_ctx_set_link(&g_scheduler, NULL);
+    g_scheduler_inited = true;
 
     /* Track for cleanup — append must be serialized against concurrent
      * loom_coro_exit() unlinks and the atexit walk. */
@@ -332,8 +330,8 @@ static void coro_entry(void *arg)
     /* entry_fn returned normally (no yield) → mark done and return to scheduler */
     c->state  = LOOMWORKS_CORO_DONE;
     g_current = NULL;
-    if (c->ctx.uc_link != NULL) {
-        swapcontext(&c->ctx, (ucontext_t *)c->ctx.uc_link);
+    if (loom_coro_ctx_has_link(&c->ctx)) {
+        loom_coro_ctx_swap_to_link(&c->ctx);
     }
 }
 
@@ -411,18 +409,17 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
         /* First run: bind the coroutine context to its mmap'd stack and
          * point uc_link at this thread's scheduler so a natural return
          * hops back to swapcontext() below. */
-        if (getcontext(&coro->ctx) != 0) {
+        if (loom_coro_ctx_get(&coro->ctx) != 0) {
             return LOOMWORKS_CORO_ERR_CONTEXT;
         }
-        coro->ctx.uc_stack.ss_sp    = coro->stack_start;
-        coro->ctx.uc_stack.ss_size  = (size_t)((char *)coro->stack_end - (char *)coro->stack_start);
-        coro->ctx.uc_stack.ss_flags = 0;
-        coro->ctx.uc_link           = &g_scheduler;
-        makecontext(&coro->ctx, (void (*)(void))coro_entry, 1, (unsigned long)(uintptr_t)coro);
+        loom_coro_ctx_set_stack(&coro->ctx, coro->stack_start,
+                                (size_t)((char *)coro->stack_end - (char *)coro->stack_start));
+        loom_coro_ctx_set_link(&coro->ctx, &g_scheduler);
+        loom_coro_ctx_make(&coro->ctx, coro_entry, coro);
         coro->state = LOOMWORKS_CORO_RUNNING;
     }
 
-    if (swapcontext(&g_scheduler, &coro->ctx) != 0) {
+    if (loom_coro_ctx_swap(&g_scheduler, &coro->ctx) != 0) {
         coro->state = LOOMWORKS_CORO_ERROR;
         return LOOMWORKS_CORO_ERR_CONTEXT;
     }
@@ -439,7 +436,7 @@ void loom_coro_yield(void)
     /* Pause here: save our context, switch to the scheduler, and
      * resume when the caller next invokes loom_coro_resume(). */
     cur->state = LOOMWORKS_CORO_SUSPENDED;
-    if (swapcontext(&cur->ctx, &g_scheduler) != 0) {
+    if (loom_coro_ctx_swap(&cur->ctx, &g_scheduler) != 0) {
         cur->state = LOOMWORKS_CORO_ERROR;
     }
 }
@@ -467,7 +464,7 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro)
     coro->state = LOOMWORKS_CORO_DONE;
     if (coro == g_current) {
         g_current = NULL;
-        if (swapcontext(&coro->ctx, &g_scheduler) != 0) {
+        if (loom_coro_ctx_swap(&coro->ctx, &g_scheduler) != 0) {
             return LOOMWORKS_CORO_ERR_CONTEXT;
         }
     }
