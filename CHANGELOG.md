@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Pluggable context-switching backend**: new `src/coro_ctx.h` abstracts
+  `getcontext`/`makecontext`/`swapcontext` (default: POSIX ucontext), so an
+  alternative backend can be dropped in without touching `src/coroutine.c`.
+
+### Changed
+- **`group_wait()` no longer shuts down the backing pool**: it now waits only
+  for this group's tracked tasks to finish, and the pool stays fully usable
+  afterwards. Tasks are tracked by `task_id` (not `user_data` pointer), so
+  tasks with `NULL` data are tracked and cancellable too; cancellation goes
+  through `loom_pool_cancel_by_id()`, and `group_destroy()` blocks until
+  in-flight wrapped tasks finish before releasing the group.
+- **Pipeline `take()` no longer polls**: it blocks on a condvar until an item
+  arrives or the pipeline is shut down. A discard handler
+  (`loom_pc_set_discard_handler()`) can reclaim payloads dropped by internal
+  consumers and by `pc_destroy()` on queued items, closing the historical
+  teardown leak.
+- **Coroutines reject cross-thread driving**: each coroutine records the
+  `pthread_t owner` that created it; `resume()` and `terminate()` from any
+  other thread return `LOOMWORKS_CORO_ERR_INVALID`.
+- Build: merged the duplicate clang-format block in `CMakeLists.txt` (also
+  gating the lint target on the tool actually being found).
+
 ## [1.0.1] - 2026-08-14
 
 ### Added
@@ -41,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SIGSEGV/SIGBUS signal handler for safe stack overflow recovery
 - Per-thread scheduler context (`_Thread_local`) for cross-thread safety
 - Cache-line aligned structures to prevent false sharing
-- Comprehensive test suite: ~12547 pool assertions, ~5587 coroutine assertions, ~68750 integration assertions
+- Comprehensive test suite: ~10451 pool assertions, ~5603 coroutine assertions, ~68761 integration assertions
 - Full API documentation in `docs/api-reference.md`
 - Architecture documentation in `docs/architecture.md`
 - Design decisions documentation in `docs/design-decisions.md`
