@@ -340,6 +340,14 @@ static void coro_entry(void *arg)
 /* ================================================================
  *  Public API
  * ================================================================ */
+/* A coroutine may only be driven (resume/terminate) by the thread that
+ * created it: ucontext state is not safe to touch from another thread.
+ * pthread_equal() handles pthread_t being an opaque/aggregate type. */
+static bool coro_owned_by_this_thread(const loom_coroutine_t *c)
+{
+    return pthread_equal(c->owner, pthread_self()) != 0;
+}
+
 loom_coro_result_t
 loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_t **coro)
 {
@@ -355,6 +363,7 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
     c->state       = LOOMWORKS_CORO_NEW;
     c->entry_fn    = fn;
     c->user_data   = data;
+    c->owner       = pthread_self();
     /* 0 means "use the default" (LOOMWORKS_CORO_DEFAULT_STACK_SIZE); the
      * stack itself is not mapped until the first resume, via allocate_stack
      * which may serve it from the reuse pool. */
@@ -377,6 +386,9 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
 loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
 {
     if (coro == NULL) {
+        return LOOMWORKS_CORO_ERR_INVALID;
+    }
+    if (!coro_owned_by_this_thread(coro)) {
         return LOOMWORKS_CORO_ERR_INVALID;
     }
 
@@ -440,6 +452,9 @@ void loom_coro_suspend(void)
 loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro)
 {
     if (coro == NULL) {
+        return LOOMWORKS_CORO_ERR_INVALID;
+    }
+    if (!coro_owned_by_this_thread(coro)) {
         return LOOMWORKS_CORO_ERR_INVALID;
     }
     if (coro->state == LOOMWORKS_CORO_DONE || coro->state == LOOMWORKS_CORO_ERROR) {

@@ -2,6 +2,7 @@
 #define LOOMWORKS_COROUTINE_INTERNAL_H
 
 #include "loomworks/coroutine.h"
+#include <pthread.h>
 #include <stdbool.h>
 #include <ucontext.h>
 
@@ -29,6 +30,12 @@ struct loom_coroutine {
     loom_coro_fn      entry_fn;   /**< User entry function. */
     void             *user_data;  /**< Opaque argument passed to entry_fn. */
     size_t            stack_size; /**< Requested stack size in bytes. */
+    pthread_t         owner;      /**< Thread that created the coroutine. */
+
+    /* Lifetime rule: resume/terminate are only valid from owner; calling
+     * them from another thread is user error, guarded at runtime with
+     * LOOMWORKS_CORO_ERR_INVALID in coroutine.c because the ucontext
+     * machinery is not safe to touch from multiple threads. */
 
     ucontext_t ctx; /**< Saved context for swapcontext(). */
 

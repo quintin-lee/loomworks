@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/coroutine.h"
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -489,6 +490,68 @@ static void test_small_stack(void)
     loom_coro_destroy(&coro);
 }
 
+/* ---------- Test: cross-thread resume/terminate rejected ---------- */
+typedef struct {
+    loom_coroutine_t *coro;
+    loom_coro_result_t rc;
+} cross_thread_arg_t;
+
+static void *foreign_resume_fn(void *arg)
+{
+    cross_thread_arg_t *a = (cross_thread_arg_t *)arg;
+    a->rc                 = loom_coro_resume(a->coro);
+    return NULL;
+}
+
+static void *foreign_terminate_fn(void *arg)
+{
+    cross_thread_arg_t *a = (cross_thread_arg_t *)arg;
+    a->rc                 = loom_coro_terminate(a->coro);
+    return NULL;
+}
+
+static void test_cross_thread_guard(void)
+{
+    loom_coroutine_t  *coro    = NULL;
+    int                counter = 0;
+    loom_coro_result_t rc      = loom_coro_create(simple_coro_fn, &counter, 0, &coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "create for cross-thread guard");
+
+    cross_thread_arg_t arg = {coro, LOOMWORKS_CORO_OK};
+    pthread_t           t;
+    ASSERT(pthread_create(&t, NULL, foreign_resume_fn, &arg) == 0, "spawn foreign resume");
+    pthread_join(t, NULL);
+    ASSERT(arg.rc == LOOMWORKS_CORO_ERR_INVALID, "foreign resume rejected");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_NEW, "state untouched by foreign resume");
+    ASSERT(counter == 0, "entry fn never ran on foreign thread");
+
+    /* Owner thread still owns the coroutine after the rejected attempt. */
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "owner resume still works");
+    ASSERT(counter == 1, "owner thread ran entry fn");
+
+    coro = NULL;
+    int yield_counter = 0;
+    rc                = loom_coro_create(yield_coro_fn, &yield_counter, 0, &coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "create yield coro for cross-thread terminate");
+    ASSERT(loom_coro_resume(coro) == LOOMWORKS_CORO_OK, "owner resume to yield");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "SUSPENDED before foreign terminate");
+
+    arg.coro = coro;
+    arg.rc   = LOOMWORKS_CORO_OK;
+    ASSERT(pthread_create(&t, NULL, foreign_terminate_fn, &arg) == 0, "spawn foreign terminate");
+    pthread_join(t, NULL);
+    ASSERT(arg.rc == LOOMWORKS_CORO_ERR_INVALID, "foreign terminate rejected");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "state untouched by foreign terminate");
+
+    /* Owner can still resume the suspended coroutine to completion. */
+    ASSERT(loom_coro_resume(coro) == LOOMWORKS_CORO_OK, "owner resume after foreign reject");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after owner's final resume");
+    ASSERT(yield_counter == 2, "both increments ran on owner thread");
+
+    loom_coro_destroy(&coro);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -519,6 +582,7 @@ int main(void)
     test_stack_info_after_destroy();
     test_coro_null_data();
     test_small_stack();
+    test_cross_thread_guard();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

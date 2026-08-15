@@ -12,6 +12,13 @@
  *   - Nested coroutine support
  *   - Pure C11 with POSIX context switching
  *
+ * Thread affinity:
+ *   A coroutine is owned by the thread that creates it. loom_coro_resume()
+ *   and loom_coro_terminate() must be called from that same thread; any
+ *   other caller gets LOOMWORKS_CORO_ERR_INVALID. loom_coro_destroy()
+ *   may be called from any thread, as stack reclamation is internally
+ *   synchronized -- but only once the coroutine is in DONE/ERROR state.
+ *
  * Guard page strategy:
  *   Each coroutine stack is allocated with mmap using a region 2 guard pages
  *   larger than the requested size. The first and last guard pages are set to
@@ -74,6 +81,8 @@ typedef void (*loom_coro_fn)(void *user_data);
  * @brief Create a new coroutine.
  *
  * The coroutine is in the NEW state. Call loom_coro_resume() to start it.
+ * The calling thread becomes the coroutine's owner; see "Thread affinity"
+ * in the file header.
  *
  * @param fn       Entry function for the coroutine.
  * @param data     Opaque user data passed to the entry function.
@@ -89,6 +98,8 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
  *
  * If the coroutine is in the NEW state, this starts it for the first time.
  * If it is SUSPENDED, this resumes execution from the yield point.
+ * Only the owning thread may resume; any other thread gets
+ * LOOMWORKS_CORO_ERR_INVALID.
  *
  * @param coro  The coroutine handle.
  * @return      LOOMWORKS_CORO_OK on success, error code otherwise.
@@ -114,7 +125,8 @@ void loom_coro_suspend(void);
  * @brief Terminate a coroutine before it completes naturally.
  *
  * The coroutine moves to the DONE state. Any pending tasks in a thread
- * pool will be cleaned up automatically.
+ * pool will be cleaned up automatically. Only the owning thread may
+ * terminate; any other thread gets LOOMWORKS_CORO_ERR_INVALID.
  *
  * @param coro  The coroutine handle.
  * @return      LOOMWORKS_CORO_OK on success, error code otherwise.
@@ -125,7 +137,9 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro);
  * @brief Destroy a coroutine and free all resources.
  *
  * Must be called after the coroutine is in DONE state, or after
- * loom_coro_terminate() has been called.
+ * loom_coro_terminate() has been called. May be called from any
+ * thread, but only once the coroutine no longer needs its owner
+ * (DONE/ERROR state); see "Thread affinity" in the file header.
  *
  * @param coro  Pointer to the coroutine handle (set to NULL on return).
  */
