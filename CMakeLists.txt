@@ -108,20 +108,11 @@ target_link_libraries(example_pipeline PRIVATE loomworks_static)
 add_subdirectory(examples)
 
 # ---------------------------------------------------------------------------
-# Install
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # clang-format: check formatting before build (lint target)
 # ---------------------------------------------------------------------------
-if(ENABLE_CLANG_FORMAT)
-  file(GLOB_RECURSE ALL_C_FILES
-    "include/**/*.h"
-    "src/**/*.c"
-    "src/**/*.h"
-    "tests/**/*.c"
-  )
-
+# ALL_C_FILES is only defined when clang-format was found above, so owning the
+# lint target on the actual program is safe.
+if(ENABLE_CLANG_FORMAT AND CLANG_FORMAT_BIN)
   add_custom_target(format-check
     COMMAND ${CLANG_FORMAT_BIN} --dry-run --Werror ${ALL_C_FILES}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -137,6 +128,9 @@ if(ENABLE_CLANG_FORMAT)
   add_dependencies(test_integration format-check)
 endif()
 
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
 include(GNUInstallDirs)
 install(TARGETS loomworks_static loomworks_shared
     EXPORT loomworksTargets

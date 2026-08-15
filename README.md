@@ -14,7 +14,7 @@ Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 | Feature | Description |
 |---------|-------------|
 | Opaque pointer API | Internal struct definitions are not exposed in headers |
-| Configurable workers | `0` auto-detected as `hardware_concurrency * 2`, clamped to 128 |
+| Configurable workers | `0` auto-detected as `min(n, 64) * 2` where `n = sysconf(_SC_NPROCESSORS_ONLN)` (clamped to 64 before doubling: 2–128 workers) |
 | Priority scheduling | 256 priority buckets (REALTIME=0 … LOW=10) with O(1) occupancy bitmap scan |
 | Lock-free fast path | Vyukov bounded ring for NORMAL-priority tasks, with spill to the lanes |
 | Work stealing | Per-worker Chase-Lev deques: LIFO local pops, FIFO cross-worker steal, bulk ring→deque batches of 8 |
@@ -40,7 +40,7 @@ Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 |---------|-------------|
 | Grouped lifecycle | `group_cancel()` cancels every pending tracked task; `group_destroy()` cancels then frees |
 | Task IDs | `group_submit()` / `group_submit_future()` return per-task `task_id` |
-| `group_wait()` | Drains the backing pool via `loom_pool_shutdown()` |
+| `group_wait()` | Waits for every tracked task to finish; the pool stays alive and usable afterwards (no shutdown) |
 
 ### Metrics (`loom_metrics_t`)
 
