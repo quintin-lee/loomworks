@@ -3,7 +3,7 @@
 Industrial-grade C11 concurrency library featuring a **thread pool**, a **stackful coroutine** subsystem, and higher-level **pipeline**, **task group**, and **metrics** layers.
 
 ```
-Tests: ~12539 pool + ~5603 coroutine + ~68761 integration — all passing
+Tests: ~12539 pool + ~5603 coroutine + ~78731 integration — all passing
 Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 ```
 
@@ -85,7 +85,7 @@ loomworks/
 ├── tests/
 │   ├── test_thread_pool.c     # ~12539 assertions
 │   ├── test_coroutine.c       # ~5603 assertions
-│   └── test_integration.c     # ~68761 assertions
+│   └── test_integration.c     # ~78731 assertions
 ├── examples/
 │   ├── basic_pool.c           # Minimal pool usage
 │   ├── bench.c                # Benchmark harness
