@@ -7,10 +7,11 @@
  *
  * Features:
  *   - Stack allocated via mmap with PROT_NONE guard pages
- *   - Full context save/restore via ucontext
+ *   - Full context save/restore behind a pluggable backend (coro_ctx.h;
+ *     the default is POSIX ucontext)
  *   - Yield, suspend, and resume primitives
  *   - Nested coroutine support
- *   - Pure C11 with POSIX context switching
+ *   - Pure C11 with POSIX threading
  *
  * Thread affinity:
  *   A coroutine is owned by the thread that creates it. loom_coro_resume()
