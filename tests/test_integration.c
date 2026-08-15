@@ -424,6 +424,70 @@ static void test_metrics_concurrent(void)
 }
 
 /* ================================================================
+ *  Pipeline discard-handler integration
+ * ================================================================ */
+
+typedef struct {
+    int             discarded;
+    pthread_mutex_t lock;
+} pc_stats_t;
+
+/* Heap payloads let the discard handler count and free with determinism. */
+static void *pc_make_payload(int id)
+{
+    int *p = (int *)malloc(sizeof(int));
+    if (p) {
+        *p = id;
+    }
+    return (void *)p;
+}
+
+static void pc_discard_handler(void *data, void *ctx)
+{
+    pc_stats_t *st = (pc_stats_t *)ctx;
+    if (data) {
+        free(data);
+    }
+    pthread_mutex_lock(&st->lock);
+    st->discarded++;
+    pthread_mutex_unlock(&st->lock);
+}
+
+static void test_pipeline_discard_queued(void)
+{
+    pc_stats_t st;
+    st.discarded = 0;
+    ASSERT(pthread_mutex_init(&st.lock, NULL) == 0, "init stats lock");
+
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create(1, 64, &pc) == LOOMWORKS_OK, "create pipeline with pool");
+
+    loom_pc_set_discard_handler(pc, pc_discard_handler, &st);
+
+    const int N = 5000;
+    for (int i = 0; i < N; i++) {
+        void *payload = pc_make_payload(i);
+        ASSERT(payload != NULL, "allocate payload");
+        ASSERT(loom_pc_submit(pc, payload) == LOOMWORKS_OK, "submit payload");
+    }
+
+    /* Single consumer cannot drain 5000 items in 2 ms, so some payload
+     * remains queued at shutdown and must go through the discard handler. */
+    struct timespec delay = {0, 2000000L}; /* 2 ms */
+    nanosleep(&delay, NULL);
+    loom_pc_shutdown(pc);
+
+    /* With a handler installed, every payload is reclaimed exactly once,
+     * whether consumed via take() or drained at destroy -- so the
+     * handler count must equal the submitted count. */
+    ASSERT(st.discarded == N, "every payload reclaimed exactly once");
+
+    loom_pc_destroy(&pc);
+    ASSERT(pc == NULL, "pipeline destroyed");
+    pthread_mutex_destroy(&st.lock);
+}
+
+/* ================================================================
  *  Main
  * ================================================================ */
 
@@ -445,6 +509,7 @@ int main(void)
     test_large_stack_coroutines();
     test_metrics_concurrent();
     test_scheduler_list_race_stress();
+    test_pipeline_discard_queued();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
