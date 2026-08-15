@@ -11,9 +11,11 @@
  * - Wait for every task in the group to finish via loom_task_group_wait().
  * - Destroy the group when done.
  *
- * Internally each submitted task's user_data pointer is recorded so that
- * loom_pool_cancel() can target individual tasks, and loom_task_group_cancel()
- * can walk the list and cancel them all at once.
+ * Internally each submitted task's task_id is recorded (not its user_data
+ * pointer), so tasks submitted with data == NULL are tracked just like any
+ * other.  loom_task_group_cancel() walks the list and cancels every queued
+ * task via loom_pool_cancel_by_id(), so tasks already running are never
+ * interrupted.
  */
 
 #include "loomworks/thread_pool.h"
@@ -80,18 +82,22 @@ loom_result_t loom_task_group_submit_future(loom_task_group_t  *group,
 /**
  * @brief Cancel all pending tasks in the group.
  *
- * Walks the internal tracking list and calls loom_pool_cancel() for
- * each enqueued task.  Tasks already being executed are NOT interrupted.
+ * Walks the internal tracking list and calls loom_pool_cancel_by_id() for
+ * each enqueued task.  Tasks already being executed are NOT interrupted and
+ * run to completion; the group still waits for them on wait().
+ *
+ * The tracking list is emptied, so tasks submitted after a cancel() call are
+ * not affected and start a fresh tracking set.
  */
 void loom_task_group_cancel(loom_task_group_t *group);
 
 /**
  * @brief Wait for all tasks in the group to complete.
  *
- * Blocks until the pool's draining phase finishes (i.e. until
- * loom_pool_shutdown() has been called and all workers have exited).
- * This is a convenience that calls loom_pool_shutdown() on the backing
- * pool if not already shut down.
+ * Blocks until every task submitted to the group has finished (including
+ * tasks that were already running when cancel() was called).  Unlike the
+ * historical behaviour this does NOT shut down the backing pool, so the
+ * pool stays fully usable for new submissions after wait() returns.
  *
  * @param group  The task group.
  */

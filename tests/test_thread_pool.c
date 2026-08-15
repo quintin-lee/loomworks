@@ -660,6 +660,7 @@ static void test_task_group_submit(void)
     ASSERT(counter == 10, "all tasks executed");
 
     loom_task_group_destroy(&group);
+    loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
 
@@ -683,6 +684,7 @@ static void test_task_group_cancel(void)
 
     loom_task_group_wait(group);
     loom_task_group_destroy(&group);
+    loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
 
@@ -2052,6 +2054,7 @@ static void test_task_group_with_task_id(void)
     ASSERT(counter == 5, "all tasks executed");
 
     loom_task_group_destroy(&group);
+    loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
 
@@ -2080,6 +2083,7 @@ static void test_task_group_future_with_task_id(void)
 
     loom_task_group_wait(group);
     loom_task_group_destroy(&group);
+    loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
 
@@ -2181,6 +2185,7 @@ static void test_task_group_cancel_propagation(void)
 
     loom_task_group_wait(group);
     loom_task_group_destroy(&group);
+    loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
 
