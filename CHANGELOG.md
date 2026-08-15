@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SIGSEGV/SIGBUS signal handler for safe stack overflow recovery
 - Per-thread scheduler context (`_Thread_local`) for cross-thread safety
 - Cache-line aligned structures to prevent false sharing
-- Comprehensive test suite: ~10451 pool assertions, ~5603 coroutine assertions, ~68761 integration assertions
+- Comprehensive test suite: ~12539 pool assertions, ~5603 coroutine assertions, ~68761 integration assertions
 - Full API documentation in `docs/api-reference.md`
 - Architecture documentation in `docs/architecture.md`
 - Design decisions documentation in `docs/design-decisions.md`
