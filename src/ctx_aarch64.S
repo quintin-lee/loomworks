@@ -113,8 +113,9 @@ loom_coro_ctx_swap_to_link:
 
 /* ctx_trampoline: entered with sp % 16 == 8 (see loom_coro_ctx_make).
  * Runs entry_fn(entry_arg) with x19 == ctx.  On return: switch to
- * ctx->link if present, else exit(EXIT_FAILURE).  Never rets to the
- * arming frame.  `bl` needs sp % 16 == 0 at the interface; blr pushed
+ * ctx->link if present, else exit(EXIT_SUCCESS) - glibc's __start_context
+ * does the same for a NULL uc_link, verified empirically.  Never rets to
+ * the arming frame.  `bl` needs sp % 16 == 0 at the interface; blr pushed
  * the return address (16 bytes), which already restores alignment. */
         .globl  ctx_trampoline
         .hidden ctx_trampoline
@@ -133,7 +134,7 @@ ctx_trampoline:
 .Ltramp_no_link:
         /* post-blr sp % 16 == 0; drop 16 and call exit (sp % 16 == 0). */
         sub     sp, sp, #16
-        mov     w0, #1          /* EXIT_FAILURE */
+        mov     w0, #0          /* EXIT_SUCCESS (matches ucontext) */
         bl      exit
         .cfi_endproc
         .size   ctx_trampoline, .-ctx_trampoline

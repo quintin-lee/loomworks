@@ -108,8 +108,10 @@ loom_coro_ctx_swap_to_link:
 
 /* ctx_trampoline: entered with rsp % 16 == 8 (see loom_coro_ctx_make).
  * Runs entry_fn(entry_arg) with r15 == ctx.  On return: if ctx->link is
- * non-NULL switch to it; otherwise exit(EXIT_FAILURE).  It never rets to
- * the arming frame - the coroutine stack is abandoned on purpose. */
+ * non-NULL switch to it; otherwise exit(EXIT_SUCCESS) - glibc's
+ * __start_context does the same for a NULL uc_link, verified empirically.
+ * It never rets to the arming frame - the coroutine stack is abandoned
+ * on purpose. */
         .globl  ctx_trampoline
         .hidden ctx_trampoline
         .type   ctx_trampoline, @function
@@ -127,7 +129,7 @@ ctx_trampoline:
         /* rsp % 16 == 0 here (entry had 8, call pushed 8); exit is a
          * normal ABI call, so restore the 8-byte offset first. */
         subq    $8, %rsp
-        movl    $1, %edi        /* EXIT_FAILURE */
+        xorl    %edi, %edi      /* EXIT_SUCCESS (matches ucontext) */
         call    exit
         hlt                     /* unreachable */
         .cfi_endproc
