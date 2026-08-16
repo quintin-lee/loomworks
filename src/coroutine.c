@@ -33,6 +33,12 @@ static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
 static _Thread_local jmp_buf           g_guard_jmp; /* longjmp target for guard violations */
+/* Prior SIGSEGV/SIGBUS dispositions, saved on first install so they can be
+ * chained to: uninstall restores them and a fault that is not on a coroutine
+ * guard page is re-raised through them.  Zero-init means "SIG_DFL" if no
+ * handler was ever installed. */
+static struct sigaction g_prev_segv;
+static struct sigaction g_prev_bus;
 /* Linked list of all scheduler stacks for atexit cleanup. */
 typedef struct scheduler_stack_node {
     char                        *stack;
@@ -111,13 +117,12 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
             }
         }
     }
-    /* Not our guard page — reinstall default handler and re-raise. */
+    /* Not our guard page — chain to whatever handler was installed before
+     * us and re-raise, so the host's handlers (crash reporters, JITs)
+     * still run.  Zero-init g_prev_* means SIG_DFL when none existed. */
     {
-        struct sigaction sa;
-        sa.sa_handler = SIG_DFL;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sigaction(sig, &sa, NULL);
+        struct sigaction prior = (sig == SIGSEGV) ? g_prev_segv : g_prev_bus;
+        sigaction(sig, &prior, NULL);
         raise(sig);
     }
 }
@@ -132,7 +137,8 @@ void loom_coro_install_guard_handler(void)
     sa.sa_sigaction = guard_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_SIGINFO;
-    if (sigaction(SIGSEGV, &sa, NULL) != 0 || sigaction(SIGBUS, &sa, NULL) != 0) {
+    if (sigaction(SIGSEGV, &sa, &g_prev_segv) != 0 ||
+        sigaction(SIGBUS, &sa, &g_prev_bus) != 0) {
         fprintf(stderr, "loomworks: sigaction failed: %s\n", strerror(errno));
         return;
     }
@@ -141,16 +147,13 @@ void loom_coro_install_guard_handler(void)
 
 void loom_coro_uninstall_guard_handler(void)
 {
-    /* Revert to SIG_DFL; only meaningful for the installing process. */
+    /* Restore the handlers that were installed before us, so embedding
+     * applications keep their own SIGSEGV/SIGBUS handling. */
     if (!atomic_load_explicit(&g_guard_installed, memory_order_relaxed)) {
         return;
     }
-    struct sigaction sa;
-    sa.sa_handler = SIG_DFL;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGSEGV, &g_prev_segv, NULL);
+    sigaction(SIGBUS, &g_prev_bus, NULL);
     atomic_store_explicit(&g_guard_installed, false, memory_order_relaxed);
 }
 
