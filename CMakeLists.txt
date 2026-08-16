@@ -111,6 +111,12 @@ target_link_libraries(test_integration PRIVATE loomworks_static)
 add_test(NAME IntegrationTests COMMAND test_integration)
 set_tests_properties(IntegrationTests PROPERTIES TIMEOUT 300)
 
+add_executable(test_ctx_smoke tests/ctx_smoke.c)
+target_compile_definitions(test_ctx_smoke PRIVATE ${LOOMWORKS_CTX_DEFINES})
+target_include_directories(test_ctx_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_ctx_smoke PRIVATE loomworks_static m)
+add_test(NAME test_ctx_smoke COMMAND test_ctx_smoke TIMEOUT 300)
+
 add_executable(example_pipeline examples/pipeline_demo.c)
 target_link_libraries(example_pipeline PRIVATE loomworks_static)
 
