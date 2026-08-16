@@ -28,7 +28,8 @@ Risk ratings use the conventional 3×3 grid:
 | R8 | Pipeline | Internal-consumer mode (`worker_count>0`) consumes and **frees** every payload by default unless a discard handler is set | Medium | Medium | **Medium** |
 | R9 | Pipeline | 60s `CLOCK_REALTIME` timedwait is subject to wall-clock jumps (NTP slews, manual clock changes) | Low | Low | **Low** |
 | R10 | Docs | Assertion counts in README/CHANGELOG drift from actual (see §Verification) | Low | Low | **Low** |
-| R11 | CI | Duplicate valgrind suppression files diverge; root `loomworks.valgrind-supp` is orphaned (CI uses `.github/valgrind.supp`) | High | Low | **Low** |
+| R11 | CI | Duplicate valgrind suppression files diverge; root `loomworks.valgrind-supp` is orphaned (CI uses `.github/valgrind.supp`) | High | Low | **Low** — ✅ resolved (2026-08-16) |
+| R15 | CI | Missing trailing newline at EOF in `src/coro_ctx.h`/`src/task_group.c` trips clang-tidy `newline-eof` → all CI builds red on master | High | Medium | **High** |
 | R12 | Portability | Linux/x86-64 only; no Windows/macOS build, `_GNU_SOURCE` + `pthread_tryjoin_np` are GNU extensions | High | Medium | **Medium** |
 | R13 | Coroutine | Cross-thread coroutine misuse (resume/terminate) hard-fails with `ERR_INVALID`, but `destroy()` is unguarded — caller must only destroy in DONE/ERROR | Low | Medium | **Low** |
 | R14 | Thread Pool | `cancel_by_id` reused after pool shutdown returns `ERR_SHUTDOWN`; cancel-on-shutdown semantics are subtle (running tasks are never preempted) | Low | Low | **Low** |
@@ -158,18 +159,38 @@ precision matters.
 ### R11 — Duplicate valgrind suppressions (orphaned file)
 
 `loomworks.valgrind-supp` at the repo root and `.github/valgrind.supp` both
-exist and **differ in content** (one suppresses scheduler-stack leaks, the
-other suppresses the intentional guard-page write). CI references only
-`.github/valgrind.supp`. The root file is orphaned and will rot.
+existed and **differed in content** (one suppressed scheduler-stack leaks, the
+other suppresses the intentional guard-page write). CI referenced only
+`.github/valgrind.supp`.
 
-**Recommendation**: delete the root file (its rules were superseded) or
-reference it from the CI workflow and keep a single source of truth.
+**Status: ✅ RESOLVED (2026-08-16).** The orphaned root file was deleted.
+Rules in the root file were stale — they suppressed a "scheduler stack
+intentionally never freed" behavior that the current code no longer has
+(stacks are freed by `loom_coro_exit()` / `free_all_scheduler_stacks()`), and
+historical CI runs passed valgrind memcheck using only the `.github/valgrind.supp`
+rules. `.github/valgrind.supp` remains the single source of truth.
 
 > **Note (auditor correction):** a typo in `.clang-tidy`
 > (`readability-redundant-string-cstr` is correctly spelled) was suspected
 > during the audit (initial grep suggested `readiness-*`); verification
 > against the actual file shows the spelling is correct and the check is
 > active. No action needed.
+
+### R15 — Missing trailing newline breaks CI builds (active)
+
+`src/coro_ctx.h:64` and `src/task_group.c:417` lack a newline at end of file.
+With `ENABLE_CLANG_TIDY ON` and `WarningsAsErrors: '*'` in CI, this trips
+clang-tidy's `clang-diagnostic-newline-eof` → "1 warning treated as error" →
+`loomworks_static`/`loomworks_shared` fail to build. All master CI jobs (build
+matrix + sanitizers, 2026-08-15 13:34+) are red for this reason.
+
+**Cause**: both files are part of the Unreleased changes (coro_ctx.h is new;
+task_group.c was edited). Local builds pass because local clang-tidy is not
+active (CMake `ENABLE_CLANG_TIDY ON` warns-and-skips when the binary is
+missing), so this only surfaced in CI.
+
+**Fix**: append a trailing newline to both files (2-line diff). Verification:
+push and watch CI go green, or run clang-tidy locally with the exact CI command.
 
 ### R12 — GNU/Linux-only portability surface
 
@@ -219,9 +240,10 @@ All claims above are grounded in the source as of master @ b5d8ab2:
 
 ## Maintenance priority
 
-1. **R1** (signal chaining) — the only item with a real behavioral hazard
-   for embedders; a contained fix.
-2. **R11** (orphaned suppression) — one-line cleanup, removes a rotting file.
+1. **R15** (missing trailing newline) — CI is red on master; a 2-line fix
+   unblocks every other concern. Do this next.
+2. **R1** (signal chaining) — the only remaining item with a real behavioral
+   hazard for embedders; a contained fix.
 3. **R12** (portability) — long pole for macOS; `pthread_tryjoin_np` shim is
    the first step. `coro_ctx.h` already de-risks the ucontext half.
 4. **R8** (pipeline free-by-default) — document loudly; consider an explicit
