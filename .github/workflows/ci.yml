@@ -24,6 +24,19 @@ jobs:
       - name: Test
         run: cd build && ctest --output-on-failure
 
+  parity-ucontext:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang-tools
+      - name: Configure (ucontext backend)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLOOMWORKS_CTX_BACKEND=ucontext
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
   sanitize:
     runs-on: ubuntu-latest
     strategy:
