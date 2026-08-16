@@ -55,14 +55,14 @@ static void          pool_destroy_internal(loom_thread_pool_t *pool);
 static void         *worker_entry(void *arg);
 static loom_task_t *
 task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority);
-void task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
-static void future_task_wrapper(void *arg);
-static bool lane_has_priority(loom_thread_pool_t *pool, unsigned max_priority);
-static loom_task_t *
-dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool, unsigned max_priority);
-static bool ring_has_work(loom_thread_pool_t *pool);
-size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
-static void cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task);
+void                task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
+static void         future_task_wrapper(void *arg);
+static bool         lane_has_priority(loom_thread_pool_t *pool, unsigned max_priority);
+static loom_task_t *dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool,
+                                                     unsigned            max_priority);
+static bool         ring_has_work(loom_thread_pool_t *pool);
+size_t              ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
+static void         cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task);
 
 /* ================================================================
  *  pool_init — initialise locks, defaults, and worker thread array
@@ -148,9 +148,8 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->next_task_id, 1, memory_order_relaxed);
 
     /* --- Lock-free ring + cancel index + node pool --- */
-    pool->ring_size = (pool->queue_capacity == 0)
-                          ? LOOMWORKS_RING_DEFAULT_SLOTS
-                          : next_pow2_u64(pool->queue_capacity);
+    pool->ring_size = (pool->queue_capacity == 0) ? LOOMWORKS_RING_DEFAULT_SLOTS
+                                                  : next_pow2_u64(pool->queue_capacity);
     pool->ring_mask = pool->ring_size - 1;
     pool->ring      = (ring_cell_t *)calloc(pool->ring_size, sizeof(ring_cell_t));
     if (pool->ring != NULL) {
@@ -188,8 +187,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     pool->max_worker_count = pool->worker_count;
 
     /* --- Work-stealing deques (one Chase-Lev deque per worker slot) --- */
-    pool->deques = (loom_work_deque_t *)calloc(pool->max_worker_count,
-                                               sizeof(loom_work_deque_t));
+    pool->deques = (loom_work_deque_t *)calloc(pool->max_worker_count, sizeof(loom_work_deque_t));
     if (pool->deques != NULL) {
         bool ok = true;
         for (uint32_t i = 0; i < pool->max_worker_count; i++) {
@@ -198,8 +196,8 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
             pool->deques[i].bottom   = 0;
             atomic_store_explicit(&pool->deques[i].top, 0, memory_order_relaxed);
             atomic_store_explicit(&pool->deques[i].len, 0, memory_order_relaxed);
-            pool->deques[i].slots = (loom_task_t **)calloc(LOOMWORKS_DEQUE_CAPACITY,
-                                                           sizeof(loom_task_t *));
+            pool->deques[i].slots =
+                (loom_task_t **)calloc(LOOMWORKS_DEQUE_CAPACITY, sizeof(loom_task_t *));
             if (pool->deques[i].slots == NULL) {
                 ok = false;
                 break;
@@ -215,7 +213,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     }
     atomic_store_explicit(&pool->deque_total, 0, memory_order_relaxed);
 
-    pool->threads          = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
+    pool->threads = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
     if (!pool->threads) {
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
@@ -482,8 +480,9 @@ static void *worker_entry(void *arg)
 
 static bool node_from_pool(loom_thread_pool_t *pool, const loom_task_t *node)
 {
-    if (pool->node_pool == NULL || pool->node_pool_cap == 0)
+    if (pool->node_pool == NULL || pool->node_pool_cap == 0) {
         return false;
+    }
     uintptr_t base = (uintptr_t)pool->node_pool;
     uintptr_t p    = (uintptr_t)node;
     return p >= base && p < base + (uintptr_t)pool->node_pool_cap * sizeof(loom_task_t);
@@ -494,14 +493,15 @@ static loom_task_t *node_stack_pop(loom_thread_pool_t *pool)
     uint64_t stack = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
     for (;;) {
         uint32_t top = (uint32_t)stack;
-        if (top == 0)
+        if (top == 0) {
             return NULL; /* empty: caller falls back to malloc */
-        uint32_t next = top - 1;
+        }
+        uint32_t next    = top - 1;
         uint64_t updated = ((uint64_t)((uint32_t)(stack >> 32) + 1) << 32) | next;
-        if (atomic_compare_exchange_weak_explicit(&pool->node_stack, &stack, updated,
-                                                  memory_order_acquire,
-                                                  memory_order_relaxed))
+        if (atomic_compare_exchange_weak_explicit(
+                &pool->node_stack, &stack, updated, memory_order_acquire, memory_order_relaxed)) {
             return &pool->node_pool[top - 1];
+        }
     }
 }
 
@@ -510,13 +510,16 @@ static void node_stack_push(loom_thread_pool_t *pool, loom_task_t *node)
     if (node_from_pool(pool, node)) {
         uint64_t stack = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
         for (;;) {
-            uint32_t top = (uint32_t)stack;
-            uint32_t next = top + 1;
+            uint32_t top     = (uint32_t)stack;
+            uint32_t next    = top + 1;
             uint64_t updated = ((uint64_t)((uint32_t)(stack >> 32) + 1) << 32) | next;
-            if (atomic_compare_exchange_weak_explicit(&pool->node_stack, &stack, updated,
+            if (atomic_compare_exchange_weak_explicit(&pool->node_stack,
+                                                      &stack,
+                                                      updated,
                                                       memory_order_release,
-                                                      memory_order_relaxed))
+                                                      memory_order_relaxed)) {
                 return;
+            }
         }
     } else {
         free(node); /* malloc'd node: return to the heap */
@@ -716,9 +719,8 @@ static void cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task)
         cancel_slot_t *slot = &pool->cancel_slots[h];
         uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_relaxed);
         if (cur == want) {
-            atomic_compare_exchange_strong_explicit(&slot->task_id, &cur, 1,
-                                                    memory_order_release,
-                                                    memory_order_acquire);
+            atomic_compare_exchange_strong_explicit(
+                &slot->task_id, &cur, 1, memory_order_release, memory_order_acquire);
             return;
         }
         if (cur == 0) { /* not found: spilled task (lane path), never inserted */
@@ -772,9 +774,8 @@ static bool cancel_index_claim(loom_thread_pool_t *pool, loom_task_t *task)
         uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_relaxed);
         if (cur == want) { /* occupied → steal it as a tombstone */
             uint64_t tgt = want;
-            if (atomic_compare_exchange_strong_explicit(&slot->task_id, &tgt, 1,
-                                                        memory_order_release,
-                                                        memory_order_acquire)) {
+            if (atomic_compare_exchange_strong_explicit(
+                    &slot->task_id, &tgt, 1, memory_order_release, memory_order_acquire)) {
                 slot->task = NULL;
                 return true;
             }
@@ -805,15 +806,14 @@ static bool ring_try_enqueue(loom_thread_pool_t *pool, loom_task_t *task)
             return false; /* full or claimed: do NOT claim (spill instead) */
         }
         uint64_t want = tail;
-        if (atomic_compare_exchange_weak_explicit(&pool->ring_tail, &tail, tail + 1,
-                                                  memory_order_relaxed,
-                                                  memory_order_relaxed)) {
+        if (atomic_compare_exchange_weak_explicit(
+                &pool->ring_tail, &tail, tail + 1, memory_order_relaxed, memory_order_relaxed)) {
             /* position claimed at want */
-            atomic_store_explicit(&pool->ring[want & pool->ring_mask].task, task,
-                                  memory_order_relaxed);
+            atomic_store_explicit(
+                &pool->ring[want & pool->ring_mask].task, task, memory_order_relaxed);
             cancel_index_insert(pool, task); /* between store and publish */
-            atomic_store_explicit(&pool->ring[want & pool->ring_mask].seq, want + 1,
-                                  memory_order_release);
+            atomic_store_explicit(
+                &pool->ring[want & pool->ring_mask].seq, want + 1, memory_order_release);
             atomic_fetch_add_explicit(&pool->ring_count, 1, memory_order_relaxed);
             return true;
         }
@@ -847,16 +847,14 @@ size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t
         if (atomic_load_explicit(&pool->ring[pos].seq, memory_order_acquire) != head + n + 1) {
             break; /* empty at this position */
         }
-        out[n] = (loom_task_t *)atomic_load_explicit(&pool->ring[pos].task,
-                                                     memory_order_relaxed);
+        out[n] = (loom_task_t *)atomic_load_explicit(&pool->ring[pos].task, memory_order_relaxed);
     }
     if (n == 0) {
         return 0;
     }
     uint64_t want = head;
-    if (!atomic_compare_exchange_weak_explicit(&pool->ring_head, &head, head + n,
-                                               memory_order_acq_rel,
-                                               memory_order_relaxed)) {
+    if (!atomic_compare_exchange_weak_explicit(
+            &pool->ring_head, &head, head + n, memory_order_acq_rel, memory_order_relaxed)) {
         return 0; /* another consumer won; retry on next loop iteration */
     }
     for (size_t k = 0; k < n; k++) {
@@ -866,7 +864,8 @@ size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t
          * again.  Adding +1 here would make the next consumer round
          * ghost-claim the slot and double-free the stale task node. */
         atomic_store_explicit(&pool->ring[(want + k) & pool->ring_mask].seq,
-                              want + k + pool->ring_size, memory_order_release);
+                              want + k + pool->ring_size,
+                              memory_order_release);
     }
     atomic_fetch_sub_explicit(&pool->ring_count, n, memory_order_relaxed);
     return n;
@@ -894,8 +893,8 @@ void loom_enqueue_unlocked(loom_thread_pool_t *pool, loom_task_t *task)
     }
     pool->buckets_tail[b] = task;
     task->next            = NULL;
-    atomic_fetch_or_explicit(&pool->nonempty_bits[b / 64], (uint64_t)1u << (b % 64),
-                             memory_order_relaxed);
+    atomic_fetch_or_explicit(
+        &pool->nonempty_bits[b / 64], (uint64_t)1u << (b % 64), memory_order_relaxed);
     atomic_fetch_add_explicit(&pool->queue_len, 1, memory_order_relaxed);
 }
 
@@ -907,8 +906,8 @@ void loom_enqueue_unlocked(loom_thread_pool_t *pool, loom_task_t *task)
  *  Must be called with pool->lock held.
  *  Returns NULL when no matching task is queued.
  * ================================================================ */
-static loom_task_t *
-dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool, unsigned max_priority)
+static loom_task_t *dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool,
+                                                     unsigned            max_priority)
 {
     /* Find the lowest non-empty bucket via the 256-bit bitmap.
      * Bucket index == priority; numerically smaller runs first. */
@@ -923,9 +922,8 @@ dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool, unsigned max_priority
             pool->buckets_head[b] = t->next;
             if (pool->buckets_head[b] == NULL) {
                 pool->buckets_tail[b] = NULL;
-                atomic_fetch_and_explicit(&pool->nonempty_bits[w],
-                                          ~((uint64_t)1u << (b % 64)),
-                                          memory_order_relaxed);
+                atomic_fetch_and_explicit(
+                    &pool->nonempty_bits[w], ~((uint64_t)1u << (b % 64)), memory_order_relaxed);
             }
             t->next = NULL;
             atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
@@ -1082,8 +1080,12 @@ static loom_result_t wait_for_space(loom_thread_pool_t *pool)
     return LOOMWORKS_OK;
 }
 
-static loom_result_t enqueue_lane_task(loom_thread_pool_t *pool, loom_task_fn fn, void *data,
-                                       uint8_t priority, bool free_data, uint64_t *task_id)
+static loom_result_t enqueue_lane_task(loom_thread_pool_t *pool,
+                                       loom_task_fn        fn,
+                                       void               *data,
+                                       uint8_t             priority,
+                                       bool                free_data,
+                                       uint64_t           *task_id)
 {
     pthread_mutex_lock(&pool->lock);
     if (pool->shutdown || pool->draining) {
@@ -1110,8 +1112,8 @@ static loom_result_t enqueue_lane_task(loom_thread_pool_t *pool, loom_task_fn fn
     return LOOMWORKS_OK;
 }
 
-static loom_result_t spill_to_normal_lane(loom_thread_pool_t *pool, loom_task_t *task,
-                                          uint64_t *task_id)
+static loom_result_t
+spill_to_normal_lane(loom_thread_pool_t *pool, loom_task_t *task, uint64_t *task_id)
 {
     /* Not visible to workers yet (ring refused it; the lane enqueue below
      * is pending the lock), so reading the id now is race-free. */
@@ -1138,8 +1140,12 @@ static loom_result_t spill_to_normal_lane(loom_thread_pool_t *pool, loom_task_t 
     return LOOMWORKS_OK;
 }
 
-static loom_result_t enqueue_ring_task(loom_thread_pool_t *pool, loom_task_fn fn, void *data,
-                                       uint8_t priority, bool free_data, uint64_t *task_id)
+static loom_result_t enqueue_ring_task(loom_thread_pool_t *pool,
+                                       loom_task_fn        fn,
+                                       void               *data,
+                                       uint8_t             priority,
+                                       bool                free_data,
+                                       uint64_t           *task_id)
 {
     loom_task_t *task = task_create(pool, fn, data, priority);
     if (task == NULL) {
@@ -1164,8 +1170,13 @@ static loom_result_t enqueue_ring_task(loom_thread_pool_t *pool, loom_task_fn fn
     return spill_to_normal_lane(pool, task, task_id);
 }
 
-static loom_result_t enqueue_task(loom_thread_pool_t *pool, loom_task_fn fn, void *data,
-                                  uint8_t priority, bool free_data, uint64_t *task_id, bool block)
+static loom_result_t enqueue_task(loom_thread_pool_t *pool,
+                                  loom_task_fn        fn,
+                                  void               *data,
+                                  uint8_t             priority,
+                                  bool                free_data,
+                                  uint64_t           *task_id,
+                                  bool                block)
 {
     if (atomic_load_explicit(&pool->shutdown, memory_order_relaxed)) {
         return LOOMWORKS_ERR_SHUTDOWN;
@@ -1267,8 +1278,8 @@ loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
     ctx->future = fut;
     /* Ownership of ctx transfers to the pool only on success; on failure
      * we free both the future and the context. */
-    loom_result_t rc = enqueue_task(pool, future_task_wrapper, ctx, LOOMWORKS_PRIORITY_NORMAL,
-                                    true, task_id, false);
+    loom_result_t rc = enqueue_task(
+        pool, future_task_wrapper, ctx, LOOMWORKS_PRIORITY_NORMAL, true, task_id, false);
     if (rc != LOOMWORKS_OK) {
         pthread_mutex_destroy(&fut->mutex);
         pthread_cond_destroy(&fut->cond);
@@ -1344,8 +1355,7 @@ loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
     ctx->future = fut;
     /* Ownership of ctx transfers to the pool only on success; on failure
      * we free both the future and the context. */
-    loom_result_t rc =
-        enqueue_task(pool, future_task_wrapper, ctx, priority, true, task_id, false);
+    loom_result_t rc = enqueue_task(pool, future_task_wrapper, ctx, priority, true, task_id, false);
     if (rc != LOOMWORKS_OK) {
         pthread_mutex_destroy(&fut->mutex);
         pthread_cond_destroy(&fut->cond);
@@ -1663,8 +1673,7 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
         if (pool->cancel_slots != NULL && pool->cancel_cap != 0) {
             for (uint64_t i = 0; i < pool->cancel_cap; i++) {
                 cancel_slot_t *slot = &pool->cancel_slots[i];
-                uint64_t       cur  = atomic_load_explicit(&slot->task_id,
-                                                           memory_order_acquire);
+                uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_acquire);
                 if (cur <= 1) { /* EMPTY or TOMBSTONE */
                     continue;
                 }
@@ -1674,9 +1683,8 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
                 }
                 task->cancelled = true;
                 uint64_t tgt    = cur;
-                if (atomic_compare_exchange_strong_explicit(&slot->task_id, &tgt, 1,
-                                                            memory_order_release,
-                                                            memory_order_acquire)) {
+                if (atomic_compare_exchange_strong_explicit(
+                        &slot->task_id, &tgt, 1, memory_order_release, memory_order_acquire)) {
                     slot->task = NULL;
                     atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
                     cancelled++;
@@ -1866,8 +1874,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 for (uint32_t j = old_count; j < i; j++) {
                     if (atomic_load_explicit(&pool->thread_alive[j], memory_order_acquire)) {
                         pthread_join(pool->threads[j], NULL);
-                        atomic_store_explicit(&pool->thread_alive[j], false,
-                                              memory_order_release);
+                        atomic_store_explicit(&pool->thread_alive[j], false, memory_order_release);
                     }
                 }
                 return LOOMWORKS_ERR_ALLOC;
@@ -1882,8 +1889,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 for (uint32_t j = old_count; j < i; j++) {
                     if (atomic_load_explicit(&pool->thread_alive[j], memory_order_acquire)) {
                         pthread_join(pool->threads[j], NULL);
-                        atomic_store_explicit(&pool->thread_alive[j], false,
-                                              memory_order_release);
+                        atomic_store_explicit(&pool->thread_alive[j], false, memory_order_release);
                     }
                 }
                 fprintf(stderr, "loomworks: pthread_create failed: %s\n", strerror(rc));

@@ -40,13 +40,13 @@ static int g_exec_count;
 
 static void record_exec(void *arg)
 {
-    int idx = (int)(intptr_t)arg;
+    int idx                      = (int)(intptr_t)arg;
     g_exec_order[g_exec_count++] = idx;
 }
 
-static volatile int g_gate_started = 0;
-static volatile int g_gate_release = 0;
-static volatile int g_gate_parked  = 0; /* gate_task entry count (multi-worker) */
+static volatile int g_gate_started  = 0;
+static volatile int g_gate_release  = 0;
+static volatile int g_gate_parked   = 0; /* gate_task entry count (multi-worker) */
 static volatile int g_gate_release2 = 0;
 static volatile int g_gate_parked2  = 0; /* gate_task2 entry count */
 static volatile int g_cancel_hit    = 0;
@@ -74,7 +74,7 @@ static void record_owner_task(void *arg)
 
 static int count_distinct_owner_threads(void)
 {
-    int n = 0;
+    int n     = 0;
     int count = g_steal_owner_count;
     for (int i = 0; i < count; i++) {
         int dup = 0;
@@ -588,8 +588,8 @@ static void test_future_wait_timeout_ok(void)
 /* ---------- Test: future_wait_timeout (should timeout) ---------- */
 static void test_future_wait_timeout_expired(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
@@ -611,7 +611,7 @@ static void test_future_wait_timeout_expired(void)
 
     /* Release the gate so the task can finish and the pool can shut down. */
     g_gate_release = 1;
-    void *done = NULL;
+    void *done     = NULL;
     ASSERT(loom_future_wait(fut, &done) == LOOMWORKS_OK, "future completes after release");
     if (done) {
         free(done);
@@ -746,9 +746,9 @@ static void test_task_group_submit_after_destroy(void)
 /* ---------- Test: bucket priority edges (full uint8 range) ---------- */
 static void test_bucket_priority_edges(void)
 {
-    g_exec_count = 0;
-    g_gate_started = 0;
-    g_gate_release = 0;
+    g_exec_count             = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create single-worker pool");
@@ -768,13 +768,20 @@ static void test_bucket_priority_edges(void)
         uint8_t prio;
         int     slot;
     } seq[] = {
-        {255, 0}, {0, 1}, {5, 2}, {254, 3}, {1, 4}, {10, 5},
+        {255, 0},
+        {0, 1},
+        {5, 2},
+        {254, 3},
+        {1, 4},
+        {10, 5},
     };
     for (int i = 0; i < 6; i++) {
-        ASSERT(loom_pool_submit_priority(
-                   pool, record_exec,
-                   /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-                   (void *)(intptr_t)seq[i].slot, seq[i].prio, NULL) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit_priority(pool,
+                                         record_exec,
+                                         /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+                                         (void *)(intptr_t)seq[i].slot,
+                                         seq[i].prio,
+                                         NULL) == LOOMWORKS_OK,
                "submit priority edge");
     }
     g_gate_release = 1;
@@ -792,7 +799,7 @@ static void test_bucket_priority_edges(void)
 /* ---------- Test: FIFO preserved within a priority ---------- */
 static void test_bucket_fifo_within_priority(void)
 {
-    g_exec_count = 0;
+    g_exec_count             = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create single-worker pool");
@@ -802,9 +809,12 @@ static void test_bucket_fifo_within_priority(void)
         /* Priority 6 (lane path, p >= 5): bucket FIFO semantics live on the
          * lane side.  NORMAL (5) takes the lock-free ring fast path, which
          * after work-stealing drains LIFO through per-worker deques. */
-        ASSERT(loom_pool_submit_priority(pool, record_exec,
+        ASSERT(loom_pool_submit_priority(pool,
+                                         record_exec,
                                          /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-                                         (void *)(intptr_t)i, 6, NULL) == LOOMWORKS_OK,
+                                         (void *)(intptr_t)i,
+                                         6,
+                                         NULL) == LOOMWORKS_OK,
                "submit FIFO task");
     }
     loom_pool_shutdown(pool);
@@ -819,8 +829,8 @@ static void test_bucket_fifo_within_priority(void)
 /* ---------- Test: cancel_all across multiple buckets ---------- */
 static void test_bucket_cancel_all(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create single-worker pool");
@@ -834,8 +844,8 @@ static void test_bucket_cancel_all(void)
     uint8_t prios[] = {0, 5, 10, 200, 255};
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < 4; j++) {
-            ASSERT(loom_pool_submit_priority(
-                       pool, simple_task, NULL, prios[i], NULL) == LOOMWORKS_OK,
+            ASSERT(loom_pool_submit_priority(pool, simple_task, NULL, prios[i], NULL) ==
+                       LOOMWORKS_OK,
                    "submit cross-bucket cancel task");
         }
     }
@@ -919,13 +929,13 @@ static void test_ring_basic(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 2;
+    cfg.worker_count         = 2;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "basic create");
 
     atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
-    for (uint32_t i = 0; i < 1000; i++)
-        ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
-               "basic submit");
+    for (uint32_t i = 0; i < 1000; i++) {
+        ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK, "basic submit");
+    }
 
     loom_pool_shutdown(pool);
     ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 1000,
@@ -938,8 +948,9 @@ static void *ring_producer(void *arg)
 {
     loom_thread_pool_t *pool = (loom_thread_pool_t *)arg;
     for (uint32_t i = 0; i < 25000; i++) {
-        if (loom_pool_submit(pool, ring_inc_task, NULL, NULL) != LOOMWORKS_OK)
+        if (loom_pool_submit(pool, ring_inc_task, NULL, NULL) != LOOMWORKS_OK) {
             break; /* tolerate shutdown race in stress test only */
+        }
     }
     return NULL;
 }
@@ -948,16 +959,18 @@ static void test_ring_multithread_stress(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 8;
+    cfg.worker_count         = 8;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "stress create");
 
     pthread_t producers[4];
     atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         ASSERT(pthread_create(&producers[i], NULL, ring_producer, pool) == 0,
                "stress spawn producer");
-    for (int i = 0; i < 4; i++)
+    }
+    for (int i = 0; i < 4; i++) {
         pthread_join(producers[i], NULL);
+    }
 
     loom_pool_shutdown(pool);
     ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 100000,
@@ -1006,11 +1019,11 @@ static void ring_cancel_data_task(void *arg)
 }
 
 static _Atomic int g_ring_order_len;
-static int g_ring_order[512];
+static int         g_ring_order[512];
 
 static void ring_order_record(int prio)
 {
-    int idx = atomic_fetch_add_explicit(&g_ring_order_len, 1, memory_order_relaxed);
+    int idx           = atomic_fetch_add_explicit(&g_ring_order_len, 1, memory_order_relaxed);
     g_ring_order[idx] = prio;
 }
 
@@ -1038,8 +1051,8 @@ static void test_ring_bounded_full(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count   = 1;
-    cfg.queue_capacity = 5;
+    cfg.worker_count         = 1;
+    cfg.queue_capacity       = 5;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "bounded create");
 
     atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
@@ -1052,9 +1065,10 @@ static void test_ring_bounded_full(void)
     while (!atomic_load_explicit(&g_ring_gate2_started, memory_order_acquire)) {
     }
 
-    for (uint32_t i = 0; i < 5; i++)
+    for (uint32_t i = 0; i < 5; i++) {
         ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
                "bounded fill ring");
+    }
     ASSERT(loom_pool_pending_count(pool) == 5, "bounded: 5 pending");
 
     /* 6th submit must be rejected: queue is full */
@@ -1076,8 +1090,8 @@ static void test_ring_unbounded_spill(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 1;
-    cfg.queue_capacity = 0;
+    cfg.worker_count         = 1;
+    cfg.queue_capacity       = 0;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "spill create");
 
     atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
@@ -1089,9 +1103,10 @@ static void test_ring_unbounded_spill(void)
     while (!atomic_load_explicit(&g_ring_gate2_started, memory_order_acquire)) {
     }
 
-    for (uint32_t i = 0; i < 4096; i++)
+    for (uint32_t i = 0; i < 4096; i++) {
         ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
                "spill fill ring");
+    }
     /* ring is full now: overflow accepted via NORMAL lane */
     ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
            "spill: overflow accepted via lane");
@@ -1111,7 +1126,7 @@ static void test_ring_cancel_by_id(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 1;
+    cfg.worker_count         = 1;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-by-id create");
 
     atomic_store_explicit(&g_ring_cancel_done, 0, memory_order_relaxed);
@@ -1129,8 +1144,7 @@ static void test_ring_cancel_by_id(void)
     ASSERT(tid != 0, "cancel-by-id: task id assigned");
     ASSERT(loom_pool_pending_count(pool) == 1, "cancel-by-id: 1 pending");
 
-    ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_OK,
-           "cancel-by-id: first cancel ok");
+    ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_OK, "cancel-by-id: first cancel ok");
     ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_ERR_INVALID,
            "cancel-by-id: double cancel rejected");
 
@@ -1147,7 +1161,7 @@ static void test_ring_cancel_not_found(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 1;
+    cfg.worker_count         = 1;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-notfound create");
 
     /* ids start at 1 and increment; UINT64_MAX can never be assigned */
@@ -1163,7 +1177,7 @@ static void test_ring_tombstone_skip(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 1;
+    cfg.worker_count         = 1;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "tombstone create");
 
     atomic_store_explicit(&g_ring_cancel_done, 0, memory_order_relaxed);
@@ -1176,14 +1190,15 @@ static void test_ring_tombstone_skip(void)
     }
 
     uint64_t tids[64];
-    for (uint32_t i = 0; i < 64; i++)
+    for (uint32_t i = 0; i < 64; i++) {
         ASSERT(loom_pool_submit(pool, ring_cancel_inc_task, NULL, &tids[i]) == LOOMWORKS_OK,
                "tombstone submit victim");
+    }
     ASSERT(loom_pool_pending_count(pool) == 64, "tombstone: 64 pending");
 
-    for (uint32_t i = 0; i < 64; i++)
-        ASSERT(loom_pool_cancel_by_id(pool, tids[i]) == LOOMWORKS_OK,
-               "tombstone cancel victim");
+    for (uint32_t i = 0; i < 64; i++) {
+        ASSERT(loom_pool_cancel_by_id(pool, tids[i]) == LOOMWORKS_OK, "tombstone cancel victim");
+    }
     ASSERT(loom_pool_pending_count(pool) == 0, "tombstone: all cancelled");
 
     atomic_store_explicit(&g_ring_cancel_release, 1, memory_order_release);
@@ -1199,7 +1214,7 @@ static void test_ring_cancel_data(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 1;
+    cfg.worker_count         = 1;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-data create");
 
     int d1 = 1, d2 = 2;
@@ -1219,8 +1234,7 @@ static void test_ring_cancel_data(void)
 
     ASSERT(loom_pool_cancel(pool, &d1) == LOOMWORKS_OK, "cancel-data: d1 cancelled");
     ASSERT(loom_pool_cancel(pool, &d2) == LOOMWORKS_OK, "cancel-data: d2 cancelled");
-    ASSERT(loom_pool_cancel(pool, &d1) == LOOMWORKS_ERR_INVALID,
-           "cancel-data: re-cancel rejected");
+    ASSERT(loom_pool_cancel(pool, &d1) == LOOMWORKS_ERR_INVALID, "cancel-data: re-cancel rejected");
     ASSERT(loom_pool_pending_count(pool) == 0, "cancel-data: nothing pending");
 
     atomic_store_explicit(&g_ring_cancel_release, 1, memory_order_release);
@@ -1237,7 +1251,7 @@ static void test_ring_priority_preempt(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 1;
+    cfg.worker_count         = 1;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "preempt create");
 
     atomic_store_explicit(&g_ring_order_len, 0, memory_order_relaxed);
@@ -1250,18 +1264,21 @@ static void test_ring_priority_preempt(void)
     while (!atomic_load_explicit(&g_ring_cancel_done, memory_order_acquire)) {
     }
 
-    for (uint32_t i = 0; i < 50; i++)
-        ASSERT(loom_pool_submit_priority(pool, ring_normal_rec, NULL,
-                                         LOOMWORKS_PRIORITY_NORMAL, NULL) == LOOMWORKS_OK,
+    for (uint32_t i = 0; i < 50; i++) {
+        ASSERT(loom_pool_submit_priority(
+                   pool, ring_normal_rec, NULL, LOOMWORKS_PRIORITY_NORMAL, NULL) == LOOMWORKS_OK,
                "preempt submit normal");
-    for (uint32_t i = 0; i < 3; i++)
-        ASSERT(loom_pool_submit_priority(pool, ring_rt_rec, NULL,
-                                         LOOMWORKS_PRIORITY_REALTIME, NULL) == LOOMWORKS_OK,
+    }
+    for (uint32_t i = 0; i < 3; i++) {
+        ASSERT(loom_pool_submit_priority(
+                   pool, ring_rt_rec, NULL, LOOMWORKS_PRIORITY_REALTIME, NULL) == LOOMWORKS_OK,
                "preempt submit rt");
-    for (uint32_t i = 0; i < 3; i++)
-        ASSERT(loom_pool_submit_priority(pool, ring_high_rec, NULL,
-                                         LOOMWORKS_PRIORITY_HIGH, NULL) == LOOMWORKS_OK,
+    }
+    for (uint32_t i = 0; i < 3; i++) {
+        ASSERT(loom_pool_submit_priority(
+                   pool, ring_high_rec, NULL, LOOMWORKS_PRIORITY_HIGH, NULL) == LOOMWORKS_OK,
                "preempt submit high");
+    }
     ASSERT(loom_pool_pending_count(pool) == 56, "preempt: 56 pending");
 
     atomic_store_explicit(&g_ring_cancel_release, 1, memory_order_release);
@@ -1271,9 +1288,15 @@ static void test_ring_priority_preempt(void)
     int len = atomic_load_explicit(&g_ring_order_len, memory_order_relaxed);
     ASSERT(len == 56, "preempt: all 56 ran and recorded");
     int ok = 1;
-    for (int i = 0; i < 3; i++) ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_REALTIME;
-    for (int i = 3; i < 6; i++) ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_HIGH;
-    for (int i = 6; i < 56; i++) ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_NORMAL;
+    for (int i = 0; i < 3; i++) {
+        ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_REALTIME;
+    }
+    for (int i = 3; i < 6; i++) {
+        ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_HIGH;
+    }
+    for (int i = 6; i < 56; i++) {
+        ok = ok && g_ring_order[i] == LOOMWORKS_PRIORITY_NORMAL;
+    }
     ASSERT(ok, "preempt: RT(0)x3, HIGH(1)x3, then NORMAL(5)x50");
     ASSERT(loom_pool_pending_count(pool) == 0, "preempt: nothing pending");
     loom_pool_destroy(&pool);
@@ -1284,13 +1307,14 @@ static void test_ring_shutdown_drains(void)
 {
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {0};
-    cfg.worker_count = 2;
+    cfg.worker_count         = 2;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "shutdown-drain create");
 
     atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
-    for (uint32_t i = 0; i < 500; i++)
+    for (uint32_t i = 0; i < 500; i++) {
         ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK,
                "shutdown-drain submit");
+    }
 
     loom_pool_shutdown(pool); /* must drain the ring before returning */
     ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 500,
@@ -1402,7 +1426,7 @@ static void test_metrics_latency(void)
 
 static void test_pool_health(void)
 {
-    loom_pool_config_t cfg  = {.worker_count = 4, .queue_capacity = 0};
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
@@ -2204,8 +2228,7 @@ static void *race_worker(void *arg)
     race_thread_arg_t *ra = (race_thread_arg_t *)arg;
     for (int i = 0; i < ra->iterations; i++) {
         ra->shared_data[i] = i;
-        loom_result_t rc = loom_pool_submit(ra->pool, increment_task,
-                                            &ra->shared_data[i], NULL);
+        loom_result_t rc   = loom_pool_submit(ra->pool, increment_task, &ra->shared_data[i], NULL);
         (void)rc;
         /* Note: we do NOT cancel here to avoid use-after-free races.
          * The test verifies that concurrent submit from multiple threads
@@ -2226,10 +2249,10 @@ static void test_concurrent_cancel_submit_race(void)
 
     race_thread_arg_t *ras[4];
     for (int t = 0; t < 4; t++) {
-        ras[t] = (race_thread_arg_t *)malloc(sizeof(*ras[t]));
-        ras[t]->pool         = pool;
-        ras[t]->iterations   = iterations;
-        ras[t]->shared_data  = (int *)malloc(sizeof(int) * iterations);
+        ras[t]              = (race_thread_arg_t *)malloc(sizeof(*ras[t]));
+        ras[t]->pool        = pool;
+        ras[t]->iterations  = iterations;
+        ras[t]->shared_data = (int *)malloc(sizeof(int) * iterations);
         ASSERT(ras[t]->shared_data != NULL, "allocate shared_data");
         ASSERT(pthread_create(&threads[t], NULL, race_worker, ras[t]) == 0, "create race thread");
     }
@@ -2465,7 +2488,9 @@ static void test_pipeline_pending_count(void)
 
     loom_pc_shutdown(pc);
     while (loom_pc_take(pc, &taken) != LOOMWORKS_ERR_SHUTDOWN) {
-        if (taken) free(taken);
+        if (taken) {
+            free(taken);
+        }
     }
     ASSERT(loom_pc_pending_count(pc) == 0, "pending count is 0 after drain");
     loom_pc_destroy(&pc);
@@ -2525,8 +2550,8 @@ static void *pipeline_stress_prod(void *arg)
 
 /* Helper for stress test: consumer function */
 typedef struct {
-    loom_pc_t *pc;
-    int       *total;
+    loom_pc_t       *pc;
+    int             *total;
     pthread_mutex_t *lock;
 } stress_cons_arg_t;
 
@@ -2553,10 +2578,12 @@ static void test_pipeline_stress(void)
     const int       PROD  = 4;
     const int       CONS  = 4;
 
-    stress_prod_arg_t  *pargs  = (stress_prod_arg_t *)malloc(sizeof(stress_prod_arg_t)  * (uint32_t)PROD);
-    stress_cons_arg_t  *cargs  = (stress_cons_arg_t *)malloc(sizeof(stress_cons_arg_t)  * (uint32_t)CONS);
-    pthread_t          *producers = (pthread_t *)malloc(sizeof(pthread_t) * (uint32_t)PROD);
-    pthread_t          *consumers = (pthread_t *)malloc(sizeof(pthread_t) * (uint32_t)CONS);
+    stress_prod_arg_t *pargs =
+        (stress_prod_arg_t *)malloc(sizeof(stress_prod_arg_t) * (uint32_t)PROD);
+    stress_cons_arg_t *cargs =
+        (stress_cons_arg_t *)malloc(sizeof(stress_cons_arg_t) * (uint32_t)CONS);
+    pthread_t *producers = (pthread_t *)malloc(sizeof(pthread_t) * (uint32_t)PROD);
+    pthread_t *consumers = (pthread_t *)malloc(sizeof(pthread_t) * (uint32_t)CONS);
     ASSERT(pargs && cargs && producers && consumers, "stress alloc");
 
     for (int i = 0; i < PROD; i++) {
@@ -2569,9 +2596,9 @@ static void test_pipeline_stress(void)
     }
 
     for (int i = 0; i < CONS; i++) {
-        cargs[i].pc     = pc;
-        cargs[i].total  = &total;
-        cargs[i].lock   = &lock;
+        cargs[i].pc    = pc;
+        cargs[i].total = &total;
+        cargs[i].lock  = &lock;
         pthread_create(&consumers[i], NULL, pipeline_stress_cons, &cargs[i]);
     }
 
@@ -2600,8 +2627,8 @@ static void test_pipeline_stress(void)
  * ================================================================ */
 static void test_deque_basic_lifo(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "deque test: pool create");
@@ -2641,8 +2668,7 @@ static void test_deque_basic_lifo(void)
     ASSERT(deque_steal(pool, d) == NULL, "deque: steal empty returns NULL");
 
     /* Capacity: 256 pushes OK, 257th rejected */
-    loom_task_t *cap = (loom_task_t *)calloc(LOOMWORKS_DEQUE_CAPACITY + 1,
-                                             sizeof(loom_task_t));
+    loom_task_t *cap = (loom_task_t *)calloc(LOOMWORKS_DEQUE_CAPACITY + 1, sizeof(loom_task_t));
     ASSERT(cap != NULL, "deque: cap array alloc");
     for (int i = 0; i < LOOMWORKS_DEQUE_CAPACITY; i++) {
         ASSERT(deque_push(pool, d, &cap[i]), "deque: push to capacity");
@@ -2675,9 +2701,9 @@ static void cancel_in_deque_task(void *arg)
 
 static void test_cancel_in_deque(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
-    g_cancel_hit   = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
+    g_cancel_hit             = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-in-deque: pool create");
@@ -2698,9 +2724,11 @@ static void test_cancel_in_deque(void)
      * its deque would leave the LAST-submitted id resident there. */
     uint64_t last_id = 0;
     for (int i = 0; i < LOOMWORKS_DEQUE_CAPACITY + 64; i++) {
-        ASSERT(loom_pool_submit(pool, cancel_in_deque_task,
+        ASSERT(loom_pool_submit(pool,
+                                cancel_in_deque_task,
                                 /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-                                (void *)(intptr_t)(i + 1), &last_id) == LOOMWORKS_OK,
+                                (void *)(intptr_t)(i + 1),
+                                &last_id) == LOOMWORKS_OK,
                "cancel-in-deque: submit cancellable task");
     }
     g_cancel_target_id = last_id;
@@ -2720,8 +2748,8 @@ static void test_cancel_in_deque(void)
 /* ---------- Test: bulk dequeue from the Vyukov ring ---------- */
 static void test_deque_bulk_dequeue(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "bulk-dequeue: pool create");
@@ -2740,13 +2768,13 @@ static void test_deque_bulk_dequeue(void)
         ASSERT(loom_pool_submit(pool, simple_task, &counter, &ids[i]) == LOOMWORKS_OK,
                "bulk-dequeue: submit task");
     }
-    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed)
-               == (size_t)LOOMWORKS_BULK_DEQUEUE,
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) ==
+               (size_t)LOOMWORKS_BULK_DEQUEUE,
            "bulk-dequeue: all N tasks resident in ring");
 
     /* Claim all N with a single CAS; order must be submission order. */
     loom_task_t *out[LOOMWORKS_BULK_DEQUEUE] = {0};
-    size_t       n                           = ring_bulk_try_dequeue(pool, out, LOOMWORKS_BULK_DEQUEUE);
+    size_t       n = ring_bulk_try_dequeue(pool, out, LOOMWORKS_BULK_DEQUEUE);
     ASSERT(n == (size_t)LOOMWORKS_BULK_DEQUEUE, "bulk-dequeue: claimed all N");
     ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,
            "bulk-dequeue: ring drained");
@@ -2772,9 +2800,9 @@ static void test_deque_bulk_dequeue(void)
 /* ---------- Test: worker deque drains LIFO (work-stealing order) ---------- */
 static void test_deque_lifo_drain(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
-    g_exec_count   = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
+    g_exec_count             = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "deque-lifo: pool create");
@@ -2789,9 +2817,11 @@ static void test_deque_lifo_drain(void)
     /* NORMAL tasks take the ring fast path; after the gate they are
      * bulk-dequeued into the worker's deque and run LIFO (newest first). */
     for (int i = 1; i <= 3; i++) {
-        ASSERT(loom_pool_submit(pool, record_exec,
+        ASSERT(loom_pool_submit(pool,
+                                record_exec,
                                 /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-                                (void *)(intptr_t)i, NULL) == LOOMWORKS_OK,
+                                (void *)(intptr_t)i,
+                                NULL) == LOOMWORKS_OK,
                "deque-lifo: submit task");
     }
 
@@ -2807,9 +2837,9 @@ static void test_deque_lifo_drain(void)
 /* ---------- Test: REALTIME preempts deque-resident NORMAL tasks ---------- */
 static void test_priority_preempts_deque(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
-    g_exec_count   = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
+    g_exec_count             = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "preempt-deque: pool create");
@@ -2821,14 +2851,17 @@ static void test_priority_preempts_deque(void)
     while (!g_gate_started) {
     }
     for (int i = 1; i <= 3; i++) {
-        ASSERT(loom_pool_submit(pool, record_exec,
+        ASSERT(loom_pool_submit(pool,
+                                record_exec,
                                 /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-                                (void *)(intptr_t)i, NULL) == LOOMWORKS_OK,
+                                (void *)(intptr_t)i,
+                                NULL) == LOOMWORKS_OK,
                "preempt-deque: submit NORMAL task");
     }
     /* REALTIME task must run before the deque-resident NORMAL tasks. */
-    ASSERT(loom_pool_submit_priority(pool, record_exec, (void *)(intptr_t)0,
-                                     LOOMWORKS_PRIORITY_REALTIME, NULL) == LOOMWORKS_OK,
+    ASSERT(loom_pool_submit_priority(
+               pool, record_exec, (void *)(intptr_t)0, LOOMWORKS_PRIORITY_REALTIME, NULL) ==
+               LOOMWORKS_OK,
            "preempt-deque: submit REALTIME task");
 
     g_gate_release = 1;
@@ -2842,8 +2875,8 @@ static void test_priority_preempts_deque(void)
 /* ---------- Test: shutdown drains worker deques ---------- */
 static void test_shutdown_drains_deque(void)
 {
-    g_gate_started = 0;
-    g_gate_release = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "shutdown-drain: pool create");
@@ -2889,9 +2922,9 @@ static void test_shutdown_drains_deque(void)
 
 static void test_resize_down_spills_deque(void)
 {
-    g_gate_parked  = 0;
-    g_gate_started = 0;
-    g_gate_release = 0;
+    g_gate_parked            = 0;
+    g_gate_started           = 0;
+    g_gate_release           = 0;
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "resize-spill: pool create");
@@ -2945,11 +2978,11 @@ static void test_resize_down_spills_deque(void)
  * ------------------------------------------------------------------ */
 static void test_steal_trigger(void)
 {
-    g_gate_started     = 0;
-    g_gate_release     = 0;
-    g_gate_parked      = 0;
-    g_gate_release2    = 0;
-    g_gate_parked2     = 0;
+    g_gate_started      = 0;
+    g_gate_release      = 0;
+    g_gate_parked       = 0;
+    g_gate_release2     = 0;
+    g_gate_parked2      = 0;
     g_steal_owner_count = 0;
 
     loom_thread_pool_t *pool = NULL;
@@ -2959,10 +2992,8 @@ static void test_steal_trigger(void)
 
     /* Park BOTH workers on gate tasks: the pool is now frozen, so the
      * ring below fills completely and nothing drains. */
-    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
-           "steal: park worker 1");
-    ASSERT(loom_pool_submit(pool, gate_task2, NULL, NULL) == LOOMWORKS_OK,
-           "steal: park worker 2");
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "steal: park worker 1");
+    ASSERT(loom_pool_submit(pool, gate_task2, NULL, NULL) == LOOMWORKS_OK, "steal: park worker 2");
     uint64_t spins = 0;
     while (g_gate_parked < 1 || g_gate_parked2 < 1) {
         if (++spins > 40000000ULL) {
@@ -2976,8 +3007,7 @@ static void test_steal_trigger(void)
         ASSERT(loom_pool_submit(pool, record_owner_task, NULL, NULL) == LOOMWORKS_OK,
                "steal: submit owner-record task");
     }
-    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) ==
-               (size_t)STEAL_MAX_TASKS,
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == (size_t)STEAL_MAX_TASKS,
            "steal: all 512 tasks resident in ring");
 
     /* Release worker 2 only: it drains the ring into its deque and runs
@@ -3011,8 +3041,7 @@ static void test_steal_trigger(void)
     g_gate_release = 1;
     loom_pool_shutdown(pool);
 
-    ASSERT(g_steal_owner_count == STEAL_MAX_TASKS,
-           "steal: all 512 owner tasks ran exactly once");
+    ASSERT(g_steal_owner_count == STEAL_MAX_TASKS, "steal: all 512 owner tasks ran exactly once");
     ASSERT(count_distinct_owner_threads() >= 2,
            "steal: parked worker stole from free worker (>= 2 threads ran)");
     ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
@@ -3036,7 +3065,7 @@ static void test_steal_fifo_order(void)
     while (!g_gate_started) {
     }
 
-    loom_work_deque_t *d = &pool->deques[0];
+    loom_work_deque_t *d    = &pool->deques[0];
     loom_task_t        t[6] = {{0}};
     for (int i = 0; i < 6; i++) {
         ASSERT(deque_push(pool, d, &t[i]), "steal-fifo: setup push");
@@ -3066,7 +3095,7 @@ static void test_steal_stress(void)
     const int total       = n_producers * per_prod;
 
     for (int rep = 0; rep < 3; rep++) {
-        g_steal_stress_counter = 0;
+        g_steal_stress_counter   = 0;
         loom_thread_pool_t *pool = NULL;
         loom_pool_config_t  cfg  = {.worker_count = 8, .queue_capacity = 0};
         ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "steal-stress: pool create");
@@ -3084,8 +3113,7 @@ static void test_steal_stress(void)
         }
         loom_pool_shutdown(pool);
 
-        ASSERT(g_steal_stress_counter == total,
-               "steal-stress: all 20000 tasks ran exactly once");
+        ASSERT(g_steal_stress_counter == total, "steal-stress: all 20000 tasks ran exactly once");
         ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
                "steal-stress: deques drained");
         ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,

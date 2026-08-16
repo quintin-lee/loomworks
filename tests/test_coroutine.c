@@ -325,8 +325,7 @@ static void test_stack_pool_reuse(void)
         ASSERT(loom_coro_stack_info(coro, &start, &end) == LOOMWORKS_CORO_OK,
                "pool reuse stack info");
         if (i > 0) {
-            ASSERT(start == first_start && end == first_end,
-                   "stack mapping recycled from pool");
+            ASSERT(start == first_start && end == first_end, "stack mapping recycled from pool");
             ASSERT(*(volatile char *)first_start == (char)0x5A,
                    "pool retains stack contents (no fresh mmap)");
         } else {
@@ -346,14 +345,12 @@ static void test_stack_pool_size_isolation(void)
            "size isolation create 64K");
     void *s64 = NULL;
     void *e64 = NULL;
-    ASSERT(loom_coro_stack_info(coro, &s64, &e64) == LOOMWORKS_CORO_OK,
-           "size isolation info 64K");
+    ASSERT(loom_coro_stack_info(coro, &s64, &e64) == LOOMWORKS_CORO_OK, "size isolation info 64K");
     *(volatile char *)s64 = (char)0x5A;
     loom_coro_destroy(&coro);
 
     /* A 256 KiB request must NOT receive the pooled 64 KiB mapping. */
-    ASSERT(loom_coro_create(simple_coro_fn, NULL, (size_t)256 * 1024, &coro) ==
-               LOOMWORKS_CORO_OK,
+    ASSERT(loom_coro_create(simple_coro_fn, NULL, (size_t)256 * 1024, &coro) == LOOMWORKS_CORO_OK,
            "size isolation create 256K");
     void *s256 = NULL;
     void *e256 = NULL;
@@ -385,7 +382,7 @@ static void guard_write_fn(void *arg)
 {
     guard_arg_t   *a = (guard_arg_t *)arg;
     volatile char *p = (volatile char *)a->target;
-    *p = (char)0xAA; /* PROT_NONE guard page -> SIGSEGV -> LOOMWORKS_CORO_ERR_GUARD */
+    *p               = (char)0xAA; /* PROT_NONE guard page -> SIGSEGV -> LOOMWORKS_CORO_ERR_GUARD */
 }
 
 static void test_stack_pool_guard_on_reuse(void)
@@ -401,8 +398,7 @@ static void test_stack_pool_guard_on_reuse(void)
            "guard reuse create 1");
     void *start = NULL;
     void *end   = NULL;
-    ASSERT(loom_coro_stack_info(coro, &start, &end) == LOOMWORKS_CORO_OK,
-           "guard reuse info 1");
+    ASSERT(loom_coro_stack_info(coro, &start, &end) == LOOMWORKS_CORO_OK, "guard reuse info 1");
     loom_coro_destroy(&coro);
 
     guard_arg_t arg = {0};
@@ -410,14 +406,13 @@ static void test_stack_pool_guard_on_reuse(void)
            "guard reuse create 2");
     void *start2 = NULL;
     void *end2   = NULL;
-    ASSERT(loom_coro_stack_info(coro, &start2, &end2) == LOOMWORKS_CORO_OK,
-           "guard reuse info 2");
+    ASSERT(loom_coro_stack_info(coro, &start2, &end2) == LOOMWORKS_CORO_OK, "guard reuse info 2");
     ASSERT(start2 == start && end2 == end, "mapping recycled from pool");
 
     /* Layout: [GUARD][GUARD][usable]; stack_start = base + 2*ps, so
      * start2 - 2*ps == mmap base (first PROT_NONE page). The handler
      * catches fp == base and longjmps -> resume returns ERR_GUARD. */
-    arg.target = (char *)start2 - (long)(LOOMWORKS_CORO_GUARD_PAGES_EACH * 2) * (long)ps;
+    arg.target            = (char *)start2 - (long)(LOOMWORKS_CORO_GUARD_PAGES_EACH * 2) * (long)ps;
     loom_coro_result_t rc = loom_coro_resume(coro);
     ASSERT(rc == LOOMWORKS_CORO_ERR_GUARD, "guard violation trapped on pooled stack");
     ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_ERROR, "state ERROR after guard fault");
@@ -490,7 +485,7 @@ static void test_small_stack(void)
 
 /* ---------- Test: cross-thread resume/terminate rejected ---------- */
 typedef struct {
-    loom_coroutine_t *coro;
+    loom_coroutine_t  *coro;
     loom_coro_result_t rc;
 } cross_thread_arg_t;
 
@@ -516,7 +511,7 @@ static void test_cross_thread_guard(void)
     ASSERT(rc == LOOMWORKS_CORO_OK, "create for cross-thread guard");
 
     cross_thread_arg_t arg = {coro, LOOMWORKS_CORO_OK};
-    pthread_t           t;
+    pthread_t          t;
     ASSERT(pthread_create(&t, NULL, foreign_resume_fn, &arg) == 0, "spawn foreign resume");
     pthread_join(t, NULL);
     ASSERT(arg.rc == LOOMWORKS_CORO_ERR_INVALID, "foreign resume rejected");
@@ -529,7 +524,7 @@ static void test_cross_thread_guard(void)
     ASSERT(counter == 1, "owner thread ran entry fn");
     loom_coro_destroy(&coro);
 
-    coro = NULL;
+    coro              = NULL;
     int yield_counter = 0;
     rc                = loom_coro_create(yield_coro_fn, &yield_counter, 0, &coro);
     ASSERT(rc == LOOMWORKS_CORO_OK, "create yield coro for cross-thread terminate");
@@ -541,7 +536,8 @@ static void test_cross_thread_guard(void)
     ASSERT(pthread_create(&t, NULL, foreign_terminate_fn, &arg) == 0, "spawn foreign terminate");
     pthread_join(t, NULL);
     ASSERT(arg.rc == LOOMWORKS_CORO_ERR_INVALID, "foreign terminate rejected");
-    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "state untouched by foreign terminate");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED,
+           "state untouched by foreign terminate");
 
     /* Owner can still resume the suspended coroutine to completion. */
     ASSERT(loom_coro_resume(coro) == LOOMWORKS_CORO_OK, "owner resume after foreign reject");

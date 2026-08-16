@@ -4,8 +4,8 @@
 #include "loomworks/thread_pool.h"
 #include <pthread.h>
 #include <semaphore.h>
-#include <stdbool.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 
 /* One cache line on modern x86-64.  Hot fields (mutex, condvars) are
  * aligned to avoid false sharing between worker threads. */
@@ -22,9 +22,9 @@
 #define LOOMWORKS_RING_DEFAULT_SLOTS 4096u
 
 /* Work-stealing scheduler tuning. */
-#define LOOMWORKS_BULK_DEQUEUE 8    /* ring -> local deque batch size */
+#define LOOMWORKS_BULK_DEQUEUE 8     /* ring -> local deque batch size */
 #define LOOMWORKS_DEQUE_CAPACITY 256 /* per-worker Chase-Lev deque slots (pow2) */
-#define LOOMWORKS_STEAL_TRIES 3     /* random victims tried before blocking */
+#define LOOMWORKS_STEAL_TRIES 3      /* random victims tried before blocking */
 
 /* ================================================================
  *  Task node — element of a per-priority FIFO bucket in the queue.
@@ -50,8 +50,8 @@ typedef struct loom_task {
  * producer pos"; seq == pos+1 is "full"; seq == pos+ring_size is "released
  * by the consumer at pos" (free for the producer at pos+ring_size). */
 typedef struct ring_cell {
-    _Atomic uint64_t    seq;       /* position-relative sequence (see plan) */
-    _Atomic(loom_task_t *) task;   /* stable while in the ring */
+    _Atomic uint64_t       seq;  /* position-relative sequence (see plan) */
+    _Atomic(loom_task_t *) task; /* stable while in the ring */
 } ring_cell_t;
 
 /* Cancel index slot — open addressing, linear probe, hash = id & (cap-1).
@@ -68,10 +68,10 @@ typedef struct cancel_slot {
 typedef struct loom_work_deque {
     _Alignas(64) _Atomic size_t bottom; /* owner-private write index */
     _Alignas(64) _Atomic size_t top;    /* shared read index (CAS by thieves) */
-    loom_task_t           **slots;      /* ring buffer, capacity slots */
-    size_t                  capacity;  /* power of two */
-    size_t                  mask;      /* capacity - 1 */
-    _Atomic size_t          len;       /* tasks currently resident */
+    loom_task_t  **slots;               /* ring buffer, capacity slots */
+    size_t         capacity;            /* power of two */
+    size_t         mask;                /* capacity - 1 */
+    _Atomic size_t len;                 /* tasks currently resident */
 } loom_work_deque_t;
 
 /* ================================================================
@@ -129,22 +129,22 @@ struct loom_thread_pool {
     size_t   stack_size;     /**< Stack size per worker (bytes). */
     uint32_t queue_capacity; /**< Max pending tasks (0 = unbounded). */
 
-    pthread_mutex_t lock       LOOMWORKS_CACHELINE_ALIGN; /**< Guard lane queue + flags. */
-    pthread_cond_t  drain_cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when draining done. */
-    sem_t           work_sem   LOOMWORKS_CACHELINE_ALIGN; /**< Task-available wakeup (lock-free). */
-    pthread_cond_t  space_cond LOOMWORKS_CACHELINE_ALIGN; /**< Space-available (blocking submit). */
-    _Atomic bool               shutdown; /**< true once shutdown() has been called. */
-    bool                       draining; /**< true while workers are finishing tasks. */
-    bool                       joined;   /**< true once all threads have been joined. */
+    pthread_mutex_t lock      LOOMWORKS_CACHELINE_ALIGN; /**< Guard lane queue + flags. */
+    pthread_cond_t drain_cond LOOMWORKS_CACHELINE_ALIGN; /**< Signal when draining done. */
+    sem_t work_sem            LOOMWORKS_CACHELINE_ALIGN; /**< Task-available wakeup (lock-free). */
+    pthread_cond_t space_cond LOOMWORKS_CACHELINE_ALIGN; /**< Space-available (blocking submit). */
+    _Atomic bool              shutdown; /**< true once shutdown() has been called. */
+    bool                      draining; /**< true while workers are finishing tasks. */
+    bool                      joined;   /**< true once all threads have been joined. */
 
     /* Per-priority FIFO buckets: bucket[b] holds tasks with priority == b.
      * Numerically smaller priority runs first.  Enqueue appends to the
      * bucket tail (O(1)); dequeue pops the lowest non-empty bucket via the
      * occupancy bitmap (O(1), ~4 loads + ctz). */
-    loom_task_t *buckets_head[256]; /**< Per-priority bucket heads. */
-    loom_task_t *buckets_tail[256]; /**< Per-priority bucket tails. */
-    _Atomic uint64_t nonempty_bits[4]; /**< Bit b set <=> buckets_head[b] != NULL. */
-    _Atomic uint32_t queue_len;        /**< Current pending tasks (ring + lanes). */
+    loom_task_t     *buckets_head[256]; /**< Per-priority bucket heads. */
+    loom_task_t     *buckets_tail[256]; /**< Per-priority bucket tails. */
+    _Atomic uint64_t nonempty_bits[4];  /**< Bit b set <=> buckets_head[b] != NULL. */
+    _Atomic uint32_t queue_len;         /**< Current pending tasks (ring + lanes). */
 
     /* Lock-free Vyukov ring (NORMAL fast path). */
     _Atomic uint64_t ring_head;  /**< Consumer position (monotonic). */
@@ -159,18 +159,18 @@ struct loom_thread_pool {
     uint64_t       cancel_cap;   /**< Power of two >= ring_size + total deque slots. */
 
     /* Lock-free node pool (tagged bounded stack; the sole task-node allocator). */
-    loom_task_t      *node_pool;     /**< Preallocated node array (never freed individually). */
-    uint32_t          node_pool_cap; /**< == LOOMWORKS_NODE_POOL_CAP. */
-    _Atomic uint64_t  node_stack;    /**< low32: top, high32: ABA tag. */
+    loom_task_t     *node_pool;     /**< Preallocated node array (never freed individually). */
+    uint32_t         node_pool_cap; /**< == LOOMWORKS_NODE_POOL_CAP. */
+    _Atomic uint64_t node_stack;    /**< low32: top, high32: ABA tag. */
 
     _Atomic uint32_t active_workers; /**< Workers currently executing a task. */
 
     /* Work-stealing: per-worker Chase-Lev deques + aggregate resident count. */
-    loom_work_deque_t *deques;         /**< Array sized max_worker_count. NULL = lane-only mode. */
-    _Atomic size_t     deque_total;    /**< Total tasks resident in all deques. */
+    loom_work_deque_t *deques;      /**< Array sized max_worker_count. NULL = lane-only mode. */
+    _Atomic size_t     deque_total; /**< Total tasks resident in all deques. */
 
-    pthread_t       *threads;          /**< pthread_t array (one per worker). */
-    _Atomic bool    *thread_alive;     /**< Parallel to threads[]: true while slot has a live worker. */
+    pthread_t       *threads;      /**< pthread_t array (one per worker). */
+    _Atomic bool    *thread_alive; /**< Parallel to threads[]: true while slot has a live worker. */
     uint32_t         max_worker_count; /**< Max capacity of threads array. */
     _Atomic uint64_t next_task_id;     /**< Monotonically increasing task ID counter. */
     void            *metrics;          /**< Optional metrics collector (loom_metrics_t*). */
@@ -221,7 +221,7 @@ loom_task_t *deque_steal(loom_thread_pool_t *pool, loom_work_deque_t *d);
  * @return The number of tasks claimed (0 if empty or CAS lost).  Caller
  *         owns ring_count/queue_len accounting.
  */
-void task_destroy(loom_thread_pool_t *pool, loom_task_t *t);
+void   task_destroy(loom_thread_pool_t *pool, loom_task_t *t);
 size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */
