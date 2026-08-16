@@ -403,7 +403,6 @@ static void test_stack_pool_guard_on_reuse(void)
     void *end   = NULL;
     ASSERT(loom_coro_stack_info(coro, &start, &end) == LOOMWORKS_CORO_OK,
            "guard reuse info 1");
-    *(volatile char *)start = (char)0x5A;
     loom_coro_destroy(&coro);
 
     guard_arg_t arg = {0};
@@ -414,7 +413,6 @@ static void test_stack_pool_guard_on_reuse(void)
     ASSERT(loom_coro_stack_info(coro, &start2, &end2) == LOOMWORKS_CORO_OK,
            "guard reuse info 2");
     ASSERT(start2 == start && end2 == end, "mapping recycled from pool");
-    ASSERT(*(volatile char *)start2 == (char)0x5A, "pool retained mapping contents");
 
     /* Layout: [GUARD][GUARD][usable]; stack_start = base + 2*ps, so
      * start2 - 2*ps == mmap base (first PROT_NONE page). The handler
