@@ -121,7 +121,77 @@ loom_coro_ctx_make(loom_coro_ctx_t *ctx, void (*fn)(void *), void *arg)
     ctx->pc = (void *)ctx_trampoline;
 }
 
-#else /* !LOOMWORKS_CTX_ASM_X86_64 - ucontext fallback (aarch64 asm lands in Task 2) */
+#elif defined(LOOMWORKS_CTX_ASM_AARCH64)
+
+/* Layout must match src/ctx_aarch64.S exactly. */
+typedef struct loom_coro_ctx {
+    void *pc;                   /* 0   resume address                 */
+    uint64_t sp;                /* 8   stack pointer                  */
+    uint64_t regs[12];          /* 16  x19..x29, x30 (lr)             */
+    uint32_t fpcr;              /* 112 FP control register            */
+    uint32_t fpsr;              /* 116 FP status register             */
+    void (*entry_fn)(void *);   /* 120 fn to run on first resume      */
+    void *entry_arg;            /* 128 fn argument                    */
+    struct loom_coro_ctx *link; /* 136 context to switch to on return */
+} loom_coro_ctx_t;
+
+_Static_assert(offsetof(struct loom_coro_ctx, pc) == 0,
+               "ctx layout drift: pc (see ctx_aarch64.S)");
+_Static_assert(offsetof(struct loom_coro_ctx, sp) == 8,
+               "ctx layout drift: sp (see ctx_aarch64.S)");
+_Static_assert(offsetof(struct loom_coro_ctx, regs) == 16,
+               "ctx layout drift: regs (see ctx_aarch64.S)");
+_Static_assert(offsetof(struct loom_coro_ctx, fpcr) == 112,
+               "ctx layout drift: fpcr (see ctx_aarch64.S)");
+_Static_assert(offsetof(struct loom_coro_ctx, fpsr) == 116,
+               "ctx layout drift: fpsr (see ctx_aarch64.S)");
+_Static_assert(offsetof(struct loom_coro_ctx, entry_fn) == 120,
+               "ctx layout drift: entry_fn (see ctx_aarch64.S)");
+_Static_assert(offsetof(struct loom_coro_ctx, entry_arg) == 128,
+               "ctx layout drift: entry_arg (see ctx_aarch64.S)");
+_Static_assert(offsetof(struct loom_coro_ctx, link) == 136,
+               "ctx layout drift: link (see ctx_aarch64.S)");
+_Static_assert(sizeof(struct loom_coro_ctx) == 144,
+               "ctx layout drift: sizeof (see ctx_aarch64.S)");
+
+int loom_coro_ctx_get(loom_coro_ctx_t *ctx);
+int loom_coro_ctx_swap(loom_coro_ctx_t *from, loom_coro_ctx_t *to);
+int loom_coro_ctx_swap_to_link(loom_coro_ctx_t *ctx);
+extern char ctx_trampoline[];
+
+static inline void
+loom_coro_ctx_set_stack(loom_coro_ctx_t *ctx, void *sp, size_t size)
+{
+    ctx->sp = (uint64_t)((char *)sp + size); /* top, exclusive */
+}
+
+static inline void
+loom_coro_ctx_set_link(loom_coro_ctx_t *ctx, loom_coro_ctx_t *target)
+{
+    ctx->link = target;
+}
+
+static inline int
+loom_coro_ctx_has_link(const loom_coro_ctx_t *ctx)
+{
+    return ctx->link != NULL;
+}
+
+static inline void
+loom_coro_ctx_make(loom_coro_ctx_t *ctx, void (*fn)(void *), void *arg)
+{
+    ctx->entry_fn = fn;
+    ctx->entry_arg = arg;
+    /* Trampoline is entered with sp % 16 == 8 so that `blr entry_fn`
+     * leaves entry_fn with sp % 16 == 0 (AAPCS64). */
+    ctx->sp = (ctx->sp & ~(uint64_t)0xF) - 8u;
+    ctx->regs[0] = (uint64_t)ctx;   /* ctx is passed to the trampoline */
+    ctx->fpcr = 0u;
+    ctx->fpsr = 0u;
+    ctx->pc = (void *)ctx_trampoline;
+}
+
+#else /* ucontext fallback */
 
 #include <ucontext.h>
 
@@ -171,6 +241,6 @@ loom_coro_ctx_swap_to_link(loom_coro_ctx_t *ctx)
     return swapcontext(ctx, ctx->uc_link);
 }
 
-#endif /* LOOMWORKS_CTX_ASM_X86_64 */
+#endif /* LOOMWORKS_CTX_ASM_X86_64 || LOOMWORKS_CTX_ASM_AARCH64 */
 
 #endif /* LOOMWORKS_CORO_CTX_H */

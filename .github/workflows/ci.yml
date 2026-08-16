@@ -74,3 +74,18 @@ jobs:
           valgrind --leak-check=full --error-exitcode=1
           --suppressions=${{ github.workspace }}/.github/valgrind.supp
           ./test_integration
+
+  aarch64-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user cmake
+      - name: Configure (aarch64 cross)
+        run: cmake -S . -B build -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_BUILD_TYPE=Debug -DENABLE_CLANG_TIDY=OFF -DENABLE_CLANG_FORMAT=OFF
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Run test_coroutine under QEMU
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/test_coroutine
+      - name: Run test_integration under QEMU
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/test_integration
