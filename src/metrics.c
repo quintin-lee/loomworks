@@ -17,8 +17,8 @@
 #include <stdlib.h>
 
 struct loom_metrics {
-    loom_thread_pool_t *pool; /* Pool that generated the events (for callbacks). */
-    loom_metric_fn      cb;   /* Optional per-event callback, fired on worker threads. */
+    loom_thread_pool_t *pool;      /* Pool that generated the events (for callbacks). */
+    loom_metric_fn      cb;        /* Optional per-event callback, fired on worker threads. */
     void               *user_data; /* Opaque argument passed to cb. */
     pthread_mutex_t     lock;      /* Guards snapshot() reads only — never the hot path. */
     /* Lock-free counters, updated with relaxed/fetch_add by workers. */
@@ -147,8 +147,7 @@ uint64_t loom_metrics_avg_latency_ns(const loom_metrics_t *metrics)
     return atomic_load(&metrics->latency_sum_ns) / completed;
 }
 
-loom_result_t
-loom_metrics_snapshot(const loom_metrics_t *metrics, loom_metrics_snapshot_t *out)
+loom_result_t loom_metrics_snapshot(const loom_metrics_t *metrics, loom_metrics_snapshot_t *out)
 {
     if (!metrics || !out) {
         return LOOMWORKS_ERR_INVALID;

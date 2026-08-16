@@ -49,7 +49,7 @@ int main(void)
 
     /* ---- Part 1: bounded queue backpressure ---- */
     enum { CAP = 4, FILL = 4, EXTRA = 5 };
-    loom_pool_config_t cfg = {.worker_count = 1, .queue_capacity = CAP};
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = CAP};
     loom_thread_pool_t *pool = NULL;
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         fprintf(stderr, "FAIL: pool create\n");
@@ -97,7 +97,7 @@ int main(void)
     printf("All %d queued tasks drained after backpressure.\n", 1 + FILL + EXTRA);
 
     /* ---- Part 2: future timeout ---- */
-    loom_pool_config_t cfg2 = {.worker_count = 1};
+    loom_pool_config_t  cfg2  = {.worker_count = 1};
     loom_thread_pool_t *pool2 = NULL;
     if (loom_pool_create(&cfg2, &pool2) != LOOMWORKS_OK) {
         fprintf(stderr, "FAIL: pool2 create\n");
@@ -116,8 +116,8 @@ int main(void)
         deadline.tv_sec++;
         deadline.tv_nsec -= 1000000000L;
     }
-    void *result = NULL;
-    loom_result_t rc = loom_future_wait_timeout(fut, &result, &deadline);
+    void         *result = NULL;
+    loom_result_t rc     = loom_future_wait_timeout(fut, &result, &deadline);
     printf("Future wait with 10 ms deadline: %s\n",
            rc == LOOMWORKS_ERR_TIMEOUT ? "LOOMWORKS_ERR_TIMEOUT" : "unexpected OK");
     if (rc != LOOMWORKS_ERR_TIMEOUT) {

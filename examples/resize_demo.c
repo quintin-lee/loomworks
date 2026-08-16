@@ -32,12 +32,18 @@ static void slow_task(void *arg)
     sleep_ms(40);
 }
 
-static void check_bounds(const char *phase, loom_thread_pool_t *pool, uint32_t expected,
-                         uint32_t active_cap, int *failed)
+static void check_bounds(const char         *phase,
+                         loom_thread_pool_t *pool,
+                         uint32_t            expected,
+                         uint32_t            active_cap,
+                         int                *failed)
 {
     uint32_t workers = loom_pool_worker_count(pool);
     uint32_t active  = loom_pool_active_count(pool);
-    printf("  [%s] workers=%u active=%u pending=%u\n", phase, workers, active,
+    printf("  [%s] workers=%u active=%u pending=%u\n",
+           phase,
+           workers,
+           active,
            loom_pool_pending_count(pool));
     if (workers != expected) {
         fprintf(stderr, "FAIL: [%s] workers=%u expected %u\n", phase, workers, expected);
@@ -55,7 +61,7 @@ int main(void)
 {
     int failed = 0;
 
-    loom_pool_config_t cfg = {.worker_count = 2};
+    loom_pool_config_t  cfg  = {.worker_count = 2};
     loom_thread_pool_t *pool = NULL;
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         fprintf(stderr, "FAIL: pool create\n");

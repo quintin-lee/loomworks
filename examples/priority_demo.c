@@ -38,22 +38,22 @@ static void sleep_ms(long ms)
 static void low_task(void *arg)
 {
     unsigned id = (unsigned)((int *)arg - g_index);
-    unsigned p = atomic_fetch_add_explicit(&g_log_pos, 1, memory_order_relaxed);
-    g_log[p] = id;
+    unsigned p  = atomic_fetch_add_explicit(&g_log_pos, 1, memory_order_relaxed);
+    g_log[p]    = id;
     sleep_ms(30); /* keep the worker busy so the HIGH tasks can overtake */
 }
 
 static void high_task(void *arg)
 {
     unsigned id = N_LOW + (unsigned)((int *)arg - g_index);
-    unsigned p = atomic_fetch_add_explicit(&g_log_pos, 1, memory_order_relaxed);
-    g_log[p] = id;
+    unsigned p  = atomic_fetch_add_explicit(&g_log_pos, 1, memory_order_relaxed);
+    g_log[p]    = id;
     sleep_ms(5);
 }
 
 int main(void)
 {
-    loom_pool_config_t cfg = {.worker_count = 1};
+    loom_pool_config_t  cfg  = {.worker_count = 1};
     loom_thread_pool_t *pool = NULL;
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         fprintf(stderr, "FAIL: pool create\n");
@@ -63,16 +63,17 @@ int main(void)
     /* Submit the LOW batch first, then the HIGH batch. */
     for (int i = 0; i < N_LOW; i++) {
         g_index[i] = i;
-        if (loom_pool_submit_priority(pool, low_task, &g_index[i],
-                                      LOOMWORKS_PRIORITY_LOW, NULL) != LOOMWORKS_OK) {
+        if (loom_pool_submit_priority(pool, low_task, &g_index[i], LOOMWORKS_PRIORITY_LOW, NULL) !=
+            LOOMWORKS_OK) {
             fprintf(stderr, "FAIL: LOW submit %d\n", i);
             return 1;
         }
     }
     for (int i = 0; i < N_HIGH; i++) {
         g_index[N_LOW + i] = i;
-        if (loom_pool_submit_priority(pool, high_task, &g_index[N_LOW + i],
-                                      LOOMWORKS_PRIORITY_HIGH, NULL) != LOOMWORKS_OK) {
+        if (loom_pool_submit_priority(
+                pool, high_task, &g_index[N_LOW + i], LOOMWORKS_PRIORITY_HIGH, NULL) !=
+            LOOMWORKS_OK) {
             fprintf(stderr, "FAIL: HIGH submit %d\n", i);
             return 1;
         }
@@ -106,20 +107,22 @@ int main(void)
         }
     }
     if (first_high < 0 || first_high > 1) {
-        fprintf(stderr, "FAIL: HIGH block starts at position %d (expected 0 or 1)\n",
-                first_high);
+        fprintf(stderr, "FAIL: HIGH block starts at position %d (expected 0 or 1)\n", first_high);
         return 1;
     }
     for (unsigned i = 0; i < N_HIGH; i++) {
         unsigned id = g_log[(unsigned)first_high + i];
         if (id < N_LOW) {
-            fprintf(stderr, "FAIL: LOW task %u executed inside the HIGH block at %u\n",
-                    id, (unsigned)first_high + i);
+            fprintf(stderr,
+                    "FAIL: LOW task %u executed inside the HIGH block at %u\n",
+                    id,
+                    (unsigned)first_high + i);
             return 1;
         }
     }
     printf("PASS: %d HIGH-priority tasks (submitted after %d LOW tasks) all ran "
            "before the pending LOW tasks.\n",
-           N_HIGH, N_LOW);
+           N_HIGH,
+           N_LOW);
     return 0;
 }

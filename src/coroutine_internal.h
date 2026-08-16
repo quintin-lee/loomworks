@@ -1,8 +1,8 @@
 #ifndef LOOMWORKS_COROUTINE_INTERNAL_H
 #define LOOMWORKS_COROUTINE_INTERNAL_H
 
-#include "loomworks/coroutine.h"
 #include "coro_ctx.h"
+#include "loomworks/coroutine.h"
 #include <pthread.h>
 #include <stdbool.h>
 

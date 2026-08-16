@@ -24,23 +24,22 @@
 #define ITERATIONS 100000
 
 static int g_checks;
-#define CHECK(cond)                                                        \
-    do {                                                                   \
-        if (!(cond)) {                                                     \
-            fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);\
-            exit(1);                                                       \
-        }                                                                  \
-        g_checks++;                                                        \
+#define CHECK(cond)                                                                                \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                        \
+            exit(1);                                                                               \
+        }                                                                                          \
+        g_checks++;                                                                                \
     } while (0)
 
 /* ---- Test 1: 100k swap round-trips ---------------------------------- */
 static loom_coro_ctx_t g_main;
 static loom_coro_ctx_t g_coro;
-static char g_stack[65536] __attribute__((aligned(16)));
-static int g_swaps;
+static char            g_stack[65536] __attribute__((aligned(16)));
+static int             g_swaps;
 
-static void
-round_trip_entry(void *arg)
+static void round_trip_entry(void *arg)
 {
     (void)arg;
     for (int i = 0; i < ITERATIONS; i++) {
@@ -51,8 +50,7 @@ round_trip_entry(void *arg)
      * link, so main's final swap returns normally. */
 }
 
-static void
-test_round_trips(void)
+static void test_round_trips(void)
 {
     CHECK(loom_coro_ctx_get(&g_main) == 0);
     /* POSIX requires makecontext to operate on a getcontext-initialized
@@ -63,8 +61,9 @@ test_round_trips(void)
     loom_coro_ctx_set_link(&g_coro, &g_main);
     loom_coro_ctx_make(&g_coro, round_trip_entry, NULL);
 
-    for (int i = 0; i < ITERATIONS; i++)
+    for (int i = 0; i < ITERATIONS; i++) {
         CHECK(loom_coro_ctx_swap(&g_main, &g_coro) == 0);
+    }
 
     CHECK(g_swaps == ITERATIONS);
 }
@@ -72,10 +71,9 @@ test_round_trips(void)
 /* ---- Test 2: FP control word survives a yield ----------------------- */
 static loom_coro_ctx_t fp_main;
 static loom_coro_ctx_t fp_coro;
-static char fp_stack[65536] __attribute__((aligned(16)));
+static char            fp_stack[65536] __attribute__((aligned(16)));
 
-static void
-fp_entry(void *arg)
+static void fp_entry(void *arg)
 {
     (void)arg;
     CHECK(fesetround(FE_DOWNWARD) == 0);
@@ -85,8 +83,7 @@ fp_entry(void *arg)
     CHECK(fegetround() == FE_DOWNWARD);
 }
 
-static void
-test_fp_control(void)
+static void test_fp_control(void)
 {
     CHECK(fesetround(FE_TONEAREST) == 0); /* deterministic baseline */
     CHECK(loom_coro_ctx_get(&fp_main) == 0);
@@ -104,18 +101,16 @@ test_fp_control(void)
 /* ---- Test 3: NULL-link fn return exits with EXIT_FAILURE (in a child) */
 static loom_coro_ctx_t nl_main;
 static loom_coro_ctx_t nl_coro;
-static char nl_stack[65536] __attribute__((aligned(16)));
+static char            nl_stack[65536] __attribute__((aligned(16)));
 
-static void
-empty_entry(void *arg)
+static void empty_entry(void *arg)
 {
     (void)arg;
     /* Return normally: the trampoline must then see the NULL link and
      * exit(EXIT_SUCCESS), which is what the parent asserts below. */
 }
 
-static void
-test_null_link_exit(void)
+static void test_null_link_exit(void)
 {
     pid_t pid = fork();
     if (pid < 0) {
@@ -125,15 +120,18 @@ test_null_link_exit(void)
     if (pid == 0) {
         /* Child: fn returns with a NULL link -> trampoline must call
          * exit(EXIT_SUCCESS), so the parent sees that status. */
-        if (loom_coro_ctx_get(&nl_main) != 0)
+        if (loom_coro_ctx_get(&nl_main) != 0) {
             _exit(2);
-        if (loom_coro_ctx_get(&nl_coro) != 0) /* getcontext-init before make */
+        }
+        if (loom_coro_ctx_get(&nl_coro) != 0) { /* getcontext-init before make */
             _exit(2);
+        }
         loom_coro_ctx_set_stack(&nl_coro, nl_stack, sizeof nl_stack);
         loom_coro_ctx_set_link(&nl_coro, NULL);
         loom_coro_ctx_make(&nl_coro, empty_entry, NULL);
-        if (loom_coro_ctx_swap(&nl_main, &nl_coro) != 0)
+        if (loom_coro_ctx_swap(&nl_main, &nl_coro) != 0) {
             _exit(2);
+        }
         _exit(3); /* unreachable */
     }
     int status = 0;
@@ -145,8 +143,7 @@ test_null_link_exit(void)
     CHECK(WEXITSTATUS(status) == EXIT_SUCCESS);
 }
 
-int
-main(void)
+int main(void)
 {
     test_round_trips();
     test_fp_control();

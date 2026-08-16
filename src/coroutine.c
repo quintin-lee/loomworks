@@ -70,12 +70,12 @@ static pthread_mutex_t g_scheduler_lock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct coro_stack_node {
     struct coro_stack_node *next;
-    size_t                 stack_size; /* exact-match key (requested size, pre-rounding) */
-    void                  *mmap_base;
-    size_t                 mmap_size;
-    void                  *stack_start;
-    void                  *stack_end;
-    uintptr_t              valgrind_stack_id;
+    size_t                  stack_size; /* exact-match key (requested size, pre-rounding) */
+    void                   *mmap_base;
+    size_t                  mmap_size;
+    void                   *stack_start;
+    void                   *stack_end;
+    uintptr_t               valgrind_stack_id;
 } coro_stack_node_t;
 
 static coro_stack_node_t *g_stack_pool       = NULL;
@@ -137,8 +137,7 @@ void loom_coro_install_guard_handler(void)
     sa.sa_sigaction = guard_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_SIGINFO;
-    if (sigaction(SIGSEGV, &sa, &g_prev_segv) != 0 ||
-        sigaction(SIGBUS, &sa, &g_prev_bus) != 0) {
+    if (sigaction(SIGSEGV, &sa, &g_prev_segv) != 0 || sigaction(SIGBUS, &sa, &g_prev_bus) != 0) {
         fprintf(stderr, "loomworks: sigaction failed: %s\n", strerror(errno));
         return;
     }
@@ -173,7 +172,7 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
     while (*pp != NULL) {
         if ((*pp)->stack_size == c->stack_size) {
             coro_stack_node_t *node = *pp;
-            *pp                    = node->next;
+            *pp                     = node->next;
             g_stack_pool_count--;
             pthread_mutex_unlock(&g_stack_pool_lock);
 
@@ -182,8 +181,7 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
             c->stack_start = node->stack_start;
             c->stack_end   = node->stack_end;
 #ifdef VALGRIND_STACK_REGISTER
-            c->valgrind_stack_id =
-                (uintptr_t)VALGRIND_STACK_REGISTER(c->stack_start, c->stack_end);
+            c->valgrind_stack_id = (uintptr_t)VALGRIND_STACK_REGISTER(c->stack_start, c->stack_end);
 #else
             (void)c->stack_start;
             (void)c->stack_end;
@@ -216,10 +214,10 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
     c->mmap_size = total_sz;
 
     /* The usable region starts after the bottom guard pages. */
-    size_t offset        = guard_nb * ps;
-    size_t usable_sz     = usable_pg * ps;
-    c->stack_start       = (char *)base + offset;
-    c->stack_end         = (char *)base + offset + usable_sz;
+    size_t offset    = guard_nb * ps;
+    size_t usable_sz = usable_pg * ps;
+    c->stack_start   = (char *)base + offset;
+    c->stack_end     = (char *)base + offset + usable_sz;
 #ifdef VALGRIND_STACK_REGISTER
     c->valgrind_stack_id = (uintptr_t)VALGRIND_STACK_REGISTER(c->stack_start, c->stack_end);
 #else
@@ -260,10 +258,10 @@ static void deallocate_stack(loom_coroutine_t *c)
                 g_stack_pool_count++;
                 pthread_mutex_unlock(&g_stack_pool_lock);
 
-                c->mmap_base        = NULL;
-                c->mmap_size        = 0;
-                c->stack_start      = NULL;
-                c->stack_end        = NULL;
+                c->mmap_base         = NULL;
+                c->mmap_size         = 0;
+                c->stack_start       = NULL;
+                c->stack_end         = NULL;
                 c->valgrind_stack_id = 0;
                 return;
             }
@@ -361,10 +359,10 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
         return LOOMWORKS_CORO_ERR_ALLOC;
     }
 
-    c->state       = LOOMWORKS_CORO_NEW;
-    c->entry_fn    = fn;
-    c->user_data   = data;
-    c->owner       = pthread_self();
+    c->state     = LOOMWORKS_CORO_NEW;
+    c->entry_fn  = fn;
+    c->user_data = data;
+    c->owner     = pthread_self();
     /* 0 means "use the default" (LOOMWORKS_CORO_DEFAULT_STACK_SIZE); the
      * stack is mapped right here in create via allocate_stack, which may
      * serve it from the exact-size reuse pool. */
@@ -415,7 +413,8 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
         if (loom_coro_ctx_get(&coro->ctx) != 0) {
             return LOOMWORKS_CORO_ERR_CONTEXT;
         }
-        loom_coro_ctx_set_stack(&coro->ctx, coro->stack_start,
+        loom_coro_ctx_set_stack(&coro->ctx,
+                                coro->stack_start,
                                 (size_t)((char *)coro->stack_end - (char *)coro->stack_start));
         loom_coro_ctx_set_link(&coro->ctx, &g_scheduler);
         loom_coro_ctx_make(&coro->ctx, coro_entry, coro);

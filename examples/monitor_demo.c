@@ -31,7 +31,7 @@ static void short_task(void *arg)
 
 int main(void)
 {
-    loom_pool_config_t cfg  = {.worker_count = 4};
+    loom_pool_config_t  cfg  = {.worker_count = 4};
     loom_thread_pool_t *pool = NULL;
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         fprintf(stderr, "Failed to create pool\n");
@@ -55,13 +55,16 @@ int main(void)
     struct timespec ts = {0, 50 * 1000000L}; /* 50 ms */
     for (int i = 0; i < 40; i++) {
         nanosleep(&ts, NULL);
-        uint32_t  active    = loom_pool_active_count(pool);
-        uint32_t  idle      = loom_pool_idle_count(pool);
-        uint32_t  pending   = loom_pool_pending_count(pool);
-        uint64_t  submitted = loom_metrics_submitted(metrics);
-        uint64_t  completed = loom_metrics_completed(metrics);
+        uint32_t active    = loom_pool_active_count(pool);
+        uint32_t idle      = loom_pool_idle_count(pool);
+        uint32_t pending   = loom_pool_pending_count(pool);
+        uint64_t submitted = loom_metrics_submitted(metrics);
+        uint64_t completed = loom_metrics_completed(metrics);
         printf("  [monitor] active %u idle %u queue %u submitted %llu completed %llu\n",
-               active, idle, pending, (unsigned long long)submitted,
+               active,
+               idle,
+               pending,
+               (unsigned long long)submitted,
                (unsigned long long)completed);
         if (pending == 0 && completed == submitted) {
             break;
@@ -74,8 +77,10 @@ int main(void)
     if (loom_metrics_snapshot(metrics, &snap) == LOOMWORKS_OK) {
         printf("  [monitor] final snapshot: submitted %llu started %llu completed %llu "
                "cancelled %llu failed %llu avg %llu ns max %llu ns\n",
-               (unsigned long long)snap.submitted, (unsigned long long)snap.started,
-               (unsigned long long)snap.completed, (unsigned long long)snap.cancelled,
+               (unsigned long long)snap.submitted,
+               (unsigned long long)snap.started,
+               (unsigned long long)snap.completed,
+               (unsigned long long)snap.cancelled,
                (unsigned long long)snap.failed,
                (unsigned long long)loom_metrics_avg_latency_ns(metrics),
                (unsigned long long)snap.latency_max_ns);

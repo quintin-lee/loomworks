@@ -2,8 +2,8 @@
  * @example basic_pool.c
  * @brief Demonstrates basic thread pool usage.
  */
-#include <stdio.h>
 #include "loomworks/thread_pool.h"
+#include <stdio.h>
 
 static void say_hello(void *arg)
 {
@@ -12,7 +12,7 @@ static void say_hello(void *arg)
 
 static void *compute(void *arg)
 {
-    int n = *(int *)arg;
+    int n   = *(int *)arg;
     int sum = 0;
     for (int i = 0; i < n; i++) {
         sum += i;
@@ -38,7 +38,7 @@ int main(void)
     }
 
     /* Future-based task */
-    int n = 100;
+    int            n   = 100;
     loom_future_t *fut = NULL;
     if (loom_pool_submit_future(pool, compute, &n, &fut, NULL) == LOOMWORKS_OK) {
         void *result = NULL;

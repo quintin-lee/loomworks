@@ -27,7 +27,7 @@
 enum { N_TASKS = 10, N_WORKERS = 2 };
 
 typedef struct {
-    int  index;
+    int         index;
     _Atomic int executed;
 } task_ctx_t;
 
@@ -54,7 +54,7 @@ int main(void)
         g_ctx[i].executed = 0;
     }
 
-    loom_pool_config_t cfg = {.worker_count = N_WORKERS};
+    loom_pool_config_t  cfg  = {.worker_count = N_WORKERS};
     loom_thread_pool_t *pool = NULL;
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         fprintf(stderr, "FAIL: pool create\n");
@@ -145,8 +145,10 @@ int main(void)
         fprintf(stderr,
                 "FAIL: metrics submitted=%llu completed=%llu cancelled=%llu "
                 "(expected completed+cancelled == %llu)\n",
-                (unsigned long long)submitted, (unsigned long long)completed,
-                (unsigned long long)cancelled, (unsigned long long)N_TASKS);
+                (unsigned long long)submitted,
+                (unsigned long long)completed,
+                (unsigned long long)cancelled,
+                (unsigned long long)N_TASKS);
         failed = 1;
     }
     if (wrong) {
@@ -157,7 +159,10 @@ int main(void)
     loom_pool_destroy(&pool);
 
     printf("Submitted %d, ran %d, cancelled %d (by id 1, by data 1, cancel_all %u).\n",
-           N_TASKS, ran, (int)(submitted - completed), cancelled_all);
+           N_TASKS,
+           ran,
+           (int)(submitted - completed),
+           cancelled_all);
     if (!failed) {
         printf("PASS: cancelled tasks never executed; metrics reconcile.\n");
         return 0;

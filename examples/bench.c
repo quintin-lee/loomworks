@@ -14,8 +14,8 @@
  * Usage: ./bench [--iterations N] [--tasks M]
  */
 #define _POSIX_C_SOURCE 200809L
-#include "loomworks/thread_pool.h"
 #include "loomworks/coroutine.h"
+#include "loomworks/thread_pool.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -225,11 +225,11 @@ static void bench_parallel_scaling(void)
         if (per_prod < 1) {
             per_prod = 1;
         }
-        int                     total_tasks = per_prod * prod;
-        pthread_barrier_t       start;
+        int               total_tasks = per_prod * prod;
+        pthread_barrier_t start;
         pthread_barrier_init(&start, NULL, (unsigned)prod);
-        parallel_submit_arg_t   args[PARALLEL_PRODUCERS];
-        pthread_t               th[PARALLEL_PRODUCERS];
+        parallel_submit_arg_t args[PARALLEL_PRODUCERS];
+        pthread_t             th[PARALLEL_PRODUCERS];
 
         double t0 = now_ns();
         for (int p = 0; p < prod; p++) {
@@ -308,8 +308,8 @@ static void bench_queue_depth(void)
         return;
     }
     for (int i = 0; i < 4; i++) {
-        int                 d    = g_queue_depths[i];
-        double              best = 1e18;
+        int    d    = g_queue_depths[i];
+        double best = 1e18;
         /* best-of-10: CI runners are noisy (observed up to -58% on
          * identical binaries with best-of-3); more reps tighten the
          * best-of estimator without changing what it measures. */
@@ -338,7 +338,8 @@ static void bench_queue_depth(void)
 /* ---------- Benchmark 5: future_overhead ----------
  * Compare fire-and-forget (submit) vs future-based (submit_future
  * + future_wait) submission latency.
- * ---------- */static void bench_future_overhead(void)
+ * ---------- */
+static void bench_future_overhead(void)
 {
     const int FUTURE_N = 100;
 
@@ -390,7 +391,7 @@ static void coro_trivial_fn(void *arg)
 
 static void bench_coro_create_destroy(void)
 {
-    const int N = 100000;
+    const int N  = 100000;
     double    t0 = now_ns();
     for (int i = 0; i < N; i++) {
         loom_coroutine_t *coro = NULL;
@@ -495,9 +496,14 @@ int main(int argc, char *argv[])
         printf("  \"submit_latency_avg_ns\": %.1f,\n", g_submit_latency_avg_ns);
         printf("  \"throughput_tps\": %.0f,\n", g_throughput_tps);
         printf("  \"queue_depths\": [%d, %d, %d, %d],\n",
-               g_queue_depths[0], g_queue_depths[1], g_queue_depths[2], g_queue_depths[3]);
+               g_queue_depths[0],
+               g_queue_depths[1],
+               g_queue_depths[2],
+               g_queue_depths[3]);
         printf("  \"queue_depth_tps\": [%.0f, %.0f, %.0f, %.0f]\n",
-               g_queue_depth_tps[0], g_queue_depth_tps[1], g_queue_depth_tps[2],
+               g_queue_depth_tps[0],
+               g_queue_depth_tps[1],
+               g_queue_depth_tps[2],
                g_queue_depth_tps[3]);
         printf("}\n");
     }

@@ -217,7 +217,8 @@ static void test_pool_many_futures(void)
 
     loom_future_t *futures[N];
     for (int i = 0; i < N; i++) {
-        ASSERT(loom_pool_submit_future(pool, pool_result_task, NULL, &futures[i], NULL) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit_future(pool, pool_result_task, NULL, &futures[i], NULL) ==
+                   LOOMWORKS_OK,
                "submit future");
     }
 
@@ -353,8 +354,8 @@ static void test_large_stack_coroutines(void)
  * A yield-coroutine forces every worker to build its scheduler stack. */
 static void scheduler_interop_task(void *arg)
 {
-    int                *counter = (int *)arg;
-    loom_coroutine_t   *coro    = NULL;
+    int              *counter = (int *)arg;
+    loom_coroutine_t *coro    = NULL;
     loom_coro_create(yield_coro_task, counter, 0, &coro);
     if (coro) {
         loom_coro_resume(coro);

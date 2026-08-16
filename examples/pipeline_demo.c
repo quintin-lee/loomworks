@@ -18,13 +18,13 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/pipeline.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <time.h>
 
-#define NUM_CONSUMERS  4
-#define NUM_ITEMS      200
+#define NUM_CONSUMERS 4
+#define NUM_ITEMS 200
 
 int main(void)
 {
@@ -82,22 +82,25 @@ int main(void)
     }
 
     clock_gettime(CLOCK_MONOTONIC, &t_now);
-    double elapsed = (double)(t_now.tv_sec - t_start.tv_sec) +
-                     (double)(t_now.tv_nsec - t_start.tv_nsec) / 1e9;
+    double elapsed =
+        (double)(t_now.tv_sec - t_start.tv_sec) + (double)(t_now.tv_nsec - t_start.tv_nsec) / 1e9;
 
-    uint32_t pending = loom_pc_pending_count(pc);
+    uint32_t pending  = loom_pc_pending_count(pc);
     uint64_t consumed = loom_pc_taken_count(pc);
     loom_pc_destroy(&pc);
 
     printf("  [monitor] pending %u, elapsed %.3f s, throughput %.0f items/s\n",
-           pending, elapsed,
+           pending,
+           elapsed,
            elapsed > 0.0 ? (double)consumed / elapsed : 0.0);
 
     if (consumed == submitted && consumed == (uint64_t)total_submitted) {
         printf("Consumed %llu items. PASS.\n", (unsigned long long)consumed);
         return 0;
     }
-    fprintf(stderr, "FAIL: consumed %llu of %llu submitted\n",
-            (unsigned long long)consumed, (unsigned long long)submitted);
+    fprintf(stderr,
+            "FAIL: consumed %llu of %llu submitted\n",
+            (unsigned long long)consumed,
+            (unsigned long long)submitted);
     return 1;
 }

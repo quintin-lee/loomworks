@@ -41,14 +41,14 @@ typedef struct pc_item {
 } pc_item_t;
 
 struct loom_pc {
-    loom_thread_pool_t *pool; /* Optional internal consumer pool (NULL = caller takes). */
-    uint32_t            capacity; /* Max queued items; 0 = unbounded. */
-    pthread_mutex_t     lock;     /* Guards head/tail/len/shutdown/cond. */
-    pc_item_t          *head;     /* FIFO head (oldest item). */
-    pc_item_t          *tail;     /* FIFO tail (newest item). */
-    uint32_t            len;      /* Current queue occupancy (guarded by lock). */
-    pthread_cond_t      cond;     /* Notified on enqueue/dequeue/shutdown. */
-    bool                shutdown; /* Set once by shutdown(); submits then fail. */
+    loom_thread_pool_t *pool;      /* Optional internal consumer pool (NULL = caller takes). */
+    uint32_t            capacity;  /* Max queued items; 0 = unbounded. */
+    pthread_mutex_t     lock;      /* Guards head/tail/len/shutdown/cond. */
+    pc_item_t          *head;      /* FIFO head (oldest item). */
+    pc_item_t          *tail;      /* FIFO tail (newest item). */
+    uint32_t            len;       /* Current queue occupancy (guarded by lock). */
+    pthread_cond_t      cond;      /* Notified on enqueue/dequeue/shutdown. */
+    bool                shutdown;  /* Set once by shutdown(); submits then fail. */
     _Atomic uint64_t    submitted; /* Total successful enqueues (lock-free). */
     _Atomic uint64_t    taken;     /* Total successful dequeues (lock-free). */
     /* Optional discard handler: called for payloads that are dropped instead
@@ -57,13 +57,15 @@ struct loom_pc {
      * pool consumers too.  NULL keeps the old free() behaviour for internal
      * consumers and a leak-free-with-caller-ownership drain. */
     void (*on_discard)(void *data, void *ctx);
-    void  *discard_ctx;
+    void *discard_ctx;
 };
 
 static pc_item_t *pc_item_create(void *data)
 {
     pc_item_t *item = (pc_item_t *)malloc(sizeof(*item));
-    if (!item) return NULL;
+    if (!item) {
+        return NULL;
+    }
     item->data = data;
     item->next = NULL;
     return item;
@@ -71,13 +73,15 @@ static pc_item_t *pc_item_create(void *data)
 
 static void pc_item_destroy(pc_item_t *item)
 {
-    if (item) free(item);
+    if (item) {
+        free(item);
+    }
 }
 
 /* Consumer pool task: blocks on loom_pc_take() until shutdown */
 static void consumer_pool_task(void *arg)
 {
-    loom_pc_t *pc = (loom_pc_t *)arg;
+    loom_pc_t *pc   = (loom_pc_t *)arg;
     void      *item = NULL;
     while (loom_pc_take(pc, &item) == LOOMWORKS_OK) {
         /* Discard item — internal consumers just keep workers alive.  If the
@@ -93,29 +97,37 @@ static void consumer_pool_task(void *arg)
 
 loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t **pc)
 {
-    if (!pc) return LOOMWORKS_ERR_INVALID;
+    if (!pc) {
+        return LOOMWORKS_ERR_INVALID;
+    }
     loom_pc_t *p = (loom_pc_t *)calloc(1, sizeof(*p));
-    if (!p) return LOOMWORKS_ERR_ALLOC;
-    p->pool        = NULL;
-    p->capacity    = capacity;
-    p->head        = NULL;
-    p->tail        = NULL;
-    p->len         = 0;
-    p->shutdown    = false;
+    if (!p) {
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    p->pool     = NULL;
+    p->capacity = capacity;
+    p->head     = NULL;
+    p->tail     = NULL;
+    p->len      = 0;
+    p->shutdown = false;
     atomic_store(&p->submitted, 0);
-    atomic_store(&p->taken,     0);
-    if (pthread_mutex_init(&p->lock, NULL) != 0) { free(p); return LOOMWORKS_ERR_ALLOC; }
-    if (pthread_cond_init(&p->cond, NULL) != 0)  { pthread_mutex_destroy(&p->lock); free(p); return LOOMWORKS_ERR_ALLOC; }
+    atomic_store(&p->taken, 0);
+    if (pthread_mutex_init(&p->lock, NULL) != 0) {
+        free(p);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    if (pthread_cond_init(&p->cond, NULL) != 0) {
+        pthread_mutex_destroy(&p->lock);
+        free(p);
+        return LOOMWORKS_ERR_ALLOC;
+    }
 
     /* Internal-consumer mode: spin up worker_count pool threads, each
      * looping on take() until shutdown.  The pool owns no queue of its
      * own here — every consumer task parks in loom_pc_take(). */
     if (worker_count > 0) {
         loom_pool_config_t cfg = {
-            .worker_count   = worker_count,
-            .stack_size     = 0,
-            .queue_capacity = 0
-        };
+            .worker_count = worker_count, .stack_size = 0, .queue_capacity = 0};
         if (loom_pool_create(&cfg, &p->pool) != LOOMWORKS_OK) {
             pthread_cond_destroy(&p->cond);
             pthread_mutex_destroy(&p->lock);
@@ -133,7 +145,9 @@ loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t
 
 void loom_pc_destroy(loom_pc_t **pc)
 {
-    if (!pc || !*pc) return;
+    if (!pc || !*pc) {
+        return;
+    }
     loom_pc_t *p = *pc;
 
     if (p->pool) {
@@ -174,11 +188,19 @@ void loom_pc_destroy(loom_pc_t **pc)
 
 loom_result_t loom_pc_submit(loom_pc_t *pc, void *item)
 {
-    if (!pc) return LOOMWORKS_ERR_INVALID;
+    if (!pc) {
+        return LOOMWORKS_ERR_INVALID;
+    }
     pthread_mutex_lock(&pc->lock);
-    if (pc->shutdown) { pthread_mutex_unlock(&pc->lock); return LOOMWORKS_ERR_SHUTDOWN; }
+    if (pc->shutdown) {
+        pthread_mutex_unlock(&pc->lock);
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
     pc_item_t *pi = pc_item_create(item);
-    if (!pi) { pthread_mutex_unlock(&pc->lock); return LOOMWORKS_ERR_ALLOC; }
+    if (!pi) {
+        pthread_mutex_unlock(&pc->lock);
+        return LOOMWORKS_ERR_ALLOC;
+    }
     /* Bounded mode: if the queue is full, wait up to 60 s for a consumer to
      * drain.  The item is pre-allocated so we never allocate while holding
      * the lock.  deadline is computed once from CLOCK_REALTIME (the condvar
@@ -204,7 +226,11 @@ loom_result_t loom_pc_submit(loom_pc_t *pc, void *item)
     }
     /* Append to tail; broadcast (not signal) because a full queue can have
      * multiple waiters that each need to retry their capacity check. */
-    if (pc->tail) { pc->tail->next = pi; } else { pc->head = pi; }
+    if (pc->tail) {
+        pc->tail->next = pi;
+    } else {
+        pc->head = pi;
+    }
     pc->tail = pi;
     pc->len++;
     pthread_cond_broadcast(&pc->cond);
@@ -215,7 +241,9 @@ loom_result_t loom_pc_submit(loom_pc_t *pc, void *item)
 
 loom_result_t loom_pc_take(loom_pc_t *pc, void **item)
 {
-    if (!pc || !item) return LOOMWORKS_ERR_INVALID;
+    if (!pc || !item) {
+        return LOOMWORKS_ERR_INVALID;
+    }
     *item = NULL;
     pthread_mutex_lock(&pc->lock);
     /* Wait while empty; wake on enqueue or shutdown.  Unbounded wait: every
@@ -230,9 +258,11 @@ loom_result_t loom_pc_take(loom_pc_t *pc, void **item)
         pthread_cond_wait(&pc->cond, &pc->lock);
     }
     /* Unlink head; keep the node alive only for its data, then free it. */
-    pc_item_t *pi  = pc->head;
-    pc->head = pi->next;
-    if (pc->head == NULL) pc->tail = NULL;
+    pc_item_t *pi = pc->head;
+    pc->head      = pi->next;
+    if (pc->head == NULL) {
+        pc->tail = NULL;
+    }
     pc->len--;
     /* Consumers waking a blocked bounded producer. */
     pthread_cond_broadcast(&pc->cond);
@@ -245,7 +275,9 @@ loom_result_t loom_pc_take(loom_pc_t *pc, void **item)
 
 void loom_pc_shutdown(loom_pc_t *pc)
 {
-    if (!pc) return;
+    if (!pc) {
+        return;
+    }
     pthread_mutex_lock(&pc->lock);
     pc->shutdown = true;
     pthread_cond_broadcast(&pc->cond);
@@ -255,11 +287,11 @@ void loom_pc_shutdown(loom_pc_t *pc)
      * (that was only needed to cut the old 100 ms poll latency). */
 }
 
-void loom_pc_set_discard_handler(loom_pc_t                     *pc,
-                                 void (*discard)(void *data, void *ctx),
-                                 void                          *ctx)
+void loom_pc_set_discard_handler(loom_pc_t *pc, void (*discard)(void *data, void *ctx), void *ctx)
 {
-    if (!pc) return;
+    if (!pc) {
+        return;
+    }
     /* Handler swap is not synchronized with running consumers: call this
      * before submitting anything / before destroy, not beside take(). */
     pc->on_discard  = discard;
@@ -268,7 +300,9 @@ void loom_pc_set_discard_handler(loom_pc_t                     *pc,
 
 uint32_t loom_pc_pending_count(const loom_pc_t *pc)
 {
-    if (!pc) return 0;
+    if (!pc) {
+        return 0;
+    }
     pthread_mutex_lock((pthread_mutex_t *)&pc->lock);
     uint32_t n = pc->len;
     pthread_mutex_unlock((pthread_mutex_t *)&pc->lock);
@@ -277,12 +311,16 @@ uint32_t loom_pc_pending_count(const loom_pc_t *pc)
 
 uint64_t loom_pc_submitted_count(const loom_pc_t *pc)
 {
-    if (!pc) return 0;
+    if (!pc) {
+        return 0;
+    }
     return atomic_load(&pc->submitted);
 }
 
 uint64_t loom_pc_taken_count(const loom_pc_t *pc)
 {
-    if (!pc) return 0;
+    if (!pc) {
+        return 0;
+    }
     return atomic_load(&pc->taken);
 }

@@ -53,11 +53,16 @@ static void runaway_coro(void *arg)
 static const char *state_str(loom_coro_state_t s)
 {
     switch (s) {
-    case LOOMWORKS_CORO_NEW:       return "NEW";
-    case LOOMWORKS_CORO_RUNNING:   return "RUNNING";
-    case LOOMWORKS_CORO_SUSPENDED: return "SUSPENDED";
-    case LOOMWORKS_CORO_DONE:      return "DONE";
-    case LOOMWORKS_CORO_ERROR:     return "ERROR";
+    case LOOMWORKS_CORO_NEW:
+        return "NEW";
+    case LOOMWORKS_CORO_RUNNING:
+        return "RUNNING";
+    case LOOMWORKS_CORO_SUSPENDED:
+        return "SUSPENDED";
+    case LOOMWORKS_CORO_DONE:
+        return "DONE";
+    case LOOMWORKS_CORO_ERROR:
+        return "ERROR";
     }
     return "?";
 }
@@ -77,7 +82,8 @@ int main(void)
         fprintf(stderr, "FAIL: coroutine create\n");
         return 1;
     }
-    printf("Coroutine A state: %s, B state: %s\n", state_str(loom_coro_state(a)),
+    printf("Coroutine A state: %s, B state: %s\n",
+           state_str(loom_coro_state(a)),
            state_str(loom_coro_state(b)));
 
     /* Round-robin: resume A until suspended, then B, and so on. */
@@ -88,38 +94,41 @@ int main(void)
         }
         loom_coro_result_t rc = loom_coro_resume(cur);
         if (rc != LOOMWORKS_CORO_OK) {
-            fprintf(stderr, "FAIL: resume %s returned %s\n",
-                    (cur == a) ? "A" : "B", loom_coro_result_str(rc));
+            fprintf(stderr,
+                    "FAIL: resume %s returned %s\n",
+                    (cur == a) ? "A" : "B",
+                    loom_coro_result_str(rc));
             failed = 1;
             break;
         }
         printf("  -> %s state: %s\n", (cur == a) ? "A" : "B", state_str(loom_coro_state(cur)));
     }
     if (loom_coro_state(a) != LOOMWORKS_CORO_DONE || loom_coro_state(b) != LOOMWORKS_CORO_DONE) {
-        fprintf(stderr, "FAIL: A=%s B=%s expected both DONE\n",
-                state_str(loom_coro_state(a)), state_str(loom_coro_state(b)));
+        fprintf(stderr,
+                "FAIL: A=%s B=%s expected both DONE\n",
+                state_str(loom_coro_state(a)),
+                state_str(loom_coro_state(b)));
         failed = 1;
     }
 
     /* Early termination of a runaway coroutine. */
-    coro_ctx_t cr = {.name = "R", .rounds = 0, .step = 0};
-    loom_coroutine_t *r = NULL;
+    coro_ctx_t        cr = {.name = "R", .rounds = 0, .step = 0};
+    loom_coroutine_t *r  = NULL;
     if (loom_coro_create(runaway_coro, &cr, 0, &r) != LOOMWORKS_CORO_OK) {
         fprintf(stderr, "FAIL: runaway create\n");
         return 1;
     }
     loom_coro_resume(r);
     printf("Runaway state after first resume: %s\n", state_str(loom_coro_state(r)));
-    if (loom_coro_terminate(r) != LOOMWORKS_CORO_OK ||
-        loom_coro_state(r) != LOOMWORKS_CORO_DONE) {
+    if (loom_coro_terminate(r) != LOOMWORKS_CORO_OK || loom_coro_state(r) != LOOMWORKS_CORO_DONE) {
         fprintf(stderr, "FAIL: terminate\n");
         failed = 1;
     }
     printf("Runaway state after terminate: %s\n", state_str(loom_coro_state(r)));
 
     /* Stack introspection on a fresh coroutine (guard pages at both ends). */
-    coro_ctx_t cs = {.name = "S", .rounds = 1, .step = 0};
-    loom_coroutine_t *s = NULL;
+    coro_ctx_t        cs = {.name = "S", .rounds = 1, .step = 0};
+    loom_coroutine_t *s  = NULL;
     if (loom_coro_create(ping_pong_coro, &cs, (size_t)64 * 1024, &s) != LOOMWORKS_CORO_OK) {
         fprintf(stderr, "FAIL: stack-info create\n");
         return 1;
@@ -127,7 +136,9 @@ int main(void)
     void *start = NULL;
     void *end   = NULL;
     if (loom_coro_stack_info(s, &start, &end) == LOOMWORKS_CORO_OK) {
-        printf("Stack range: [%p, %p) — %zu KiB\n", start, end,
+        printf("Stack range: [%p, %p) — %zu KiB\n",
+               start,
+               end,
                (size_t)((const char *)end - (const char *)start) / (size_t)1024);
         if (start == NULL || end <= start) {
             fprintf(stderr, "FAIL: invalid stack range\n");

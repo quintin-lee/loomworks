@@ -32,10 +32,10 @@
  *  be observed from inside the worker thread.
  * ================================================================ */
 typedef struct task_group_ctx {
-    loom_task_group_t  *group;    /**< Owning group (used on completion). */
-    loom_task_fn        fn;       /**< Fire-and-forget task (submit path). */
-    loom_task_fn_result fn_result;/**< Result task (submit_future path). */
-    void               *data;     /**< User data forwarded to fn/fn_result. */
+    loom_task_group_t  *group;     /**< Owning group (used on completion). */
+    loom_task_fn        fn;        /**< Fire-and-forget task (submit path). */
+    loom_task_fn_result fn_result; /**< Result task (submit_future path). */
+    void               *data;      /**< User data forwarded to fn/fn_result. */
 } task_group_ctx_t;
 
 /* ================================================================
@@ -112,7 +112,7 @@ static void task_group_append(loom_task_group_t *g, task_group_node_t *node)
     } else {
         g->head = node;
     }
-    g->tail       = node;
+    g->tail = node;
     g->node_count++;
     g->pending++;
 }
@@ -244,7 +244,7 @@ loom_task_group_submit(loom_task_group_t *group, loom_task_fn fn, void *data, ui
         pthread_mutex_unlock(&group->lock);
         return LOOMWORKS_ERR_ALLOC;
     }
-    ctx->fn = fn;
+    ctx->fn                 = fn;
     task_group_node_t *node = task_group_node_create();
     if (!node) {
         free(ctx);
@@ -338,7 +338,7 @@ loom_result_t loom_task_group_submit_future(loom_task_group_t  *group,
         pthread_mutex_unlock(&group->lock);
         return LOOMWORKS_ERR_ALLOC;
     }
-    ctx->fn_result = fn;
+    ctx->fn_result          = fn;
     task_group_node_t *node = task_group_node_create();
     if (!node) {
         free(ctx);
