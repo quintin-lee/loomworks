@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(loomworks VERSION 1.0.1 LANGUAGES C)
+project(loomworks VERSION 1.0.1 LANGUAGES C ASM)
 
 include(cmake/BuildTypes.cmake)
 
@@ -10,6 +10,22 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 
 find_package(Threads REQUIRED)
+
+# ---------------------------------------------------------------------------
+# Context backend selection: hand-written assembly by default on x86-64 and
+# aarch64, POSIX ucontext elsewhere, or forced via LOOMWORKS_CTX_BACKEND.
+# ---------------------------------------------------------------------------
+set(LOOMWORKS_CTX_BACKEND "asm" CACHE STRING "Context backend: asm|ucontext")
+set_property(CACHE LOOMWORKS_CTX_BACKEND PROPERTY STRINGS asm ucontext)
+
+set(LOOMWORKS_SOURCES src/thread_pool.c src/coroutine.c src/task_group.c src/metrics.c src/pipeline.c)
+set(LOOMWORKS_CTX_DEFINES "")
+if(LOOMWORKS_CTX_BACKEND STREQUAL "asm" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    list(APPEND LOOMWORKS_SOURCES src/ctx_x86_64.S)
+    list(APPEND LOOMWORKS_CTX_DEFINES LOOMWORKS_CTX_ASM_X86_64=1)
+else()
+    message(STATUS "Context backend: ucontext (${LOOMWORKS_CTX_BACKEND} on ${CMAKE_SYSTEM_PROCESSOR})")
+endif()
 
 # ---------------------------------------------------------------------------
 # clang-tidy: run static analysis as part of every compilation
@@ -50,13 +66,8 @@ endif()
 # ---------------------------------------------------------------------------
 # Library targets
 # ---------------------------------------------------------------------------
-add_library(loomworks_static STATIC
-    src/thread_pool.c
-    src/coroutine.c
-    src/task_group.c
-    src/metrics.c
-    src/pipeline.c
-)
+add_library(loomworks_static STATIC ${LOOMWORKS_SOURCES})
+target_compile_definitions(loomworks_static PRIVATE ${LOOMWORKS_CTX_DEFINES})
 target_include_directories(loomworks_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -64,13 +75,8 @@ target_include_directories(loomworks_static PUBLIC
 target_link_libraries(loomworks_static PUBLIC Threads::Threads)
 set_target_properties(loomworks_static PROPERTIES OUTPUT_NAME loomworks)
 
-add_library(loomworks_shared SHARED
-    src/thread_pool.c
-    src/coroutine.c
-    src/task_group.c
-    src/metrics.c
-    src/pipeline.c
-)
+add_library(loomworks_shared SHARED ${LOOMWORKS_SOURCES})
+target_compile_definitions(loomworks_shared PRIVATE ${LOOMWORKS_CTX_DEFINES})
 target_include_directories(loomworks_shared PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
