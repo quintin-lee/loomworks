@@ -529,6 +529,7 @@ static void test_cross_thread_guard(void)
     rc = loom_coro_resume(coro);
     ASSERT(rc == LOOMWORKS_CORO_OK, "owner resume still works");
     ASSERT(counter == 1, "owner thread ran entry fn");
+    loom_coro_destroy(&coro);
 
     coro = NULL;
     int yield_counter = 0;

@@ -55,7 +55,7 @@ static void          pool_destroy_internal(loom_thread_pool_t *pool);
 static void         *worker_entry(void *arg);
 static loom_task_t *
 task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority);
-static void task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
+void task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
 static void future_task_wrapper(void *arg);
 static bool lane_has_priority(loom_thread_pool_t *pool, unsigned max_priority);
 static loom_task_t *
@@ -253,6 +253,15 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     free(pool->cancel_slots);
     free(pool->ring);
     free(pool->node_pool);
+
+    /* Free work-stealing deques and their per-deque slot arrays. */
+    if (pool->deques != NULL) {
+        for (uint32_t i = 0; i < pool->max_worker_count; i++) {
+            free((void *)pool->deques[i].slots);
+        }
+        free(pool->deques);
+    }
+
     pthread_cond_destroy(&pool->drain_cond);
     pthread_cond_destroy(&pool->space_cond);
     sem_destroy(&pool->work_sem);
@@ -538,7 +547,7 @@ task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t prior
     return t;
 }
 
-static void task_destroy(loom_thread_pool_t *pool, loom_task_t *t)
+void task_destroy(loom_thread_pool_t *pool, loom_task_t *t)
 {
     if (!t) {
         return;

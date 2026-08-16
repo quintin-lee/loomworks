@@ -221,6 +221,7 @@ loom_task_t *deque_steal(loom_thread_pool_t *pool, loom_work_deque_t *d);
  * @return The number of tasks claimed (0 if empty or CAS lost).  Caller
  *         owns ring_count/queue_len accounting.
  */
+void task_destroy(loom_thread_pool_t *pool, loom_task_t *t);
 size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */

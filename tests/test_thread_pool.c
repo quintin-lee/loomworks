@@ -2759,6 +2759,11 @@ static void test_deque_bulk_dequeue(void)
      * shutdown drain check sees consistent state. */
     atomic_fetch_sub_explicit(&pool->queue_len, n, memory_order_relaxed);
 
+    /* Destroy the bulk-dequeued tasks (they were never executed). */
+    for (size_t i = 0; i < n; i++) {
+        task_destroy(pool, out[i]);
+    }
+
     g_gate_release = 1;
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
