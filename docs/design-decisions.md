@@ -214,3 +214,38 @@ deque (256 slots, `_Atomic top` + relaxed `bottom`), so the per-worker state
 carries no mutex and false-sharing is contained by the deque's cache-line
 padding. The queue layer is now three-tier: priority lanes (locked), Vyukov
 ring (lock-free), per-worker deques (lock-free).
+
+---
+
+## 12. Why Hand-Written Assembly Context Backend (x86-64 + aarch64)?
+
+**Decision:** replace POSIX `ucontext` as the default context backend with
+hand-written assembly on x86-64 (SysV) and aarch64 (AAPCS64), keeping
+ucontext as a compile-time fallback (see decision 1, which remains the
+fallback path).
+
+**Rationale:**
+- macOS removed `ucontext` — Apple Silicon has no `ucontext.h` — so a
+  portable default cannot rely on it
+- The glibc `getcontext`/`swapcontext` pair is comparatively slow for a hot
+  resume/yield path; the asm backend keeps the switch to a handful of moves
+- A hand-written assembly context backend needs only the callee-saved GPRs
+  plus the FP control words (mxcsr + x87cw on x86-64; fpcr + fpsr on
+  aarch64) — far less than the fxsave-class state ucontext preserves
+- The `ctx_smoke` stress test proves semantic parity: 100 000 swap
+  round-trips with register corruption checks, FP control round-trip across
+  yields, and the fn-return trampoline (include-test on both backends)
+
+**Trade-off:** FP *control* state round-trips a yield, but FP *register*
+state (vector registers) does not; ucontext does preserve it. No coroutine
+in this library performs FP arithmetic across a yield today, and the value
+registers are not observable through the public API.
+
+**Both arches in lockstep:** the backend is only as trustworthy as the
+weakest port, and aarch64 is exercised in CI via cross-compilation and QEMU
+execution, not just syntax checks.
+
+**Verified parity:** the same test suites are run through ucontext in CI
+and must print byte-identical assertion counts to the asm backend. The
+NULL-link return path exits with `EXIT_SUCCESS` on both backends, matching
+glibc's observed behaviour for a `makecontext` function that returns.
