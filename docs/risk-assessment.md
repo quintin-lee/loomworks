@@ -23,7 +23,7 @@ Risk ratings use the conventional 3×3 grid:
 | R3 | Metrics | Callback fires synchronously on the worker thread; must be cheap or it throttles the pool | Medium | Medium | **Medium** |
 | R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): timed group wait (`loom_task_group_wait_timeout`, absolute `CLOCK_MONOTONIC` deadline); `destroy()` remains blocking by documented contract |
 | R5 | Thread Pool | `loom_pool_cancel()` performs an O(cancel_cap) linear scan of the cancel index on the fast path | Medium | Low | **Low** |
-| R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** |
+| R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** — ✅ resolved (2026-08-17): fault-injection suite covers every grow-path allocation (6 call sites incl. lane-only degrade); five related defects fixed with regression locks |
 | R7 | Thread Pool | Work-stealing executes tasks out of submission order (LIFO local, FIFO steal) — FIFO is only guaranteed for NORMAL+ring when ≤1 worker actively drains | Low | Medium | **Low** |
 | R8 | Pipeline | Internal-consumer mode (`worker_count>0`) consumes and **frees** every payload by default unless a discard handler is set | Medium | Medium | **Medium** |
 | R9 | Pipeline | 60s `CLOCK_REALTIME` timedwait is subject to wall-clock jumps (NTP slews, manual clock changes) | Low | Low | **Low** — ✅ resolved (2026-08-17): timeouts now use `CLOCK_MONOTONIC` |
@@ -129,9 +129,31 @@ iteration, so realloc is safe.
 
 **Residual risk**: this code is exercised only by `resize_demo.c` and a few
 tests; concurrency bugs here fail loudly (crash) rather than silently, which
-is why impact is High but the combination is Low severity today. Test
-coverage for resize remains partial (grow/shrink/rollback happy paths; no
-systematic fault-injection of mid-`realloc` alloc failures).
+is why impact is High but the combination is Low severity today.
+
+**Status: ✅ RESOLVED (2026-08-17)** — a test-only one-shot armed-counter hook
+(`loom_test_arm_alloc_failure`, declared in the internal header) now pores
+every grow-path allocation call site with deterministic fault injection, and
+8 tests prove the rollback guarantee (worker count unchanged, pool usable,
+unarmed resize recovers) plus the lane-only degrade contract. Exercising this
+path exposed **five latent defects**, all fixed and regression-locked:
+
+1. **Stale `thread_clean_exit` on grow rollback** — rolled-back worker slots
+   kept `clean_exit=true`; a later grow reusing them hid a worker crash from
+   the FAILED metric. Rollback now resets the flag (symmetric with shrink);
+   locked by `test_resize_fail_then_worker_crash_detected`.
+2. **Grow-rollback join deadlock** — freshly spawned workers blocked on
+   `work_sem` were `pthread_join`ed without wake tokens. Both rollback loops
+   now use `tryjoin` + re-post (token-storm, shrink-symmetric).
+3. **Lane-only mode broken since inception** — NORMAL tasks routed to the ring
+   were never consumed (workers drain the ring only via per-worker deques),
+   wedging shutdown. Submits now take the ring only when deques exist.
+4. **Lane-only fallback freed uninitialized pointers** — the deque-slot
+   fallback freed garbage after `realloc` extension; tail-zero `memset`
+   mirrors `thread_alive`/`thread_clean_exit`.
+5. **Work-steal parity** — the `try*2` victim stride visits only half the
+   workers on even counts, leaving the deque owner unreachable and stranding
+   tasks. Ring-dry steals now scan every other worker exactly once.
 
 ### R7 — Execution order is not globally FIFO
 
@@ -316,8 +338,7 @@ All claims above are grounded in the source as of master @ b5d8ab2:
    backends landed 2026-08-17 for x86-64/aarch64).
 2. **R8** (pipeline free-by-default) — document loudly; consider an explicit
    `LOOM_PC_OWN_PAYLOADS` flag in a future minor release.
-3. **R6** (resize) — the largest untested surface remains; fault-injection of
-   mid-`realloc` alloc failures would close the gap.
-4. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
+3. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
    R1/R9/R13/R15/R16/R17/R18 are closed as of 2026-08-17; R4 was resolved on
-   2026-08-17 with the timed group wait.
+   2026-08-17 with the timed group wait; R6 was resolved on 2026-08-17 with
+   the resize fault-injection suite.

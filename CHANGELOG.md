@@ -62,6 +62,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LOOMWORKS_ERR_TIMEOUT` on expiry while leaving the group fully usable
   (pending accounting + tracking list untouched); `NULL` deadline means
   "wait forever". `wait()` is now the `NULL`-deadline case.
+- **Resize rollback hygiene**: a failed `loom_pool_resize` grow rolled back
+  its created workers but left stale `thread_clean_exit` flags in their
+  slots, so a later grow reusing those slots could hide a worker crash from
+  the FAILED metric; rollback now resets the flag (symmetric with shrink).
+- **Resize rollback no longer deadlocks**: freshly spawned workers blocked on
+  the work semaphore were joined with a plain `pthread_join` and no wake
+  tokens; both grow-rollback loops now use `tryjoin` + token re-post
+  (shrink-symmetric).
+- **Lane-only pools now execute tasks**: when per-worker deques cannot be
+  allocated the pool degrades to lane-only mode, but NORMAL tasks still
+  routed to the ring were never consumed (workers drain the ring only via
+  the deques), wedging shutdown; ring submits now require deques to exist.
+- **Lane-only fallback no longer frees garbage**: the slots fallback freed
+  uninitialized pointer memory after a `realloc` extension; the tail is now
+  zeroed, mirroring `thread_alive`/`thread_clean_exit`.
+- **Work stealing can no longer strand tasks**: the `try*2` victim stride
+  visited only half the workers on even worker counts, so the deque owner
+  could stay unreachable and runnable tasks went unexecuted; once the ring
+  is dry, steals scan every other worker exactly once.
+- **Resize fault-injection suite**: a test-only one-shot allocation
+  fault-injection hook plus 8 tests covering every grow-path allocation
+  call site, proving the rollback guarantee and the lane-only degrade
+  contract, and locking the fixes above against regression.
 
 ## [1.0.1] - 2026-08-14
 

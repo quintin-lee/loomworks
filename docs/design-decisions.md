@@ -363,3 +363,21 @@ observable.
 on a different thread's pool) — that remains a documented caller
 contract: wait/destroy must come from a thread that does not participate in
 the group's tasks.
+
+## 18. Test-Only Allocation Fault-Injection Hook (2026-08-17)
+
+Fault-injected resize failures must be deterministic and must route through
+the same error handling as a real OOM. A one-shot armed counter
+(`loom_test_arm_alloc_failure`) is checked at each guarded allocation
+call-site inside `loom_pool_resize`; the (n+1)-th check after arming fires
+once and auto-disarms, so a single misfire cannot cascade (the lane-only
+degrade on a deque-slot calloc failure must not fail the subsequent
+realloc). Unarmed, the check is a single negative atomic branch — zero
+behavior change. The hook is declared only in the internal header; no
+public API is added.
+
+The suite it enables found five real defects (stale `clean_exit` on
+rollback, a rollback join deadlock, lane-only mode stranding ring tasks,
+freed uninitialized fallback memory, and a work-steal parity gap that could
+strand tasks on even worker counts) — each fixed and locked with a
+regression test, so the hook pays for itself as a resealable test seam.
