@@ -43,9 +43,14 @@ loom_result_t loom_task_group_create(loom_thread_pool_t *pool, loom_task_group_t
  * Cancels any pending tasks still in the queue and frees group resources.
  * Tasks already running are NOT interrupted.
  *
+ * Blocks until pending tasks finish (per existing contract); returns
+ * LOOMWORKS_ERR_INVALID if called from a worker of the group's pool
+ * (self-deadlock guard) or with a NULL handle.
+ *
  * @param group  Pointer to the group handle (NULL-safe).
+ * @return       LOOMWORKS_OK on success, LOOMWORKS_ERR_INVALID on misuse.
  */
-void loom_task_group_destroy(loom_task_group_t **group);
+loom_result_t loom_task_group_destroy(loom_task_group_t **group);
 
 /**
  * @brief Submit a fire-and-forget task to the group.
@@ -99,9 +104,14 @@ void loom_task_group_cancel(loom_task_group_t *group);
  * historical behaviour this does NOT shut down the backing pool, so the
  * pool stays fully usable for new submissions after wait() returns.
  *
+ * Returns LOOMWORKS_ERR_INVALID when called from a worker of the group's
+ * own pool (would deadlock) or with a NULL handle; must be called from a
+ * thread that is not executing group tasks.
+ *
  * @param group  The task group.
+ * @return       LOOMWORKS_OK on success, LOOMWORKS_ERR_INVALID on misuse.
  */
-void loom_task_group_wait(loom_task_group_t *group);
+loom_result_t loom_task_group_wait(loom_task_group_t *group);
 
 /**
  * @brief Get the number of tasks currently tracked by the group.

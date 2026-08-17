@@ -194,6 +194,12 @@ void loom_enqueue_unlocked(loom_thread_pool_t *pool, loom_task_t *task);
  */
 loom_task_t *loom_dequeue_unlocked(loom_thread_pool_t *pool);
 
+/**
+ * @brief Return the pool whose worker is executing on this thread.
+ * @return The current pool, or NULL outside a worker thread.
+ */
+loom_thread_pool_t *loom_pool_current(void);
+
 /* ================================================================
  *  Chase-Lev work-stealing deque operations.
  *  Owner thread: deque_push / deque_pop (LIFO at the bottom).

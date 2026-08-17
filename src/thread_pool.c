@@ -50,6 +50,10 @@
  *  Forward declarations
  * ================================================================ */
 
+/* Set by worker_entry; lets task-group code detect a self-deadlock when a
+ * worker waits on its own pool's group. */
+static _Thread_local loom_thread_pool_t *g_current_pool = NULL;
+
 static loom_result_t pool_init(loom_thread_pool_t *pool);
 static void          pool_destroy_internal(loom_thread_pool_t *pool);
 static void         *worker_entry(void *arg);
@@ -318,6 +322,7 @@ static void *worker_entry(void *arg)
     loom_thread_pool_t *pool = wa->pool;
     uint32_t            idx  = wa->index;
     free(wa);
+    g_current_pool = pool;
     while (1) {
         pthread_mutex_lock(&pool->lock);
         /* Re-read each iteration: loom_pool_resize may realloc the deques
@@ -1853,6 +1858,18 @@ loom_result_t loom_pool_destroy(loom_thread_pool_t **pool)
     pool_destroy_internal(*pool);
     *pool = NULL;
     return LOOMWORKS_OK;
+}
+
+/* ================================================================
+ *  loom_pool_current — return the pool whose worker is executing
+ *  on this thread, or NULL when not running inside a worker.
+ *
+ *  Internal accessor used by task_group wait/destroy guards to
+ *  reject self-deadlocking calls from a worker of the same pool.
+ * ================================================================ */
+loom_thread_pool_t *loom_pool_current(void)
+{
+    return g_current_pool;
 }
 
 /* ================================================================

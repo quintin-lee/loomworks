@@ -738,6 +738,81 @@ static void test_task_group_null_safety(void)
     ASSERT(true, "null safety passed");
 }
 
+/* ---------- Test: group self-wait guard ----------
+ * A worker of a pool must never block on (or destroy) a group of its own
+ * pool: the pool would stall and the call could never complete. */
+
+static volatile int       g_group_wait_rc  = -1;
+static loom_task_group_t *g_group_for_wait = NULL;
+
+static void group_wait_from_worker_fn(void *data)
+{
+    (void)data;
+    g_group_wait_rc = loom_task_group_wait(g_group_for_wait);
+}
+
+static void group_destroy_from_worker_fn(void *data)
+{
+    (void)data;
+    g_group_wait_rc = loom_task_group_destroy(&g_group_for_wait);
+}
+
+static void test_task_group_wait_from_worker(void)
+{
+    loom_pool_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.worker_count   = 2;
+    cfg.queue_capacity = 64;
+
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool create");
+
+    loom_task_group_t *group = NULL;
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
+    g_group_for_wait = group;
+
+    /* Submit a task to the group whose body waits on the same group. */
+    ASSERT(loom_task_group_submit(group, group_wait_from_worker_fn, NULL, NULL) == LOOMWORKS_OK,
+           "group submit");
+    g_group_wait_rc = -1;
+
+    /* Wait from main: must complete once the worker task finishes. */
+    ASSERT(loom_task_group_wait(group) == LOOMWORKS_OK, "wait from main ok");
+    ASSERT(g_group_wait_rc == LOOMWORKS_ERR_INVALID, "wait from own worker rejected");
+    ASSERT(loom_task_group_pending_count(group) == 1, "one tracked task survives wait");
+
+    ASSERT(loom_task_group_destroy(&group) == LOOMWORKS_OK, "group destroy");
+    ASSERT(group == NULL, "group nulled");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy");
+}
+
+static void test_task_group_destroy_from_worker(void)
+{
+    loom_pool_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.worker_count   = 2;
+    cfg.queue_capacity = 64;
+
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool create");
+
+    loom_task_group_t *group = NULL;
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
+
+    /* Submit a task that attempts destroy on its own group. */
+    g_group_for_wait = group;
+    g_group_wait_rc  = -1;
+    ASSERT(loom_task_group_submit(group, group_destroy_from_worker_fn, NULL, NULL) == LOOMWORKS_OK,
+           "group submit");
+    ASSERT(loom_task_group_wait(group) == LOOMWORKS_OK, "wait from main");
+    ASSERT(g_group_wait_rc == LOOMWORKS_ERR_INVALID, "destroy from own worker rejected");
+
+    ASSERT(loom_task_group_destroy(&group) == LOOMWORKS_OK, "group destroy");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy");
+}
+
 static void test_task_group_submit_after_destroy(void)
 {
     loom_thread_pool_t *pool  = NULL;
@@ -3343,6 +3418,8 @@ int main(void)
     test_task_group_cancel();
     test_task_group_destroy_cancels();
     test_task_group_null_safety();
+    test_task_group_wait_from_worker();
+    test_task_group_destroy_from_worker();
     test_task_group_submit_after_destroy();
     test_task_group_with_task_id();
     test_task_group_future_with_task_id();

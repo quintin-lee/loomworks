@@ -18,6 +18,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/task_group.h"
+#include "thread_pool_internal.h"
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -197,13 +198,19 @@ static void task_group_cancel_tracked(loom_task_group_t *g)
  *  Cancels every queued task, then waits for in-flight tasks (their
  *  wrappers) to finish before releasing the group.  This guarantees no
  *  worker thread ever touches the group after destroy() returns.
+ *
+ *  Rejects a call from a worker of the group's own pool: that worker
+ *  would block forever waiting for itself, and the pool would stall.
  * ================================================================ */
-void loom_task_group_destroy(loom_task_group_t **group)
+loom_result_t loom_task_group_destroy(loom_task_group_t **group)
 {
     if (!group || !*group) {
-        return;
+        return LOOMWORKS_ERR_INVALID;
     }
     loom_task_group_t *g = *group;
+    if (loom_pool_current() == g->pool) {
+        return LOOMWORKS_ERR_INVALID;
+    }
     pthread_mutex_lock(&g->lock);
     g->destroyed = true;
     task_group_cancel_tracked(g);
@@ -218,6 +225,7 @@ void loom_task_group_destroy(loom_task_group_t **group)
     pthread_mutex_destroy(&g->lock);
     free(g);
     *group = NULL;
+    return LOOMWORKS_OK;
 }
 
 /* ================================================================
@@ -389,17 +397,28 @@ void loom_task_group_cancel(loom_task_group_t *group)
  *  Waits until every task submitted to the group has completed.  Unlike
  *  the historical behaviour this does NOT shut down the backing pool —
  *  the pool stays fully usable for new submissions after wait().
+ *
+ *  Rejects a call from a worker of the group's own pool: the pool would
+ *  stall and the wait could never complete (deadlock).
  * ================================================================ */
-void loom_task_group_wait(loom_task_group_t *group)
+loom_result_t loom_task_group_wait(loom_task_group_t *group)
 {
-    if (!group) {
-        return;
+    if (group == NULL) {
+        return LOOMWORKS_ERR_INVALID;
     }
+
+    /* A worker of this pool must never block on the pool's own group:
+     * the pool would stall and the wait could never complete (deadlock). */
+    if (loom_pool_current() == group->pool) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+
     pthread_mutex_lock(&group->lock);
     while (group->pending > 0) {
         pthread_cond_wait(&group->done_cond, &group->lock);
     }
     pthread_mutex_unlock(&group->lock);
+    return LOOMWORKS_OK;
 }
 
 /* ================================================================
