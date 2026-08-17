@@ -21,7 +21,7 @@ Risk ratings use the conventional 3×3 grid:
 | R1 | Coroutine | Process-global `SIGSEGV`/`SIGBUS` handlers installed via `sigaction` without chaining to prior handlers | Medium | Medium | **Medium** — ✅ closed (2026-08-17): handlers now save and restore the prior handler |
 | R2 | Coroutine | `ucontext` is deprecated by POSIX.1-2008 and marked obsolescent in glibc 2.16+; removed on macOS | Medium | Medium | **Medium** — ✅ mitigated (2026-08-17): hand-written asm backends for x86-64/aarch64 are default; ucontext is a compile-time fallback |
 | R3 | Metrics | Callback fires synchronously on the worker thread; must be cheap or it throttles the pool | Medium | Medium | **Medium** |
-| R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** — ⚠️ partial (2026-08-17): self-wait from the group's own pool worker now rejected with `ERR_INVALID`; unbounded external waits remain documented |
+| R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): timed group wait (`loom_task_group_wait_timeout`, absolute `CLOCK_MONOTONIC` deadline); `destroy()` remains blocking by documented contract |
 | R5 | Thread Pool | `loom_pool_cancel()` performs an O(cancel_cap) linear scan of the cancel index on the fast path | Medium | Low | **Low** |
 | R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** |
 | R7 | Thread Pool | Work-stealing executes tasks out of submission order (LIFO local, FIFO steal) — FIFO is only guaranteed for NORMAL+ring when ≤1 worker actively drains | Low | Medium | **Low** |
@@ -94,12 +94,16 @@ wrappers to complete. If a user task blocks forever (deadlock, infinite
 loop, waiting on I/O), `group_destroy()` never returns. There is no timeout
 parameter.
 
-**Status: ⚠️ PARTIAL (2026-08-17).** The guaranteed-deadlock case is closed:
+**Status: ✅ RESOLVED (2026-08-17).** The guaranteed-deadlock case is closed:
 `group_wait()`/`group_destroy()` called from a worker of the group's own pool
-now return `LOOMWORKS_ERR_INVALID` immediately (self-wait guard via the
-`loom_pool_current` TLS). The unbounded external wait remains — a caller that
-blocks on I/O inside a group task can still wedge a non-worker `wait()`
-caller; that is documented contract, not a bug.
+return `LOOMWORKS_ERR_INVALID` immediately (self-wait guard via the
+`loom_pool_current` TLS). The residual unbounded external wait is now
+addressable too: `loom_task_group_wait_timeout()` bounds a non-worker `wait()`
+with an absolute `CLOCK_MONOTONIC` deadline and returns
+`LOOMWORKS_ERR_TIMEOUT` on expiry, leaving the group fully usable for a later
+`wait()`/`destroy()`. `group_destroy()` itself remains a blocking call by
+documented contract — a caller must use the wait-timeout-then-destroy pattern
+to bound the full teardown.
 
 ### R5 — `cancel()` is a linear scan
 
@@ -314,7 +318,6 @@ All claims above are grounded in the source as of master @ b5d8ab2:
    `LOOM_PC_OWN_PAYLOADS` flag in a future minor release.
 3. **R6** (resize) — the largest untested surface remains; fault-injection of
    mid-`realloc` alloc failures would close the gap.
-4. **R4** (unbounded group waits) — self-wait is guarded; a wait timeout
-   parameter would address the residual external-wait case.
-5. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
-   R1/R9/R13/R15/R16/R17/R18 are closed as of 2026-08-17.
+4. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
+   R1/R9/R13/R15/R16/R17/R18 are closed as of 2026-08-17; R4 was resolved on
+   2026-08-17 with the timed group wait.

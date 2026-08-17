@@ -315,6 +315,8 @@ loom_result_t loom_task_group_submit_future(loom_task_group_t *group, loom_task_
                                             uint64_t *task_id);
 void          loom_task_group_cancel(loom_task_group_t *group);
 loom_result_t loom_task_group_wait(loom_task_group_t *group);
+loom_result_t loom_task_group_wait_timeout(loom_task_group_t *group,
+                                           const struct timespec *deadline);
 uint32_t      loom_task_group_pending_count(const loom_task_group_t *group);
 ```
 
@@ -329,6 +331,7 @@ uint32_t      loom_task_group_pending_count(const loom_task_group_t *group);
 - `destroy()`: cancels all pending tracked tasks (`loom_pool_cancel` on each), waits for in-flight tasks to finish, then frees the group. Returns `LOOMWORKS_ERR_INVALID` if called **from a worker of the group's own pool** (the call would block forever waiting on work only that worker could run) or with a NULL handle.
 - `cancel()`: same cancellation sweep; the group can be reused afterwards.
 - `wait()`: blocks until every tracked task finishes; the backing pool stays fully usable afterwards. Returns `LOOMWORKS_ERR_INVALID` when called from a worker of the group's own pool, or with a NULL handle.
+- `wait_timeout()`: same contract as `wait()` but gives up once the absolute `CLOCK_MONOTONIC` deadline passes, returning `LOOMWORKS_ERR_TIMEOUT`. The group is left fully usable (pending accounting + tracking list untouched), so a later `wait()`/`wait_timeout()`/`destroy()` resumes where the timed-out call left off. A `NULL` deadline means "wait forever" (identical to `wait()` — which is implemented as `wait_timeout(group, NULL)`). Same `ERR_INVALID` conditions as `wait()`.
 - **Fragility:** cancellation matches tasks by `user_data` pointer equality. If data is freed or reused before cancel, matching can be wrong. Prefer tracking `task_id` and cancelling via `loom_pool_cancel_by_id()` when many tasks share one pointer.
 
 ---

@@ -57,6 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wait_for_space` / `loom_future_wait_timeout` read monotonic time —
   deadline arguments in the headers are documented as monotonic, so
   wall-clock adjustments can no longer expire or stretch timeouts.
+- **Timed group wait (`loom_task_group_wait_timeout`)**: bounds an external
+  group wait with an absolute `CLOCK_MONOTONIC` deadline, returning
+  `LOOMWORKS_ERR_TIMEOUT` on expiry while leaving the group fully usable
+  (pending accounting + tracking list untouched); `NULL` deadline means
+  "wait forever". `wait()` is now the `NULL`-deadline case.
 
 ## [1.0.1] - 2026-08-14
 
