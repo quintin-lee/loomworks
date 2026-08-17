@@ -44,6 +44,7 @@ typedef struct loom_task {
     uint8_t           priority;  /**< Task priority (lower = higher). */
     struct loom_task *next;      /**< Next node in the queue. */
     bool              free_data; /**< true if user_data should be freed in task_destroy. */
+    bool              is_future; /**< true if this task wraps a future_task_ctx_t. */
 } loom_task_t;
 
 /* Ring cell — canonical Vyukov sequence numbers.  seq == pos is "empty for
@@ -105,6 +106,7 @@ struct loom_future {
     pthread_cond_t  cond;       /**< Signalled when @p ready becomes true. */
     bool            ready;      /**< true once the task has completed. */
     bool            has_result; /**< true if result is non-NULL. */
+    bool            cancelled;  /**< true if the underlying task was cancelled. */
 };
 
 /* ================================================================

@@ -63,6 +63,7 @@ static loom_task_t *dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool,
 static bool         ring_has_work(loom_thread_pool_t *pool);
 size_t              ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
 static void         cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task);
+static void         future_mark_cancelled(future_task_ctx_t *ctx);
 
 /* ================================================================
  *  pool_init — initialise locks, defaults, and worker thread array
@@ -80,6 +81,21 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
     if (pool->metrics) {
         loom_metrics_fire((loom_metrics_t *)pool->metrics, event);
     }
+}
+
+/* Mark a cancelled future terminal under its mutex. Called with pool->lock
+ * held (lock order: pool->lock -> future->mutex), so waiters wake up and
+ * loom_future_wait() can return LOOMWORKS_ERR_CANCELLED instead of hanging
+ * forever on a task that will never run. */
+static void future_mark_cancelled(future_task_ctx_t *ctx)
+{
+    loom_future_t *fut = ctx->future;
+    pthread_mutex_lock(&fut->mutex);
+    fut->cancelled  = true;
+    fut->ready      = true;
+    fut->has_result = false;
+    pthread_cond_broadcast(&fut->cond);
+    pthread_mutex_unlock(&fut->mutex);
 }
 
 /* Smallest power of two >= v (1 when v == 0). */
@@ -425,6 +441,9 @@ static void *worker_entry(void *arg)
         if (task->cancelled) {
             /* Tombstone won: the canceller already accounted queue_len;
              * release the node (and any owned data) and continue. */
+            if (task->is_future) {
+                future_mark_cancelled((future_task_ctx_t *)task->user_data);
+            }
             if (task->free_data && task->user_data) {
                 free(task->user_data);
             }
@@ -546,6 +565,7 @@ task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t prior
     t->priority  = priority;
     t->cancelled = false;
     t->free_data = false;
+    t->is_future = (fn == future_task_wrapper);
     t->next      = NULL;
     return t;
 }
@@ -1385,6 +1405,13 @@ loom_result_t loom_future_wait(loom_future_t *future, void **result)
     while (!future->ready) {
         pthread_cond_wait(&future->cond, &future->mutex);
     }
+    if (future->cancelled) {
+        if (result) {
+            *result = NULL;
+        }
+        pthread_mutex_unlock(&future->mutex);
+        return LOOMWORKS_ERR_CANCELLED;
+    }
     if (result) {
         *result = future->result;
     }
@@ -1411,6 +1438,13 @@ loom_future_wait_timeout(loom_future_t *future, void **result, const struct time
     }
     pthread_mutex_lock(&future->mutex);
     if (future->ready) {
+        if (future->cancelled) {
+            if (result) {
+                *result = NULL;
+            }
+            pthread_mutex_unlock(&future->mutex);
+            return LOOMWORKS_ERR_CANCELLED;
+        }
         if (result) {
             *result = future->result;
         }
@@ -1429,6 +1463,13 @@ loom_future_wait_timeout(loom_future_t *future, void **result, const struct time
     if (rc == ETIMEDOUT) {
         pthread_mutex_unlock(&future->mutex);
         return LOOMWORKS_ERR_TIMEOUT;
+    }
+    if (future->cancelled) {
+        if (result) {
+            *result = NULL;
+        }
+        pthread_mutex_unlock(&future->mutex);
+        return LOOMWORKS_ERR_CANCELLED;
     }
     if (result) {
         *result = future->result;
@@ -1562,6 +1603,9 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
                 }
                 atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
                 loom_task_t *to_free = cur;
+                if (to_free->is_future) {
+                    future_mark_cancelled((future_task_ctx_t *)to_free->user_data);
+                }
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);
                 }
@@ -1636,6 +1680,9 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
                 }
                 atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
                 loom_task_t *to_free = cur;
+                if (to_free->is_future) {
+                    future_mark_cancelled((future_task_ctx_t *)to_free->user_data);
+                }
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);
                 }
@@ -1698,6 +1745,9 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
             pool->buckets_tail[b] = NULL;
             while (cur) {
                 loom_task_t *next = cur->next;
+                if (cur->is_future) {
+                    future_mark_cancelled((future_task_ctx_t *)cur->user_data);
+                }
                 if (cur->free_data && cur->user_data) {
                     free(cur->user_data);
                 }

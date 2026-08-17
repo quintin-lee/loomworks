@@ -32,12 +32,13 @@ typedef struct loom_future loom_future_t;
  * @brief Result codes for thread pool operations.
  */
 typedef enum {
-    LOOMWORKS_OK = 0,       /**< Operation succeeded. */
-    LOOMWORKS_ERR_ALLOC,    /**< Memory allocation failed. */
-    LOOMWORKS_ERR_THREAD,   /**< Thread creation failed. */
-    LOOMWORKS_ERR_INVALID,  /**< Invalid argument or handle. */
-    LOOMWORKS_ERR_SHUTDOWN, /**< Pool is shutting down or shut down. */
-    LOOMWORKS_ERR_TIMEOUT,  /**< Operation timed out. */
+    LOOMWORKS_OK = 0,        /**< Operation succeeded. */
+    LOOMWORKS_ERR_ALLOC,     /**< Memory allocation failed. */
+    LOOMWORKS_ERR_THREAD,    /**< Thread creation failed. */
+    LOOMWORKS_ERR_INVALID,   /**< Invalid argument or handle. */
+    LOOMWORKS_ERR_SHUTDOWN,  /**< Pool is shutting down or shut down. */
+    LOOMWORKS_ERR_TIMEOUT,   /**< Operation timed out. */
+    LOOMWORKS_ERR_CANCELLED, /**< Operation was cancelled. */
 } loom_result_t;
 
 /**

@@ -2121,14 +2121,15 @@ static void test_future_cancel_pending(void)
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
-    /* Fill the queue with a slow task so the future task stays queued */
-    ASSERT(loom_pool_submit(pool, slow_task, NULL, NULL) == LOOMWORKS_OK, "submit slow task");
+    /* Park the single worker on the gate so the future task stays queued */
+    g_gate_started = 0;
+    g_gate_release = 0;
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "submit gate task");
+    while (!g_gate_started) {
+        sched_yield();
+    }
 
-    /* Give the worker time to pick up the slow task */
-    struct timespec ts = {0, 50000000}; /* 50ms */
-    nanosleep(&ts, NULL);
-
-    /* Submit a future task */
+    /* Submit a future task while the worker is parked */
     loom_future_t *fut     = NULL;
     uint64_t       task_id = 0;
     ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut, &task_id) == LOOMWORKS_OK,
@@ -2139,16 +2140,122 @@ static void test_future_cancel_pending(void)
     /* Cancel the future's task while it's still queued */
     ASSERT(loom_pool_cancel_by_id(pool, task_id) == LOOMWORKS_OK, "cancel future task");
 
-    /* The future should never complete — wait with a short timeout */
+    /* Long deadline: the worker must drain the cancellation tombstone, which
+     * signals the future, before the timeout can expire. Uses CLOCK_REALTIME
+     * to match the future's condition variable clock (Task 7 switches both
+     * to CLOCK_MONOTONIC together). */
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_nsec += 200000000; /* 200ms */
-    if (deadline.tv_nsec >= 1000000000) {
-        deadline.tv_sec++;
-        deadline.tv_nsec -= 1000000000;
-    }
+    deadline.tv_sec += 5;
+
+    /* Let the worker finish the gate task and process the tombstone */
+    g_gate_release = 1;
+
+    /* A cancelled future must report cancellation, not time out */
     loom_result_t rc = loom_future_wait_timeout(fut, NULL, &deadline);
-    ASSERT(rc == LOOMWORKS_ERR_TIMEOUT, "future times out when cancelled");
+    ASSERT(rc == LOOMWORKS_ERR_CANCELLED, "future reports cancelled when task cancelled");
+
+    /* A cancelled future holds no result */
+    void *result = (void *)&rc;
+    ASSERT(loom_future_wait_timeout(fut, &result, &deadline) == LOOMWORKS_ERR_CANCELLED,
+           "cancelled future wait returns cancelled again");
+    ASSERT(result == NULL, "cancelled future leaves result NULL");
+
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: infinite wait on cancelled future returns ERR_CANCELLED ---------- */
+static void test_future_cancel_wait_cancelled(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    /* Fill the queue with a slow task so the future task stays queued */
+    ASSERT(loom_pool_submit(pool, slow_task, NULL, NULL) == LOOMWORKS_OK, "submit slow task");
+
+    /* Give the worker time to pick up the slow task */
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+
+    /* Submit a future (ring path, NORMAL priority) */
+    loom_future_t *fut     = NULL;
+    uint64_t       task_id = 0;
+    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut, &task_id) == LOOMWORKS_OK,
+           "submit future");
+    ASSERT(fut != NULL, "future not null");
+    ASSERT(task_id > 0, "task_id returned");
+
+    /* Cancel while queued — worker drains the tombstone later */
+    ASSERT(loom_pool_cancel_by_id(pool, task_id) == LOOMWORKS_OK, "cancel future task");
+
+    /* Infinite wait must not hang; it must surface the cancellation */
+    ASSERT(loom_future_wait(fut, NULL) == LOOMWORKS_ERR_CANCELLED,
+           "infinite wait returns cancelled for cancelled future");
+
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancelled future in a lane bucket (non-NORMAL priority) ---------- */
+static void test_future_cancel_lane_cancelled(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    ASSERT(loom_pool_submit(pool, slow_task, NULL, NULL) == LOOMWORKS_OK, "submit slow task");
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+
+    /* HIGH priority goes to the lane buckets, not the ring */
+    loom_future_t *fut     = NULL;
+    uint64_t       task_id = 0;
+    ASSERT(loom_pool_submit_future_priority(
+               pool, fast_result_task, NULL, LOOMWORKS_PRIORITY_HIGH, &fut, &task_id) ==
+               LOOMWORKS_OK,
+           "submit high-priority future");
+    ASSERT(fut != NULL, "future not null");
+    ASSERT(task_id > 0, "task_id returned");
+
+    /* Cancel while queued in a lane — cancel_by_id unlinks the node directly */
+    ASSERT(loom_pool_cancel_by_id(pool, task_id) == LOOMWORKS_OK, "cancel lane future task");
+
+    ASSERT(loom_future_wait(fut, NULL) == LOOMWORKS_ERR_CANCELLED,
+           "wait returns cancelled for lane-cancelled future");
+
+    loom_future_destroy(fut);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: cancel_all() cancels queued futures ---------- */
+static void test_future_cancel_all_cancelled(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    ASSERT(loom_pool_submit(pool, slow_task, NULL, NULL) == LOOMWORKS_OK, "submit slow task");
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+
+    /* Submit a future that will sit in the ring while the slow task runs */
+    loom_future_t *fut     = NULL;
+    uint64_t       task_id = 0;
+    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut, &task_id) == LOOMWORKS_OK,
+           "submit future");
+    ASSERT(fut != NULL, "future not null");
+
+    uint32_t cancelled = 0;
+    loom_pool_cancel_all(pool, &cancelled);
+    ASSERT(cancelled >= 1, "at least the future task is cancelled");
+
+    ASSERT(loom_future_wait(fut, NULL) == LOOMWORKS_ERR_CANCELLED,
+           "wait returns cancelled after cancel_all");
 
     loom_future_destroy(fut);
     loom_pool_shutdown(pool);
@@ -3225,6 +3332,9 @@ int main(void)
     test_steal_trigger();
     test_steal_fifo_order();
     test_steal_stress();
+    test_future_cancel_wait_cancelled();
+    test_future_cancel_lane_cancelled();
+    test_future_cancel_all_cancelled();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
