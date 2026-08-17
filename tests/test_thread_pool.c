@@ -582,7 +582,7 @@ static void test_future_wait_timeout_ok(void)
            "submit future");
 
     struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_sec += 5; /* 5 second timeout -- should always succeed */
 
     void *result = NULL;
@@ -2262,11 +2262,9 @@ static void test_future_cancel_pending(void)
     ASSERT(loom_pool_cancel_by_id(pool, task_id) == LOOMWORKS_OK, "cancel future task");
 
     /* Long deadline: the worker must drain the cancellation tombstone, which
-     * signals the future, before the timeout can expire. Uses CLOCK_REALTIME
-     * to match the future's condition variable clock (Task 7 switches both
-     * to CLOCK_MONOTONIC together). */
+     * signals the future, before the timeout can expire. */
     struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_sec += 5;
 
     /* Let the worker finish the gate task and process the tombstone */

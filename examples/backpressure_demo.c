@@ -110,7 +110,7 @@ int main(void)
     }
 
     struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_nsec += 10 * 1000000L; /* 10 ms from now */
     if (deadline.tv_nsec >= 1000000000L) {
         deadline.tv_sec++;

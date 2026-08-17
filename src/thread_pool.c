@@ -112,6 +112,17 @@ static uint64_t next_pow2_u64(uint32_t v)
     return n;
 }
 
+/* CLOCK_MONOTONIC is immune to wall-clock jumps; all timeout waits in this
+ * module pair a monotonic deadline with a monotonic-clocked condvar. */
+static pthread_once_t     g_condattr_once = PTHREAD_ONCE_INIT;
+static pthread_condattr_t g_condattr_mono;
+
+static void init_monotonic_condattr(void)
+{
+    pthread_condattr_init(&g_condattr_mono);
+    pthread_condattr_setclock(&g_condattr_mono, CLOCK_MONOTONIC);
+}
+
 static loom_result_t pool_init(loom_thread_pool_t *pool)
 {
     if (pool->worker_count == 0) {
@@ -143,7 +154,8 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         pthread_cond_destroy(&pool->drain_cond);
         return LOOMWORKS_ERR_ALLOC;
     }
-    if (pthread_cond_init(&pool->space_cond, NULL) != 0) {
+    pthread_once(&g_condattr_once, init_monotonic_condattr);
+    if (pthread_cond_init(&pool->space_cond, &g_condattr_mono) != 0) {
         sem_destroy(&pool->work_sem);
         pthread_mutex_destroy(&pool->lock);
         pthread_cond_destroy(&pool->drain_cond);
@@ -1099,7 +1111,7 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
 static loom_result_t wait_for_space(loom_thread_pool_t *pool)
 {
     struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_sec += 60;
     pthread_mutex_lock(&pool->lock);
     while (pool->queue_len >= pool->queue_capacity && !pool->shutdown) {
@@ -1291,7 +1303,8 @@ loom_result_t loom_pool_submit_future(loom_thread_pool_t *pool,
         free(fut);
         return LOOMWORKS_ERR_ALLOC;
     }
-    if (pthread_cond_init(&fut->cond, NULL) != 0) {
+    pthread_once(&g_condattr_once, init_monotonic_condattr);
+    if (pthread_cond_init(&fut->cond, &g_condattr_mono) != 0) {
         pthread_mutex_destroy(&fut->mutex);
         free(fut);
         return LOOMWORKS_ERR_ALLOC;
@@ -1368,7 +1381,8 @@ loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
         free(fut);
         return LOOMWORKS_ERR_ALLOC;
     }
-    if (pthread_cond_init(&fut->cond, NULL) != 0) {
+    pthread_once(&g_condattr_once, init_monotonic_condattr);
+    if (pthread_cond_init(&fut->cond, &g_condattr_mono) != 0) {
         pthread_mutex_destroy(&fut->mutex);
         free(fut);
         return LOOMWORKS_ERR_ALLOC;
@@ -1465,7 +1479,7 @@ loom_future_wait_timeout(loom_future_t *future, void **result, const struct time
         return LOOMWORKS_OK;
     }
     struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
+    clock_gettime(CLOCK_MONOTONIC, &now);
     long remaining_ns = (long)(deadline->tv_sec - now.tv_sec) * 1000000000L +
                         (long)(deadline->tv_nsec - now.tv_nsec);
     if (remaining_ns <= 0) {

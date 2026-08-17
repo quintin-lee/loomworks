@@ -320,7 +320,7 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count);
  *
  * @param future   The future handle.
  * @param result   Output pointer for the result (may be NULL).
- * @param deadline Absolute time (timespec) after which to give up waiting.
+ * @param deadline Absolute CLOCK_MONOTONIC time (timespec) after which to give up waiting.
  * @return         LOOMWORKS_OK on success, LOOMWORKS_ERR_TIMEOUT on expiry.
  */
 loom_result_t
