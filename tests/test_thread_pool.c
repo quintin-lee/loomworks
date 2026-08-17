@@ -813,6 +813,151 @@ static void test_task_group_destroy_from_worker(void)
     ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy");
 }
 
+/* ---------- Test: group wait timeout ----------
+ * wait_timeout takes an absolute CLOCK_MONOTONIC deadline and must never
+ * leave the group in a partial state: a timed-out wait leaves every
+ * tracked task pending and the group fully usable for a later wait. */
+
+static void group_wait_timeout_from_worker_fn(void *data)
+{
+    (void)data;
+    g_group_wait_rc = loom_task_group_wait_timeout(g_group_for_wait, NULL);
+}
+
+static void test_task_group_wait_timeout_expired_and_reusable(void)
+{
+    loom_pool_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.worker_count   = 1;
+    cfg.queue_capacity = 16;
+
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool create");
+
+    loom_task_group_t *group = NULL;
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
+
+    /* A task that parks on a gate: the group stays pending. */
+    g_gate_started = 0;
+    g_gate_release = 0;
+    ASSERT(loom_task_group_submit(group, gate_task, NULL, NULL) == LOOMWORKS_OK, "group submit");
+    while (!g_gate_started) {
+        sched_yield();
+    }
+    ASSERT(g_gate_parked == 1, "task parked");
+
+    /* An already-expired deadline must time out immediately and leave the
+     * group intact. */
+    struct timespec past;
+    clock_gettime(CLOCK_MONOTONIC, &past);
+    past.tv_sec -= 1;
+    ASSERT(loom_task_group_wait_timeout(group, &past) == LOOMWORKS_ERR_TIMEOUT,
+           "expired deadline times out");
+    ASSERT(loom_task_group_pending_count(group) == 1, "tracked task still pending");
+
+    /* Releasing the gate lets a plain wait finish: nothing was torn down. */
+    g_gate_release = 1;
+    ASSERT(loom_task_group_wait(group) == LOOMWORKS_OK, "group reusable after timeout");
+
+    ASSERT(loom_task_group_destroy(&group) == LOOMWORKS_OK, "group destroy");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy");
+}
+
+static void test_task_group_wait_timeout_ok(void)
+{
+    loom_pool_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.worker_count   = 1;
+    cfg.queue_capacity = 16;
+
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool create");
+
+    loom_task_group_t *group = NULL;
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
+
+    int counter = 0;
+    ASSERT(loom_task_group_submit(group, increment_task, &counter, NULL) == LOOMWORKS_OK,
+           "group submit");
+
+    struct timespec later;
+    clock_gettime(CLOCK_MONOTONIC, &later);
+    later.tv_sec += 5;
+    ASSERT(loom_task_group_wait_timeout(group, &later) == LOOMWORKS_OK, "far deadline ok");
+    ASSERT(counter == 1, "task ran");
+
+    ASSERT(loom_task_group_destroy(&group) == LOOMWORKS_OK, "group destroy");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy");
+}
+
+static void test_task_group_wait_timeout_null_deadline(void)
+{
+    loom_pool_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.worker_count   = 1;
+    cfg.queue_capacity = 16;
+
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool create");
+
+    loom_task_group_t *group = NULL;
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
+
+    int counter = 0;
+    ASSERT(loom_task_group_submit(group, increment_task, &counter, NULL) == LOOMWORKS_OK,
+           "group submit");
+
+    /* NULL deadline means "wait forever", exactly like loom_task_group_wait. */
+    ASSERT(loom_task_group_wait_timeout(group, NULL) == LOOMWORKS_OK, "null deadline waits");
+    ASSERT(counter == 1, "task ran");
+
+    ASSERT(loom_task_group_destroy(&group) == LOOMWORKS_OK, "group destroy");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy");
+}
+
+static void test_task_group_wait_timeout_from_worker(void)
+{
+    loom_pool_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.worker_count   = 2;
+    cfg.queue_capacity = 64;
+
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool create");
+
+    loom_task_group_t *group = NULL;
+    ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
+    g_group_for_wait = group;
+
+    /* A worker of the same pool must be rejected, even with a deadline. */
+    ASSERT(loom_task_group_submit(group, group_wait_timeout_from_worker_fn, NULL, NULL) ==
+               LOOMWORKS_OK,
+           "group submit");
+    g_group_wait_rc = -1;
+
+    ASSERT(loom_task_group_wait(group) == LOOMWORKS_OK, "wait from main ok");
+    ASSERT(g_group_wait_rc == LOOMWORKS_ERR_INVALID, "wait_timeout from own worker rejected");
+
+    ASSERT(loom_task_group_destroy(&group) == LOOMWORKS_OK, "group destroy");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy");
+}
+
+static void test_task_group_wait_timeout_null_group(void)
+{
+    struct timespec later;
+    clock_gettime(CLOCK_MONOTONIC, &later);
+    later.tv_sec += 5;
+
+    ASSERT(loom_task_group_wait_timeout(NULL, &later) == LOOMWORKS_ERR_INVALID,
+           "null group rejected");
+    ASSERT(loom_task_group_wait_timeout(NULL, NULL) == LOOMWORKS_ERR_INVALID,
+           "null group + null deadline rejected");
+}
+
 static void test_task_group_submit_after_destroy(void)
 {
     loom_thread_pool_t *pool  = NULL;
@@ -3418,6 +3563,11 @@ int main(void)
     test_task_group_null_safety();
     test_task_group_wait_from_worker();
     test_task_group_destroy_from_worker();
+    test_task_group_wait_timeout_expired_and_reusable();
+    test_task_group_wait_timeout_ok();
+    test_task_group_wait_timeout_null_deadline();
+    test_task_group_wait_timeout_from_worker();
+    test_task_group_wait_timeout_null_group();
     test_task_group_submit_after_destroy();
     test_task_group_with_task_id();
     test_task_group_future_with_task_id();

@@ -20,11 +20,30 @@
 #include "loomworks/task_group.h"
 #include "thread_pool_internal.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ================================================================
+ *  Monotonic clock attribute for done_cond.
+ *
+ *  done_cond must use the same clock as the deadline arguments caller
+ *  pass to loom_task_group_wait_timeout (CLOCK_MONOTONIC); mixing a
+ *  realtime condvar with monotonic deadlines is undefined behaviour.
+ *  A single attribute is created once via pthread_once (Task 7 pattern)
+ *  and shared by every group.
+ * ================================================================ */
+static pthread_once_t     g_done_condattr_once = PTHREAD_ONCE_INIT;
+static pthread_condattr_t g_done_condattr_mono;
+
+static void init_done_condattr(void)
+{
+    pthread_condattr_init(&g_done_condattr_mono);
+    pthread_condattr_setclock(&g_done_condattr_mono, CLOCK_MONOTONIC);
+}
 
 /* ================================================================
  *  Internal wrapper — carries one submitted task plus a back-pointer
@@ -140,7 +159,8 @@ loom_result_t loom_task_group_create(loom_thread_pool_t *pool, loom_task_group_t
         free(g);
         return LOOMWORKS_ERR_ALLOC;
     }
-    if (pthread_cond_init(&g->done_cond, NULL) != 0) {
+    pthread_once(&g_done_condattr_once, init_done_condattr);
+    if (pthread_cond_init(&g->done_cond, &g_done_condattr_mono) != 0) {
         pthread_mutex_destroy(&g->lock);
         free(g);
         return LOOMWORKS_ERR_ALLOC;
@@ -392,16 +412,21 @@ void loom_task_group_cancel(loom_task_group_t *group)
 }
 
 /* ================================================================
- *  loom_task_group_wait
+ *  loom_task_group_wait_timeout
  *
- *  Waits until every task submitted to the group has completed.  Unlike
- *  the historical behaviour this does NOT shut down the backing pool —
- *  the pool stays fully usable for new submissions after wait().
+ *  Waits until every task submitted to the group has completed, but
+ *  gives up once @p deadline (absolute CLOCK_MONOTONIC) passes.  A
+ *  NULL deadline waits forever, matching loom_task_group_wait().
+ *  On timeout the group is left fully usable: pending accounting and
+ *  the tracking list are untouched, so a later wait()/destroy() picks
+ *  up exactly where the timed-out call left off.  Unlike the
+ *  historical behaviour this does NOT shut down the backing pool.
  *
- *  Rejects a call from a worker of the group's own pool: the pool would
- *  stall and the wait could never complete (deadlock).
+ *  Rejects a call from a worker of the group's own pool: the pool
+ *  would stall and the wait could never complete (deadlock).
  * ================================================================ */
-loom_result_t loom_task_group_wait(loom_task_group_t *group)
+loom_result_t loom_task_group_wait_timeout(loom_task_group_t     *group,
+                                           const struct timespec *deadline)
 {
     if (group == NULL) {
         return LOOMWORKS_ERR_INVALID;
@@ -415,10 +440,26 @@ loom_result_t loom_task_group_wait(loom_task_group_t *group)
 
     pthread_mutex_lock(&group->lock);
     while (group->pending > 0) {
-        pthread_cond_wait(&group->done_cond, &group->lock);
+        if (deadline == NULL) {
+            pthread_cond_wait(&group->done_cond, &group->lock);
+        } else if (pthread_cond_timedwait(&group->done_cond, &group->lock, deadline) == ETIMEDOUT) {
+            /* Deadline passed before the group drained; the group is
+             * untouched and a later wait()/destroy() may resume here. */
+            pthread_mutex_unlock(&group->lock);
+            return LOOMWORKS_ERR_TIMEOUT;
+        }
     }
     pthread_mutex_unlock(&group->lock);
     return LOOMWORKS_OK;
+}
+
+/* ================================================================
+ *  loom_task_group_wait — unbounded wait; implemented as
+ *  loom_task_group_wait_timeout with a NULL (infinite) deadline.
+ * ================================================================ */
+loom_result_t loom_task_group_wait(loom_task_group_t *group)
+{
+    return loom_task_group_wait_timeout(group, NULL);
 }
 
 /* ================================================================

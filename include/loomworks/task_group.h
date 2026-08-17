@@ -114,6 +114,29 @@ void loom_task_group_cancel(loom_task_group_t *group);
 loom_result_t loom_task_group_wait(loom_task_group_t *group);
 
 /**
+ * @brief Wait for all tasks in the group to complete, up to a deadline.
+ *
+ * Identical to loom_task_group_wait() but gives up at @p deadline (an
+ * absolute CLOCK_MONOTONIC time).  On timeout the group is left fully
+ * usable: every tracked task is still pending and a later wait() (or
+ * destroy()) picks up exactly where the timed-out call left off.
+ *
+ * A NULL deadline means "wait forever" and is exactly equivalent to
+ * calling loom_task_group_wait().
+ *
+ * Returns LOOMWORKS_ERR_TIMEOUT when the deadline passed before the group
+ * drained, LOOMWORKS_ERR_INVALID when called from a worker of the group's
+ * own pool (would deadlock) or with a NULL handle.
+ *
+ * @param group    The task group.
+ * @param deadline Absolute CLOCK_MONOTONIC deadline, or NULL for infinite.
+ * @return         LOOMWORKS_OK when drained, LOOMWORKS_ERR_TIMEOUT if the
+ *                 deadline passed, LOOMWORKS_ERR_INVALID on misuse.
+ */
+loom_result_t loom_task_group_wait_timeout(loom_task_group_t     *group,
+                                           const struct timespec *deadline);
+
+/**
  * @brief Get the number of tasks currently tracked by the group.
  *
  * Tracks the count of submitted tasks that have not yet been cancelled or
