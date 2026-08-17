@@ -44,11 +44,11 @@ static void record_exec(void *arg)
     g_exec_order[g_exec_count++] = idx;
 }
 
-static volatile int g_gate_started  = 0;
-static volatile int g_gate_release  = 0;
-static volatile int g_gate_parked   = 0; /* gate_task entry count (multi-worker) */
-static volatile int g_gate_release2 = 0;
-static volatile int g_gate_parked2  = 0; /* gate_task2 entry count */
+static _Atomic int g_gate_started = 0;
+static _Atomic int g_gate_release = 0;
+static _Atomic int g_gate_parked = 0; /* gate_task entry count (multi-worker, atomic: several workers park concurrently) */
+static _Atomic int g_gate_release2 = 0;
+static _Atomic int g_gate_parked2 = 0; /* gate_task2 entry count */
 static volatile int g_cancel_hit    = 0;
 
 /* Steal tests: per-task owner thread records (append via atomic index;
@@ -2241,6 +2241,193 @@ static void test_resize_zero_rejected(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: resize fault injection ---------- */
+static void gated_crash_task(void *arg)
+{
+    (void)arg;
+    g_gate_started = 1;
+    g_gate_parked++;
+    while (!g_gate_release) {
+        sched_yield();
+    }
+    pthread_exit(NULL); /* crash after the gate opens */
+}
+
+static void test_resize_alloc_fail_deques_realloc(void)
+{
+    loom_test_arm_alloc_failure(-1); /* defensive */
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(0); /* next check = deques realloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "deques realloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count unchanged after failed grow");
+
+    int counter = 0;
+    ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
+           "pool usable after failure");
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    ASSERT(loom_pool_worker_count(pool) == 8, "rescued worker count = 8");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(counter >= 1, "task executed");
+}
+
+static void test_resize_alloc_fail_deque_slots(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(1); /* 2nd check = first per-deque slots calloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK,
+           "deque-slot calloc failure degrades to lane-only, NOT an error");
+    ASSERT(pool->deques == NULL, "lane-only mode active");
+    ASSERT(loom_pool_worker_count(pool) == 8, "worker count still reaches 8");
+
+    int counter = 0;
+    for (int i = 0; i < 50; i++) {
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
+               "lane-only submit");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(counter == 50, "all lane-only tasks executed");
+}
+
+static void test_resize_alloc_fail_threads_realloc(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(7); /* 8th check = threads realloc (1 + 6 callocs) */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "threads realloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count unchanged");
+
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_resize_alloc_fail_alive_realloc(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(8); /* 9th check = thread_alive realloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "thread_alive realloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count unchanged");
+
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_resize_alloc_fail_clean_exit_realloc(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(9); /* 10th check = thread_clean_exit realloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "thread_clean_exit realloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count unchanged");
+
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_resize_alloc_fail_worker_arg_first(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(10); /* 11th check = first worker_arg malloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "first worker malloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count rolled back");
+    ASSERT(atomic_load_explicit(&pool->thread_alive[2], memory_order_acquire) == false,
+           "no worker spawned into slot 2");
+
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_resize_alloc_fail_worker_arg_mid(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(11); /* 12th check = second worker_arg malloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "second worker malloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count rolled back");
+    ASSERT(atomic_load_explicit(&pool->thread_alive[2], memory_order_acquire) == false,
+           "created worker joined and slot released");
+
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* Regression: after a failed grow rolls back workers, their slots hold a stale
+ * clean_exit=true. Reusing those slots for a fresh grow must not hide a crash:
+ * shutdown must report FAILED for every crashed worker (== 6 here). */
+static void test_resize_fail_then_worker_crash_detected(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    metrics_event_ctx_t ctx     = {0};
+    loom_metrics_t     *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
+           "metrics created");
+
+    /* Failed grow: workers 2..6 are created, then the 6th malloc (check 16)
+     * fails and the rollback joins them. Pre-fix their clean_exit stays true. */
+    loom_test_arm_alloc_failure(15);
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "6th worker malloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count rolled back");
+
+    /* Successful grow reuses slots 2..7 (arrays are already sized 8). */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    ASSERT(loom_pool_worker_count(pool) == 8, "8 workers after reuse");
+
+    /* One gated crash task per new worker: all 6 park, then all 6 crash. */
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_gate_parked  = 0;
+    for (int i = 0; i < 6; i++) {
+        ASSERT(loom_pool_submit(pool, gated_crash_task, NULL, NULL) == LOOMWORKS_OK,
+               "gated crash task submitted");
+    }
+    while (g_gate_parked < 6) {
+        sched_yield();
+    }
+    g_gate_release = 1;
+
+    loom_pool_shutdown(pool);
+    ASSERT(ctx.failed == 6, "all 6 crashed workers reported FAILED (no stale clean_exit)");
+    ASSERT(loom_metrics_failed(metrics) == 6, "metrics_failed counter == 6");
+
+    loom_metrics_destroy(&metrics);
+    loom_pool_destroy(&pool);
+}
+
 /* ---------- Test: metrics invariant — submitted == completed + cancelled ---------- */
 static void test_metrics_invariant(void)
 {
@@ -3618,6 +3805,14 @@ int main(void)
     test_resize_after_shutdown();
     test_resize_null_safety();
     test_resize_zero_rejected();
+    test_resize_alloc_fail_deques_realloc();
+    test_resize_alloc_fail_deque_slots();
+    test_resize_alloc_fail_threads_realloc();
+    test_resize_alloc_fail_alive_realloc();
+    test_resize_alloc_fail_clean_exit_realloc();
+    test_resize_alloc_fail_worker_arg_first();
+    test_resize_alloc_fail_worker_arg_mid();
+    test_resize_fail_then_worker_crash_detected();
     test_metrics_invariant();
     test_metrics_invariant_all_complete();
     test_ring_basic();

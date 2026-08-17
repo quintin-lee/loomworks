@@ -417,13 +417,30 @@ static void *worker_entry(void *arg)
         }
         /* Step 3: steal FIFO (oldest) from random victims when idle. */
         if (task == NULL && my != NULL && pool->worker_count > 1) {
-            for (uint32_t try = 0; try < LOOMWORKS_STEAL_TRIES && task == NULL; try++) {
-                uint32_t victim = (uint32_t)((idx + 1 + try * 2) % pool->worker_count);
-                if (victim == idx) {
-                    continue;
+            /* The try*2 stride covers only every other victim (parity):
+             * with an even worker count the owner can stay unreachable and
+             * its tasks strand, burning the wake budget and wedging
+             * shutdown.  Probe opportunistically while the ring still has
+             * work; once the ring is dry, runnable work lives only in the
+             * deques, so visit every other worker exactly once. */
+            if (pool->ring != NULL && ring_has_work(pool)) {
+                for (uint32_t try = 0; try < LOOMWORKS_STEAL_TRIES && task == NULL; try++) {
+                    uint32_t victim = (uint32_t)((idx + 1 + try * 2) % pool->worker_count);
+                    if (victim == idx) {
+                        continue;
+                    }
+                    task      = deque_steal(pool, &pool->deques[victim]);
+                    from_ring = (task != NULL);
                 }
-                task      = deque_steal(pool, &pool->deques[victim]);
-                from_ring = (task != NULL);
+            } else {
+                for (uint32_t v = 0; v < pool->worker_count - 1 && task == NULL; v++) {
+                    uint32_t victim = (uint32_t)((idx + 1 + v) % pool->worker_count);
+                    if (victim == idx) {
+                        continue;
+                    }
+                    task      = deque_steal(pool, &pool->deques[victim]);
+                    from_ring = (task != NULL);
+                }
             }
         }
         /* Step 4: p >= 5 lanes — only when the ring has no work. */
@@ -1237,7 +1254,11 @@ static loom_result_t enqueue_task(loom_thread_pool_t *pool,
             return LOOMWORKS_ERR_INVALID;
         }
     }
-    if (priority == LOOMWORKS_PRIORITY_NORMAL && pool->ring != NULL) {
+    /* NORMAL tasks take the ring only when per-worker deques exist — the
+     * ring is drained exclusively via the deques (worker Step 1/2/3).  In
+     * lane-only mode (deques == NULL) the ring is unreachable, so route
+     * NORMAL tasks to the lane buckets that workers actually consume. */
+    if (priority == LOOMWORKS_PRIORITY_NORMAL && pool->ring != NULL && pool->deques != NULL) {
         return enqueue_ring_task(pool, fn, data, priority, free_data, task_id);
     }
     return enqueue_lane_task(pool, fn, data, priority, free_data, task_id);
@@ -1886,6 +1907,33 @@ loom_thread_pool_t *loom_pool_current(void)
     return g_current_pool;
 }
 
+/* ==== Test-only allocation fault injection ============================
+ * One-shot armed counter consumed by loom_pool_resize's guarded call
+ * sites. Armed with n, the (n+1)-th check fires once then auto-disarms,
+ * so a single misfire cannot cascade into later sites (the lane-only
+ * degrade test depends on that). Unarmed (-1) is a single negative
+ * branch — zero behavior change. */
+static _Atomic long g_test_alloc_fail_at = -1;
+
+static bool test_alloc_fail_next(void)
+{
+    long v = atomic_load_explicit(&g_test_alloc_fail_at, memory_order_relaxed);
+    if (v < 0) {
+        return false;
+    }
+    if (v == 0) {
+        atomic_store_explicit(&g_test_alloc_fail_at, -1, memory_order_relaxed);
+        return true;
+    }
+    atomic_store_explicit(&g_test_alloc_fail_at, v - 1, memory_order_relaxed);
+    return false;
+}
+
+void loom_test_arm_alloc_failure(long n)
+{
+    atomic_store_explicit(&g_test_alloc_fail_at, n, memory_order_relaxed);
+}
+
 /* ================================================================
  *  loom_pool_resize — dynamically adjust the number of worker threads.
  *
@@ -1924,12 +1972,19 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         uint32_t old_max = pool->max_worker_count;
         if (pool->deques != NULL) {
             loom_work_deque_t *new_deques =
-                (loom_work_deque_t *)realloc(pool->deques, count * sizeof(loom_work_deque_t));
+                test_alloc_fail_next()
+                    ? NULL
+                    : (loom_work_deque_t *)realloc(pool->deques, count * sizeof(loom_work_deque_t));
             if (!new_deques) {
                 pthread_mutex_unlock(&pool->lock);
                 return LOOMWORKS_ERR_ALLOC;
             }
             pool->deques = new_deques;
+            /* Zero the freshly-extended tail: realloc leaves it
+             * uninitialized, and the lane-only fallback below frees
+             * every slots pointer in [old_max, count) — a garbage
+             * pointer there would corrupt the heap. */
+            memset(new_deques + old_max, 0, (count - old_max) * sizeof(loom_work_deque_t));
             /* Initialize the freshly-extended deques (mirror pool_init). */
             bool slots_failed = false;
             for (uint32_t i = old_max; i < count && !slots_failed; i++) {
@@ -1939,7 +1994,9 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 atomic_store_explicit(&pool->deques[i].top, 0, memory_order_relaxed);
                 atomic_store_explicit(&pool->deques[i].len, 0, memory_order_relaxed);
                 pool->deques[i].slots =
-                    (loom_task_t **)calloc(LOOMWORKS_DEQUE_CAPACITY, sizeof(loom_task_t *));
+                    test_alloc_fail_next()
+                        ? NULL
+                        : (loom_task_t **)calloc(LOOMWORKS_DEQUE_CAPACITY, sizeof(loom_task_t *));
                 if (pool->deques[i].slots == NULL) {
                     slots_failed = true;
                 }
@@ -1958,14 +2015,18 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 pool->deques = NULL;
             }
         }
-        pthread_t *new_threads = (pthread_t *)realloc(pool->threads, count * sizeof(pthread_t));
+        pthread_t *new_threads =
+            test_alloc_fail_next() ? NULL
+                                   : (pthread_t *)realloc(pool->threads, count * sizeof(pthread_t));
         if (!new_threads) {
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
         }
         pool->threads = new_threads;
         _Atomic bool *new_alive =
-            (_Atomic bool *)realloc(pool->thread_alive, count * sizeof(_Atomic bool));
+            test_alloc_fail_next()
+                ? NULL
+                : (_Atomic bool *)realloc(pool->thread_alive, count * sizeof(_Atomic bool));
         if (!new_alive) {
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
@@ -1974,7 +2035,9 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         memset(new_alive + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
         pool->thread_alive = new_alive;
         _Atomic bool *new_clean_exit =
-            (_Atomic bool *)realloc(pool->thread_clean_exit, count * sizeof(_Atomic bool));
+            test_alloc_fail_next()
+                ? NULL
+                : (_Atomic bool *)realloc(pool->thread_clean_exit, count * sizeof(_Atomic bool));
         if (!new_clean_exit) {
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
@@ -1992,7 +2055,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
             if (atomic_load_explicit(&pool->thread_alive[i], memory_order_acquire)) {
                 continue; /* slot still has a live worker (should not happen) */
             }
-            worker_arg_t *wa = (worker_arg_t *)malloc(sizeof(*wa));
+            worker_arg_t *wa = test_alloc_fail_next() ? NULL : (worker_arg_t *)malloc(sizeof(*wa));
             if (!wa) {
                 /* Roll back: restore old count and join any workers created
                  * in this call before returning. */
@@ -2000,8 +2063,18 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 pthread_mutex_unlock(&pool->lock);
                 for (uint32_t j = old_count; j < i; j++) {
                     if (atomic_load_explicit(&pool->thread_alive[j], memory_order_acquire)) {
-                        pthread_join(pool->threads[j], NULL);
+                        /* A freshly spawned worker may never have woken and is
+                         * blocked on work_sem; a plain pthread_join would
+                         * deadlock. Re-post wake tokens until it actually
+                         * exits (same pattern as the shrink join below). */
+                        void *ret;
+                        while (pthread_tryjoin_np(pool->threads[j], &ret) != 0) {
+                            sem_post(&pool->work_sem);
+                            sched_yield();
+                        }
                         atomic_store_explicit(&pool->thread_alive[j], false, memory_order_release);
+                        atomic_store_explicit(
+                            &pool->thread_clean_exit[j], false, memory_order_release);
                     }
                 }
                 return LOOMWORKS_ERR_ALLOC;
@@ -2015,8 +2088,18 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 pthread_mutex_unlock(&pool->lock);
                 for (uint32_t j = old_count; j < i; j++) {
                     if (atomic_load_explicit(&pool->thread_alive[j], memory_order_acquire)) {
-                        pthread_join(pool->threads[j], NULL);
+                        /* A freshly spawned worker may never have woken and is
+                         * blocked on work_sem; a plain pthread_join would
+                         * deadlock. Re-post wake tokens until it actually
+                         * exits (same pattern as the shrink join below). */
+                        void *ret;
+                        while (pthread_tryjoin_np(pool->threads[j], &ret) != 0) {
+                            sem_post(&pool->work_sem);
+                            sched_yield();
+                        }
                         atomic_store_explicit(&pool->thread_alive[j], false, memory_order_release);
+                        atomic_store_explicit(
+                            &pool->thread_clean_exit[j], false, memory_order_release);
                     }
                 }
                 fprintf(stderr, "loomworks: pthread_create failed: %s\n", strerror(rc));

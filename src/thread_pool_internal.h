@@ -200,6 +200,10 @@ loom_task_t *loom_dequeue_unlocked(loom_thread_pool_t *pool);
  */
 loom_thread_pool_t *loom_pool_current(void);
 
+/* Test-only fault injection: armed with n, the (n+1)-th allocation check in
+ * loom_pool_resize fails once, then disarms. n < 0 disarms immediately. */
+void loom_test_arm_alloc_failure(long n);
+
 /* ================================================================
  *  Chase-Lev work-stealing deque operations.
  *  Owner thread: deque_push / deque_pop (LIFO at the bottom).
