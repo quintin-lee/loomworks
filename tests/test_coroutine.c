@@ -547,6 +547,26 @@ static void test_cross_thread_guard(void)
     loom_coro_destroy(&coro);
 }
 
+/* ----------------------------------------------------------------
+ *  Test: destroying a SUSPENDED coroutine is rejected
+ * ----------------------------------------------------------------- */
+static void test_coro_destroy_suspended_rejected(void)
+{
+    loom_coroutine_t *coro    = NULL;
+    int               counter = 0;
+
+    ASSERT(loom_coro_create(yield_coro_fn, &counter, 0, &coro) == LOOMWORKS_CORO_OK,
+           "create yield coroutine");
+    ASSERT(loom_coro_resume(coro) == LOOMWORKS_CORO_OK, "resume to first yield");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "SUSPENDED after yield");
+    ASSERT(loom_coro_destroy(&coro) == LOOMWORKS_CORO_ERR_INVALID, "destroy suspended rejected");
+    ASSERT(coro != NULL, "handle untouched after rejected destroy");
+    ASSERT(loom_coro_terminate(coro) == LOOMWORKS_CORO_OK, "terminate suspended");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after terminate");
+    ASSERT(loom_coro_destroy(&coro) == LOOMWORKS_CORO_OK, "destroy done ok");
+    ASSERT(coro == NULL, "handle nulled after ok destroy");
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -578,6 +598,7 @@ int main(void)
     test_coro_null_data();
     test_small_stack();
     test_cross_thread_guard();
+    test_coro_destroy_suspended_rejected();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

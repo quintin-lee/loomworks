@@ -137,14 +137,17 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro);
 /**
  * @brief Destroy a coroutine and free all resources.
  *
- * Must be called after the coroutine is in DONE state, or after
- * loom_coro_terminate() has been called. May be called from any
- * thread, but only once the coroutine no longer needs its owner
- * (DONE/ERROR state); see "Thread affinity" in the file header.
+ * May be called from any thread once the coroutine is in NEW, DONE or
+ * ERROR state (the underlying stack is reclaimed through a
+ * mutex-guarded global pool).  Calling this on a coroutine that is
+ * still RUNNING or SUSPENDED is rejected with
+ * LOOMWORKS_CORO_ERR_INVALID and the handle is left untouched.
  *
  * @param coro  Pointer to the coroutine handle (set to NULL on return).
+ * @return LOOMWORKS_CORO_OK on success, or LOOMWORKS_CORO_ERR_INVALID
+ *         if the handle is NULL or the coroutine is RUNNING/SUSPENDED.
  */
-void loom_coro_destroy(loom_coroutine_t **coro);
+loom_coro_result_t loom_coro_destroy(loom_coroutine_t **coro);
 
 /**
  * @brief Get the current state of a coroutine.

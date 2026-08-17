@@ -473,18 +473,25 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro)
     return LOOMWORKS_CORO_OK;
 }
 
-void loom_coro_destroy(loom_coroutine_t **coro)
+loom_coro_result_t loom_coro_destroy(loom_coroutine_t **coro)
 {
     if (!coro || !*coro) {
-        return;
+        return LOOMWORKS_CORO_ERR_INVALID;
     }
     loom_coroutine_t *c = *coro;
+    /* Reject destroying a coroutine whose stack may still be live:
+     * RUNNING/SUSPENDED means the context has not swizzled back into
+     * the scheduler, so freeing the stack would be use-after-free. */
+    if (c->state == LOOMWORKS_CORO_RUNNING || c->state == LOOMWORKS_CORO_SUSPENDED) {
+        return LOOMWORKS_CORO_ERR_INVALID;
+    }
     deallocate_stack(c);
     if (g_current == c) {
         g_current = NULL;
     }
     free(c);
     *coro = NULL;
+    return LOOMWORKS_CORO_OK;
 }
 
 loom_coro_state_t loom_coro_state(const loom_coroutine_t *coro)
