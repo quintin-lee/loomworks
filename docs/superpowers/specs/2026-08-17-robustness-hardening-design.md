@@ -75,7 +75,7 @@ Two related facts shape the fixes:
 | D2 | New result code `LOOMWORKS_ERR_CANCELLED`; cancelled futures complete with it (both wait variants) | Cancellation is a distinct outcome, not a timeout; `future_wait` on a cancelled task must not hang |
 | D3 | `loom_future_destroy` allowed only on a completed future (checked under the future lock); otherwise `ERR_INVALID` | Worker writes and destroy-free both happen under the same lock; an in-lock readiness check makes UAF impossible |
 | D4 | `loom_coro_destroy` allowed only in states `NEW`/`DONE`/`ERROR`, by the owning thread; otherwise `ERR_INVALID` | Same guards `resume`/`terminate` already enforce (`coroutine.c:385-474`); forces "terminate first, then destroy" |
-| D5 | Worker-crash detection = join-time `ESRCH` + accounting fix + `LOOMWORKS_METRIC_FAILED`; **no** signal catching | Covers the realistic process-surviving death path cheaply and testably; avoids the fragility of in-process signal handling |
+| D5 | Worker-crash detection = per-worker `clean_exit` flag set on the normal exit paths, checked at every join site, + accounting fix + `LOOMWORKS_METRIC_FAILED`; **no** signal catching | `pthread_exit`-killed workers are still joinable (join returns 0, never `ESRCH`) — only a *flag* distinguishes clean shutdown exits from abnormal death. Avoids the fragility of in-process signal handling |
 | D6 | `group_destroy` keeps its blocking contract (documented, same as pool shutdown) but rejects self-wait from a pool worker with `ERR_INVALID` | Removes the guaranteed-deadlock case without changing the legitimate blocking contract |
 | D7 | Timeout waits switch to `CLOCK_MONOTONIC`; `future_wait_timeout`'s deadline argument is documented as monotonic-clock | Wall-clock jumps must not stretch/shrink 60 s backpressure or future deadlines; callers computing deadlines from `CLOCK_REALTIME` must switch (test helpers updated) |
 | D8 | Future-backing tasks are marked with a new `is_future` flag on `loom_task_t` so the generic tombstone path can signal the future before freeing the wrapper | No fragile `fn == future_task_wrapper` pointer comparison; explicit and testable |
@@ -145,15 +145,26 @@ Two related facts shape the fixes:
 
 ### 5.5 Worker-crash observability (Defect 2 + D5)
 
-- In `loom_pool_shutdown`'s join loop (`1473-1517`): a `pthread_join` result of
-  `ESRCH` means the worker died before shutdown → set `thread_alive[idx] =
-  false`, `metrics_fire(pool, LOOMWORKS_METRIC_FAILED)`, continue joining.
-  (All other join results handled as today.)
+Mechanism (corrected during self-review — `ESRCH` alone cannot detect
+`pthread_exit`-killed workers, which remain joinable with exit status 0):
+
+- worker state gains a per-worker `_Atomic bool clean_exit`, initialised false
+  at worker start.
+- The worker sets `clean_exit = true` immediately before *every normal exit
+  path*: the shutdown drain exit (`shutdown && queue_len == 0`) and the resize
+  shrink exit (`idx >= worker_count`), since a shrink-joined worker that died
+  mid-task is equally a crash.
+- At **every join site** (shutdown join loop `1473-1517` and the resize join
+  loops `1029`/`1044`): after `pthread_join` returns, if `clean_exit` is false
+  (or join returned `ESRCH`, i.e. a detached-then-died worker) → the worker
+  died mid-task → set `thread_alive[idx] = false` and
+  `metrics_fire(pool, LOOMWORKS_METRIC_FAILED)`. A normal exit has
+  `clean_exit == true` → no event, accounting as today.
 - No signal handlers, no recovery — a dead worker stays dead; the pool reports
   the truth. Process-fatal task segfaults remain default (NG3).
 - New regression test: submit a task that calls `pthread_exit(NULL)`; run
-  `shutdown()`; assert a `LOOMWORKS_METRIC_FAILED` event was observed via the
-  metrics callback (pool creates enough workers that a real task runs one).
+  `shutdown()`; assert exactly one `LOOMWORKS_METRIC_FAILED` event was observed
+  via the metrics callback, and that a normal shutdown run fires none.
 
 ### 5.6 Group self-wait deadlock guard (Defect 6 + D6)
 
@@ -213,7 +224,8 @@ Two related facts shape the fixes:
 - AC4. `coro_destroy` returns `ERR_INVALID` for RUNNING/SUSPENDED/foreign-thread
   and succeeds for NEW/DONE/ERROR; coroutine suite stays green.
 - AC5. A `pthread_exit`-terminated worker produces exactly one
-  `LOOMWORKS_METRIC_FAILED` event at shutdown; `thread_alive` corrected.
+  `LOOMWORKS_METRIC_FAILED` event at shutdown; a clean shutdown fires none;
+  `thread_alive` corrected.
 - AC6. `group_wait`/`group_destroy` from a pool worker return `ERR_INVALID`
   without blocking.
 - AC7. All baseline suites green with unchanged assertion counts
