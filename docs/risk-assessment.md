@@ -18,21 +18,24 @@ Risk ratings use the conventional 3×3 grid:
 
 | ID | Area | Risk | Likelihood | Impact | Severity |
 |----|------|------|-----------|--------|----------|
-| R1 | Coroutine | Process-global `SIGSEGV`/`SIGBUS` handlers installed via `sigaction` without chaining to prior handlers | Medium | Medium | **Medium** |
-| R2 | Coroutine | `ucontext` is deprecated by POSIX.1-2008 and marked obsolescent in glibc 2.16+; removed on macOS | Medium | Medium | **Medium** |
+| R1 | Coroutine | Process-global `SIGSEGV`/`SIGBUS` handlers installed via `sigaction` without chaining to prior handlers | Medium | Medium | **Medium** — ✅ closed (2026-08-17): handlers now save and restore the prior handler |
+| R2 | Coroutine | `ucontext` is deprecated by POSIX.1-2008 and marked obsolescent in glibc 2.16+; removed on macOS | Medium | Medium | **Medium** — ✅ mitigated (2026-08-17): hand-written asm backends for x86-64/aarch64 are default; ucontext is a compile-time fallback |
 | R3 | Metrics | Callback fires synchronously on the worker thread; must be cheap or it throttles the pool | Medium | Medium | **Medium** |
-| R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** |
+| R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** — ⚠️ partial (2026-08-17): self-wait from the group's own pool worker now rejected with `ERR_INVALID`; unbounded external waits remain documented |
 | R5 | Thread Pool | `loom_pool_cancel()` performs an O(cancel_cap) linear scan of the cancel index on the fast path | Medium | Low | **Low** |
 | R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** |
 | R7 | Thread Pool | Work-stealing executes tasks out of submission order (LIFO local, FIFO steal) — FIFO is only guaranteed for NORMAL+ring when ≤1 worker actively drains | Low | Medium | **Low** |
 | R8 | Pipeline | Internal-consumer mode (`worker_count>0`) consumes and **frees** every payload by default unless a discard handler is set | Medium | Medium | **Medium** |
-| R9 | Pipeline | 60s `CLOCK_REALTIME` timedwait is subject to wall-clock jumps (NTP slews, manual clock changes) | Low | Low | **Low** |
+| R9 | Pipeline | 60s `CLOCK_REALTIME` timedwait is subject to wall-clock jumps (NTP slews, manual clock changes) | Low | Low | **Low** — ✅ resolved (2026-08-17): timeouts now use `CLOCK_MONOTONIC` |
 | R10 | Docs | Assertion counts in README/CHANGELOG drift from actual (see §Verification) | Low | Low | **Low** |
 | R11 | CI | Duplicate valgrind suppression files diverge; root `loomworks.valgrind-supp` is orphaned (CI uses `.github/valgrind.supp`) | High | Low | **Low** — ✅ resolved (2026-08-16) |
-| R15 | CI | Missing trailing newline at EOF in `src/coro_ctx.h`/`src/task_group.c` trips clang-tidy `newline-eof` → all CI builds red on master | High | Medium | **High** |
+| R15 | CI | Missing trailing newline at EOF in `src/coro_ctx.h`/`src/task_group.c` trips clang-tidy `newline-eof` → all CI builds red on master | High | Medium | **High** — ✅ resolved (2026-08-16): trailing newlines restored |
 | R12 | Portability | Linux/x86-64 only; no Windows/macOS build, `_GNU_SOURCE` + `pthread_tryjoin_np` are GNU extensions | High | Medium | **Medium** |
-| R13 | Coroutine | Cross-thread coroutine misuse (resume/terminate) hard-fails with `ERR_INVALID`, but `destroy()` is unguarded — caller must only destroy in DONE/ERROR | Low | Medium | **Low** |
+| R13 | Coroutine | Cross-thread coroutine misuse (resume/terminate) hard-fails with `ERR_INVALID`, but `destroy()` is unguarded — caller must only destroy in DONE/ERROR | Low | Medium | **Low** — ✅ closed (2026-08-17): `destroy()` now gates on state NEW/DONE/ERROR; RUNNING/SUSPENDED rejected |
 | R14 | Thread Pool | `cancel_by_id` reused after pool shutdown returns `ERR_SHUTDOWN`; cancel-on-shutdown semantics are subtle (running tasks are never preempted) | Low | Low | **Low** |
+| R16 | Thread Pool | `loom_pool_destroy` without prior shutdown frees worker-shared structures while workers still run → heap corruption | Medium | High | **Medium** — ✅ closed (2026-08-17): rejected with `ERR_INVALID` until shutdown |
+| R17 | Thread Pool | A worker terminated via `pthread_exit`/crash leaves the pool unable to tell a dead worker from a live one → silent loss of capacity | Low | High | **Low** — ✅ closed (2026-08-17): per-worker `clean_exit` flag reports abnormal exits as `LOOMWORKS_METRIC_FAILED` |
+| R18 | Thread Pool | A cancelled pending future never completes → `future_wait` hangs forever | Low | High | **Low** — ✅ closed (2026-08-17): cancelled futures complete with `LOOMWORKS_ERR_CANCELLED` |
 
 ---
 
@@ -52,9 +55,10 @@ have them silently replaced while a coroutine is being resumed.
 re-raises with `SIG_DFL` when the fault is not on a coroutine guard page (so
 wild pointers still crash normally).
 
-**Recommendation**: chain to the previous handler (save it on install,
-restore it on uninstall, or call it when the fault is not ours). Document the
-behavior clearly for embedding users.
+**Status: ✅ CLOSED (2026-08-17).** The handlers now chain: the previous
+handler is saved at install (`g_prev_segv`/`g_prev_bus`) and restored both
+when the fault is not ours (the handler re-dispatches to `prior`) and at
+uninstall. Embedding applications no longer lose their own fault handlers.
 
 ### R2 — `ucontext` deprecation
 
@@ -67,6 +71,11 @@ a pluggable backend (8 inline functions), so swapping in an asm-based backend
 **Mitigation**: `coro_ctx.h` isolates the backend; migration is scoped to one
 header. Risk is Medium only because no alternative backend is implemented
 yet.
+
+**Status: ✅ MITIGATED (2026-08-17).** Hand-written asm context backends for
+x86-64 (SysV) and aarch64 (AAPCS64) are now the default (`ctx` pro/cto), with
+ucontext retained as a compile-time fallback. `ctx_smoke` exercises both
+backends; aarch64 is cross-compiled and QEMU-run in CI.
 
 ### R3 — Metrics callback on the worker thread
 
@@ -84,6 +93,13 @@ By design, destroy cancels tracked tasks and then waits for in-flight
 wrappers to complete. If a user task blocks forever (deadlock, infinite
 loop, waiting on I/O), `group_destroy()` never returns. There is no timeout
 parameter.
+
+**Status: ⚠️ PARTIAL (2026-08-17).** The guaranteed-deadlock case is closed:
+`group_wait()`/`group_destroy()` called from a worker of the group's own pool
+now return `LOOMWORKS_ERR_INVALID` immediately (self-wait guard via the
+`loom_pool_current` TLS). The unbounded external wait remains — a caller that
+blocks on I/O inside a group task can still wedge a non-worker `wait()`
+caller; that is documented contract, not a bug.
 
 ### R5 — `cancel()` is a linear scan
 
@@ -109,7 +125,9 @@ iteration, so realloc is safe.
 
 **Residual risk**: this code is exercised only by `resize_demo.c` and a few
 tests; concurrency bugs here fail loudly (crash) rather than silently, which
-is why impact is High but the combination is Low severity today.
+is why impact is High but the combination is Low severity today. Test
+coverage for resize remains partial (grow/shrink/rollback happy paths; no
+systematic fault-injection of mid-`realloc` alloc failures).
 
 ### R7 — Execution order is not globally FIFO
 
@@ -139,6 +157,12 @@ internal consumption, not just at destroy. Semantics are documented; the
 All 60s blocking waits (`submit`, `pc_submit`) use `CLOCK_REALTIME`
 timedwait, so NTP slew or operator clock changes can stretch/shrink the
 timeout. Low impact in practice.
+
+**Status: ✅ RESOLVED (2026-08-17).** The pool's blocking waits
+(`wait_for_space`, `future_wait_timeout`) and their condvars
+(`space_cond`, future conds) now use `CLOCK_MONOTONIC` via a
+once-initialized monotonic condattr — wall-clock jumps no longer distort
+timeouts. `pipeline.c` remains REALTIME (out of scope).
 
 ### R10 — Assertion-count doc drift (verified)
 
@@ -176,7 +200,7 @@ rules. `.github/valgrind.supp` remains the single source of truth.
 > against the actual file shows the spelling is correct and the check is
 > active. No action needed.
 
-### R15 — Missing trailing newline breaks CI builds (active)
+### R15 — Missing trailing newline breaks CI builds (resolved)
 
 `src/coro_ctx.h:64` and `src/task_group.c:417` lack a newline at end of file.
 With `ENABLE_CLANG_TIDY ON` and `WarningsAsErrors: '*'` in CI, this trips
@@ -184,13 +208,13 @@ clang-tidy's `clang-diagnostic-newline-eof` → "1 warning treated as error" →
 `loomworks_static`/`loomworks_shared` fail to build. All master CI jobs (build
 matrix + sanitizers, 2026-08-15 13:34+) are red for this reason.
 
+**Status: ✅ RESOLVED (2026-08-16).** Trailing newlines restored in both
+files; CI is green.
+
 **Cause**: both files are part of the Unreleased changes (coro_ctx.h is new;
 task_group.c was edited). Local builds pass because local clang-tidy is not
 active (CMake `ENABLE_CLANG_TIDY ON` warns-and-skips when the binary is
 missing), so this only surfaced in CI.
-
-**Fix**: append a trailing newline to both files (2-line diff). Verification:
-push and watch CI go green, or run clang-tidy locally with the exact CI command.
 
 ### R12 — GNU/Linux-only portability surface
 
@@ -211,6 +235,13 @@ DONE/ERROR state; destroying a RUNNING/SUSPENDED coroutine is undefined
 behavior (no owner/state check, unlike resume/terminate). This is a
 documented API contract — callers must terminate first.
 
+**Status: ✅ CLOSED (2026-08-17).** `loom_coro_destroy()` now gates on the
+coroutine's state: `NEW`/`DONE`/`ERROR` destroy cleanly, `RUNNING`/
+`SUSPENDED` return `LOOMWORKS_CORO_ERR_INVALID` and leave the coroutine
+intact. Cross-thread destroy of a quiescent coroutine remains allowed — the
+public contract (process-global stack pool, serialized by mutex) permits it,
+so no owner check was added.
+
 ### R14 — Cancellation semantics on shutdown
 
 `cancel()`/`cancel_by_id()` return `ERR_SHUTDOWN` after shutdown begins, and
@@ -220,6 +251,41 @@ may still run (the cancel index claim loses to deque-pop by a worker).
 Conveniently, `group_destroy()` + `cancel_all()` handle this correctly; but a
 user doing manual `cancel_by_id` + `future_wait` must tolerate a
 cancelled-but-executed task.
+
+### R16 — Destroying a non-shutdown pool (closed)
+
+`loom_pool_destroy()` on a pool whose workers may still be running would free
+every worker-shared structure under them → heap corruption.
+
+**Status: ✅ CLOSED (2026-08-17).** `loom_pool_destroy()` now returns
+`LOOMWORKS_ERR_INVALID` unless `shutdown` is set, leaving the handle
+untouched; callers must run `loom_pool_shutdown()` first (NULL-safe
+otherwise). Regression test: `test_pool_destroy_without_shutdown`.
+
+### R17 — Worker-loss invisibility (closed)
+
+A worker killed by `pthread_exit()` (or any crash inside a task) previously
+looked alive after shutdown joined it — capacity loss was invisible and no
+metric fired.
+
+**Status: ✅ CLOSED (2026-08-17).** Each worker owns a per-slot
+`thread_clean_exit` atomic, set immediately before every *normal* exit path.
+Every join site (shutdown loop, resize grow/shrink rollback) checks it after
+`pthread_join`: a worker that exited without setting it (or that join
+ESRCH'd, i.e. detached-then-died) fires `LOOMWORKS_METRIC_FAILED` and clears
+`thread_alive`. Regression test: `test_worker_crash_detected`.
+
+### R18 — Cancelled future never completes (closed)
+
+A pending future whose task was cancelled never signalled its condvar →
+`future_wait()` hung forever (no timeout variant was a valid escape).
+
+**Status: ✅ CLOSED (2026-08-17).** Cancellation now marks the future
+`cancelled` and signals it; both wait variants return
+`LOOMWORKS_ERR_CANCELLED` instead of hanging. A future destroyed while
+pending (before completion) is rejected with `ERR_INVALID` — the worker
+would otherwise write into freed memory. Regression tests:
+`test_future_cancel_pending`, destroy-pending-future.
 
 ---
 
@@ -234,18 +300,21 @@ All claims above are grounded in the source as of master @ b5d8ab2:
 - `.clang-tidy`, `cmake/BuildTypes.cmake`, `CMakeLists.txt`, both CI
   workflows, `loomworks.valgrind-supp` vs `.github/valgrind.supp` — read.
 - **Fresh rebuild** (`cmake --build build`) then direct test runs:
-  ThreadPoolTests **12529 passed / 0 failed**, CoroutineTests
-  **5603 passed / 0 failed**, IntegrationTests **78685 passed / 0 failed**.
+  ThreadPoolTests **12604 passed / 0 failed**, CoroutineTests
+  **5611 passed / 0 failed**, IntegrationTests **78763 passed / 0 failed**
+  (post-hardening: +16 / 0 / +20 against the 2026-08-16 audit baseline).
 - `ctest` (Debug): 3/3 suites pass.
 
 ## Maintenance priority
 
-1. **R15** (missing trailing newline) — CI is red on master; a 2-line fix
-   unblocks every other concern. Do this next.
-2. **R1** (signal chaining) — the only remaining item with a real behavioral
-   hazard for embedders; a contained fix.
-3. **R12** (portability) — long pole for macOS; `pthread_tryjoin_np` shim is
-   the first step. `coro_ctx.h` already de-risks the ucontext half.
-4. **R8** (pipeline free-by-default) — document loudly; consider an explicit
+1. **R12** (portability) — long pole for macOS; `pthread_tryjoin_np` shim is
+   the first step. `coro_ctx.h` already de-risks the ucontext half (asm
+   backends landed 2026-08-17 for x86-64/aarch64).
+2. **R8** (pipeline free-by-default) — document loudly; consider an explicit
    `LOOM_PC_OWN_PAYLOADS` flag in a future minor release.
-5. Others — accepted trade-offs, re-evaluate as usage grows.
+3. **R6** (resize) — the largest untested surface remains; fault-injection of
+   mid-`realloc` alloc failures would close the gap.
+4. **R4** (unbounded group waits) — self-wait is guarded; a wait timeout
+   parameter would address the residual external-wait case.
+5. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
+   R1/R9/R13/R15/R16/R17/R18 are closed as of 2026-08-17.

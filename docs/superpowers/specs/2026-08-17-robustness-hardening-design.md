@@ -134,14 +134,24 @@ Two related facts shape the fixes:
 
 ### 5.4 Coroutine destroy guards (Defect 5 + D4)
 
-- `loom_coro_destroy` (`coroutine.c:476-488`) gains the same checks
-  `resume`/`terminate` already perform (`385-474`):
-  - caller must be the owning thread (`ERR_INVALID` cross-thread),
+**Implemented (2026-08-17) — DEVIATION from the draft below: only the state
+gate landed, the owner check did not.**
+
+- `loom_coro_destroy` (`coroutine.c:476-488`) gained the *state* gate
+  `resume`/`terminate` enforce:
   - state must be `NEW` / `DONE` / `ERROR` (`ERR_INVALID` on
     `RUNNING`/`SUSPENDED`).
+- **Owner check dropped:** the draft proposed rejecting cross-thread destroy
+  (`ERR_INVALID`). The public `coroutine.h` contract explicitly allows
+  cross-thread destroy of a quiescent coroutine — stacks come from a
+  process-global mmap pool serialized by a mutex, so ownership is not part
+  of the destroy contract and enforcing it would regress callers that hand a
+  finished coroutine to another thread for cleanup. Owner checks remain on
+  `resume`/`terminate` (cross-thread *driving* is the unsafe operation).
 - New regression tests: destroy on a freshly-created coroutine → `OK`; destroy
   a RUNNING and a SUSPENDED coroutine → `ERR_INVALID` (memory still intact);
-  terminate-then-destroy → `OK`; destroy from a foreign thread → `ERR_INVALID`.
+  terminate-then-destroy → `OK`. (The draft's "destroy from a foreign thread
+  → `ERR_INVALID`" test was not added — it contradicts the public contract.)
 
 ### 5.5 Worker-crash observability (Defect 2 + D5)
 
@@ -221,8 +231,10 @@ Mechanism (corrected during self-review — `ESRCH` alone cannot detect
   forked-child infinite-wait test exits promptly.
 - AC3. `future_destroy` on a pending future returns `ERR_INVALID`; on a
   completed future returns void (destroy succeeds).
-- AC4. `coro_destroy` returns `ERR_INVALID` for RUNNING/SUSPENDED/foreign-thread
-  and succeeds for NEW/DONE/ERROR; coroutine suite stays green.
+- AC4. `coro_destroy` returns `ERR_INVALID` for RUNNING/SUSPENDED and succeeds
+  for NEW/DONE/ERROR (state-only gate — cross-thread destroy of a quiescent
+  coroutine remains allowed per the public contract; owner checks stay on
+  `resume`/`terminate`); coroutine suite stays green.
 - AC5. A `pthread_exit`-terminated worker produces exactly one
   `LOOMWORKS_METRIC_FAILED` event at shutdown; a clean shutdown fires none;
   `thread_alive` corrected.

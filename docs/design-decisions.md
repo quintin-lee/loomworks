@@ -249,3 +249,117 @@ execution, not just syntax checks.
 and must print byte-identical assertion counts to the asm backend. The
 NULL-link return path exits with `EXIT_SUCCESS` on both backends, matching
 glibc's observed behaviour for a `makecontext` function that returns.
+
+---
+
+## 13. Strict Destroy Lifecycle Gates (2026-08-17)
+
+**Decision:** every destroy entry point rejects misuse with an error code
+instead of silently proceeding:
+
+- `loom_pool_destroy` — rejected with `LOOMWORKS_ERR_INVALID` unless
+  `loom_pool_shutdown()` ran first (handle left untouched).
+- `loom_future_destroy` — rejected with `LOOMWORKS_ERR_INVALID` while the
+  future is not yet complete; a worker may still write the result into the
+  future's storage, so freeing it early would trample freed memory.
+- `loom_coro_destroy` — rejected with `LOOMWORKS_ERR_INVALID` unless the
+  coroutine is quiescent (state `NEW`, `DONE` or `ERROR`). Destroying a
+  running or suspended coroutine frees its stack mid-switch; the frame is
+  still executing on it.
+
+**Rationale:** all three signatures were widened from `void` to
+`loom_result_t` / `loom_coro_result_t` so misuse is observable and testable.
+The gates force the documented lifecycle (`submit → wait/shutdown →
+destroy`) instead of relying on the caller getting it right, and existence
+tests (`test_pool_destroy_without_shutdown`, destroy-pending-future,
+destroy-running-coroutine) lock the behaviour in.
+
+**Trade-off:** callers that previously ignored the return value now have a
+diagnosable error path — a source-compatible change (returning a value does
+not break callers that discard it).
+
+---
+
+## 14. Cancelled Futures Complete with `LOOMWORKS_ERR_CANCELLED` (2026-08-17)
+
+**Decision:** when a pending future's task is cancelled before it runs, the
+future completes with `LOOMWORKS_ERR_CANCELLED` (result value stays
+`NULL`); both `loom_future_wait` and `loom_future_wait_timeout` return it.
+Destroying the future is then legal — it has completed.
+
+**Rationale:** cancellation is cooperative: the task is merely removed from
+the queue, the future is never signalled by a worker, so a waiter would
+otherwise block forever. Completing the future with the cancellation code
+makes the cancellation observable and guarantees waiters never strand. It
+also keeps the strict destroy gate (decision 13) workable — every future
+eventually reaches a terminal state.
+
+**Trade-off:** a waiter cannot distinguish "cancelled" from "task ran and
+returned NULL" via the result alone; it must check the error code. That is
+the point — the two cases are genuinely different and callers should treat
+them differently.
+
+---
+
+## 15. Worker-Crash Detection via `clean_exit` Flag + `FAILED` Metric (2026-08-17)
+
+**Decision:** each worker slot carries a `thread_clean_exit[]` flag, set by
+the worker itself on its normal exit paths and checked by the joining side.
+If a worker dies without the flag (crash, or `pthread_exit` inside a task),
+`loom_pool_shutdown` fires `LOOMWORKS_METRIC_FAILED`; `loom_metrics_failed`
+counts it.
+
+**Rationale:** `pthread_join` alone cannot distinguish a clean exit from a
+crash — it returns success either way, and ESRCH only appears if the join
+races the exit. A dedicated flag set at the worker's own intentional exit
+paths gives the joining side ground truth: flag absent → the worker is
+gone without the pool's consent. This closes the pre-existing gap where a
+worker that died mid-task was silently indistinguishable from an idle one.
+
+**Trade-off:** the flag lives in pool-owned storage indexed by slot, so
+resize grow/shrink must realloc and reset it (mirroring `thread_alive`).
+
+---
+
+## 16. Monotonic Timeout Clocks (2026-08-17)
+
+**Decision:** all timeout waits use `CLOCK_MONOTONIC`: the condition
+variables for queue space and futures are created with a monotonic
+`pthread_condattr_t` via `pthread_once`, and `clock_gettime` reads
+`CLOCK_MONOTONIC` for both `wait_for_space` and
+`loom_future_wait_timeout`. Deadline arguments in the public headers are
+documented as monotonic.
+
+**Rationale:** `CLOCK_REALTIME` steps when an admin or NTP changes the
+clock; a deadline computed from a realtime clock can then expire instantly
+(a step backward) or hang far past its deadline (a step forward). Monotonic
+time advances at a steady rate, so a `deadline`/timeout is a reliable
+upper bound on the wait.
+
+**Trade-off:** deadlines are no longer wall-clock values — callers that
+want "wait until 14:00" semantics must translate explicitly. Timeout-based
+code (the common case) is unaffected and becomes more predictable. The
+pipeline module's condvar was left on the default clock; its waits are
+private and out of scope for this hardening pass.
+
+---
+
+## 17. Group Self-Wait Rejection via `loom_pool_current` TLS (2026-08-17)
+
+**Decision:** a `_Thread_local` holds the pool of the worker enclosing the
+currently executing code (`g_current_pool`, set by `worker_entry`,
+readable via the internal `loom_pool_current()`). `loom_task_group_wait`
+and `loom_task_group_destroy` compare it to the group's backing pool and
+return `LOOMWORKS_ERR_INVALID` when they match.
+
+**Rationale:** a worker that blocks on its own pool's group wait loops on
+`g->pending > 0` while every task on that group needs a worker slot to
+run — the pool starves and the wait never completes. The TLS costs one
+store per worker start and is race-free (thread-local). Both group entry
+points were widened to return `loom_result_t` so the rejection is
+observable.
+
+**Trade-off:** the guard cannot cover an *indirect* stall (a worker waiting
+on a different thread's pool) — that remains a documented caller
+contract: wait/destroy must come from a thread that does not participate in
+the group's tasks.

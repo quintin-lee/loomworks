@@ -32,6 +32,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: merged the duplicate clang-format block in `CMakeLists.txt` (also
   gating the lint target on the tool actually being found).
 
+### Fixed
+- **Lifecycle destroy gates (2026-08-17)**: `loom_pool_destroy` requires
+  `loom_pool_shutdown` first; `loom_future_destroy` requires the future to
+  be complete; `loom_coro_destroy` requires a quiescent coroutine (state
+  `NEW`/`DONE`/`ERROR`). All three entry points now return a result code
+  (`loom_result_t` / `loom_coro_result_t`) instead of `void`, so misuse is
+  detected and reported instead of corrupting memory or hanging.
+- **Cancelled futures complete with `LOOMWORKS_ERR_CANCELLED`**: a future
+  whose task is cancelled before it runs completes with
+  `LOOMWORKS_ERR_CANCELLED` (both `wait` variants), so waiters never block
+  forever on a cancellation that cannot be signalled.
+- **Worker crashes are reported**: each worker slot tracks a
+  `clean_exit` flag set at the worker's own normal exit paths; a worker
+  that dies abnormally (crash or `pthread_exit` inside a task) fires
+  `LOOMWORKS_METRIC_FAILED` at shutdown and is counted by
+  `loom_metrics_failed()`.
+- **Group self-wait deadlock rejected**: `loom_task_group_wait` and
+  `loom_task_group_destroy` return `LOOMWORKS_ERR_INVALID` when called from
+  a worker of the group's own pool (detected via a thread-local
+  `loom_pool_current()` marker), instead of stalling the pool forever.
+- **Timeout waits now use `CLOCK_MONOTONIC`**: queue-space and future
+  condition variables are created with a monotonic clock attribute, and
+  `wait_for_space` / `loom_future_wait_timeout` read monotonic time —
+  deadline arguments in the headers are documented as monotonic, so
+  wall-clock adjustments can no longer expire or stretch timeouts.
+
 ## [1.0.1] - 2026-08-14
 
 ### Added
@@ -64,7 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SIGSEGV/SIGBUS signal handler for safe stack overflow recovery
 - Per-thread scheduler context (`_Thread_local`) for cross-thread safety
 - Cache-line aligned structures to prevent false sharing
-- Comprehensive test suite: ~12539 pool assertions, ~5603 coroutine assertions, ~78731 integration assertions
+- Comprehensive test suite: ~12604 pool assertions, ~5611 coroutine assertions, ~78763 integration assertions
 - Full API documentation in `docs/api-reference.md`
 - Architecture documentation in `docs/architecture.md`
 - Design decisions documentation in `docs/design-decisions.md`

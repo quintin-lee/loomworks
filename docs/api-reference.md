@@ -25,7 +25,7 @@
 loom_result_t loom_pool_create(const loom_pool_config_t *config,
                                loom_thread_pool_t **pool);
 
-void loom_pool_destroy(loom_thread_pool_t **pool);
+loom_result_t loom_pool_destroy(loom_thread_pool_t **pool);
 ```
 
 | Parameter | Description |
@@ -33,7 +33,7 @@ void loom_pool_destroy(loom_thread_pool_t **pool);
 | `config` | Configuration struct; pass `NULL` for defaults (auto worker count, unbounded queue) |
 | `pool` | Output parameter; set to the new pool handle on success |
 
-**Note:** Always call `loom_pool_shutdown()` to drain pending tasks before calling `loom_pool_destroy()`.
+**Note:** Always call `loom_pool_shutdown()` to drain pending tasks before calling `loom_pool_destroy()`. Destroying a pool whose workers may still be running is rejected with `LOOMWORKS_ERR_INVALID` and the handle is left untouched (NULL-safe: a NULL handle or already-NULL target returns `LOOMWORKS_OK`).
 
 ### 1.2 Configuration Structure
 
@@ -107,18 +107,18 @@ loom_result_t loom_future_wait(loom_future_t *future, void **result);
 loom_result_t loom_future_wait_timeout(loom_future_t *future, void **result,
                                        const struct timespec *deadline);
 
-void loom_future_destroy(loom_future_t *future);
+loom_result_t loom_future_destroy(loom_future_t *future);
 ```
 
 | Parameter | Description |
 |-----------|-------------|
 | `future` | Handle returned by a `submit_future` variant |
 | `result` | Output pointer set to the pointer returned by the task function (caller owns it; may be `NULL`) |
-| `deadline` | Absolute `timespec` (`CLOCK_REALTIME`) after which to give up waiting |
+| `deadline` | Absolute `timespec` (`CLOCK_MONOTONIC`) after which to give up waiting |
 
-- `wait()`: blocks until the task completes. Reentrant — returns immediately if the future is already ready.
-- `wait_timeout()`: returns `LOOMWORKS_ERR_TIMEOUT` if the deadline passes before the task completes.
-- `destroy()`: releases the future handle; call after `wait()`/`wait_timeout()` has returned. NULL-safe.
+- `wait()`: blocks until the task completes. Reentrant — returns immediately if the future is already ready. If the task was cancelled before it ran, returns `LOOMWORKS_ERR_CANCELLED`.
+- `wait_timeout()`: returns `LOOMWORKS_ERR_TIMEOUT` if the deadline passes before the task completes; `LOOMWORKS_ERR_CANCELLED` if the task was cancelled before it ran.
+- `destroy()`: releases the future handle; call after `wait()`/`wait_timeout()` has returned. NULL-safe. Destroying a future whose task has not yet completed is rejected with `LOOMWORKS_ERR_INVALID` — the worker would otherwise write into freed memory when the task finishes.
 
 ### 1.5 Cancellation
 
@@ -186,7 +186,7 @@ loom_coro_result_t loom_coro_create(loom_coro_fn fn,
                                     size_t stack_size,
                                     loom_coroutine_t **coro);
 
-void loom_coro_destroy(loom_coroutine_t **coro);
+loom_coro_result_t loom_coro_destroy(loom_coroutine_t **coro);
 ```
 
 | Parameter | Description |
@@ -196,7 +196,7 @@ void loom_coro_destroy(loom_coroutine_t **coro);
 | `stack_size` | Stack size in bytes; 0 uses `LOOMWORKS_CORO_DEFAULT_STACK_SIZE` (64 KiB) |
 | `coro` | Output parameter |
 
-**Destroy note:** Must only be called when the coroutine is in `DONE` or `ERROR` state.
+**Destroy note:** Returns `LOOMWORKS_CORO_ERR_INVALID` unless the coroutine is in `NEW`, `DONE`, or `ERROR` state — destroying a running/suspended coroutine would free its stack mid-switch. Cross-thread destroy of a quiescent coroutine remains allowed (the stack pool is process-global).
 
 ### 2.2 Start and Resume
 
@@ -307,14 +307,14 @@ Tracks submitted tasks so the whole group can be cancelled or waited on at once.
 
 ```c
 loom_result_t loom_task_group_create(loom_thread_pool_t *pool, loom_task_group_t **group);
-void          loom_task_group_destroy(loom_task_group_t **group);
+loom_result_t loom_task_group_destroy(loom_task_group_t **group);
 loom_result_t loom_task_group_submit(loom_task_group_t *group, loom_task_fn fn,
                                      void *data, uint64_t *task_id);
 loom_result_t loom_task_group_submit_future(loom_task_group_t *group, loom_task_fn_result fn,
                                             void *data, loom_future_t **future,
                                             uint64_t *task_id);
 void          loom_task_group_cancel(loom_task_group_t *group);
-void          loom_task_group_wait(loom_task_group_t *group);
+loom_result_t loom_task_group_wait(loom_task_group_t *group);
 uint32_t      loom_task_group_pending_count(const loom_task_group_t *group);
 ```
 
@@ -326,9 +326,9 @@ uint32_t      loom_task_group_pending_count(const loom_task_group_t *group);
 | `task_id` | Output for the underlying pool-submit task ID (may be `NULL`) |
 
 **Behavior notes:**
-- `destroy()`: cancels all pending tracked tasks (`loom_pool_cancel` on each), then frees the group.
+- `destroy()`: cancels all pending tracked tasks (`loom_pool_cancel` on each), waits for in-flight tasks to finish, then frees the group. Returns `LOOMWORKS_ERR_INVALID` if called **from a worker of the group's own pool** (the call would block forever waiting on work only that worker could run) or with a NULL handle.
 - `cancel()`: same cancellation sweep; the group can be reused afterwards.
-- `wait()`: calls `loom_pool_shutdown()` on the **backing pool** — the whole pool drains and shuts down; no more tasks may be submitted to the pool afterward.
+- `wait()`: blocks until every tracked task finishes; the backing pool stays fully usable afterwards. Returns `LOOMWORKS_ERR_INVALID` when called from a worker of the group's own pool, or with a NULL handle.
 - **Fragility:** cancellation matches tasks by `user_data` pointer equality. If data is freed or reused before cancel, matching can be wrong. Prefer tracking `task_id` and cancelling via `loom_pool_cancel_by_id()` when many tasks share one pointer.
 
 ---
@@ -377,7 +377,7 @@ void loom_pool_set_metrics(loom_thread_pool_t *pool, loom_metrics_t *metrics);
 ```
 
 - `create()`: creates the collector and attaches it to the pool (sets pool metrics + callback). `cb` is optional per-event callback, `data` is its user pointer.
-- `started()`: tasks that began execution. `failed()`: reserved — no C trigger exists yet, always 0.
+- `started()`: tasks that began execution. `failed()`: counts workers that exited abnormally (a task calling `pthread_exit`, or any other crash inside a worker) — the worker is lost and the pool reports the loss at shutdown.
 - `avg_latency_ns()`: `latency_sum / completed`, or 0 when nothing completed.
 - `snapshot()`: reads all counters under one lock acquisition into `loom_metrics_snapshot_t` — mutually consistent across fields.
 - `pool_set_metrics_callback()`: attach/detach a callback directly on the pool (independent of a collector object).
@@ -397,6 +397,7 @@ void loom_pool_set_metrics(loom_thread_pool_t *pool, loom_metrics_t *metrics);
 | 3 | `LOOMWORKS_ERR_INVALID` | Invalid argument, queue full, or cancellation target not found |
 | 4 | `LOOMWORKS_ERR_SHUTDOWN` | Pool/pipeline is shutting down or shut down |
 | 5 | `LOOMWORKS_ERR_TIMEOUT` | Operation timed out (blocking submit / `future_wait_timeout` / pipeline capacity wait) |
+| 6 | `LOOMWORKS_ERR_CANCELLED` | A pending future's task was cancelled; the future completes with this code instead of hanging |
 
 ### Coroutine (`loom_coro_result_t`)
 
@@ -499,15 +500,15 @@ Build: `cc -std=c11 -Iinclude example.c -Lbuild -lloomworks -lpthread` (or `-llo
 | `loom_pool_broadcast` | ✅ Yes | Safe on any valid pool |
 | `loom_pool_resize` | ⚠️ Usually | Must not race with `shutdown`; other operations safe. Displaced workers spill their deques back to the shared queue before exiting |
 | `loom_pool_shutdown` | ⚠️ Call once only | Must be called after all submits are complete; idempotent |
-| `loom_pool_destroy` | ✅ Yes (NULL-safe) | Must be called after shutdown |
+| `loom_pool_destroy` | ✅ Yes (NULL-safe) | Must be called after shutdown; rejected with `ERR_INVALID` on a running pool |
 | `loom_pool_worker/pending/active/idle_count` / `utilization` | ✅ Yes | Locked or relaxed atomic reads |
 | `loom_future_wait` / `wait_timeout` | ✅ Yes | Multiple waiters OK; result safe after return |
-| `loom_future_destroy` | ⚠️ One owner | Must synchronize if other threads still wait on the future |
+| `loom_future_destroy` | ⚠️ One owner | Must not race with the task completing; destroy of a pending future returns `ERR_INVALID` |
 | `loom_coro_create` | ✅ Yes | Per-thread lifecycle |
 | `loom_coro_resume` | ✅ Yes | Per-thread lifecycle |
 | `loom_coro_yield` / `suspend` | ✅ Yes | Call from within the coroutine |
 | `loom_coro_exit` | ✅ Yes | Per-thread; registry mutation serialized internally |
-| `loom_coro_destroy` | ✅ Yes | Must be called after coroutine reaches DONE/ERROR |
+| `loom_coro_destroy` | ✅ Yes | Returns `ERR_INVALID` unless state is NEW/DONE/ERROR; cross-thread destroy of a quiescent coroutine allowed |
 | `loom_coro_state` / `stack_info` | ✅ Yes | Read-only operations |
 | `loom_pc_submit` / `pc_take` / `pc_*_count` | ✅ Yes | Single shared lock + atomics |
 | `loom_task_group_*` | ✅ Yes | Group lock; backing pool handles its own concurrency |
@@ -516,5 +517,5 @@ Build: `cc -std=c11 -Iinclude example.c -Lbuild -lloomworks -lpthread` (or `-llo
 **Prohibited operations:**
 - Calling any submit variant after `shutdown()`.
 - Calling `resume()` / `yield()` / `terminate()` on the same coroutine from different threads (ucontext is not thread-safe; confine the whole lifecycle to one thread).
-- Calling `destroy()` on a coroutine that is not in DONE/ERROR state.
-- Calling `loom_task_group_wait()` and then submitting to the backing pool (it is shut down).
+- Calling `destroy()` on a coroutine that is not in NEW/DONE/ERROR state.
+- Calling `loom_task_group_wait()` / `loom_task_group_destroy()` from a worker of the group's own pool — the call would block forever waiting on work only that worker could run; both reject it with `ERR_INVALID` (self-wait guard).
