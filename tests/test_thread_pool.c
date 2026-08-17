@@ -2262,6 +2262,43 @@ static void test_future_cancel_all_cancelled(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: destroying an uncompleted future is rejected ---------- */
+static void test_future_destroy_pending_rejected(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    g_gate_started = 0;
+    g_gate_release = 0;
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "submit gate task");
+    while (!g_gate_started) {
+        sched_yield();
+    }
+
+    /* Queue a future behind the gated task so it stays pending */
+    loom_future_t *fut     = NULL;
+    uint64_t       task_id = 0;
+    ASSERT(loom_pool_submit_future(pool, fast_result_task, NULL, &fut, &task_id) == LOOMWORKS_OK,
+           "submit future");
+    ASSERT(fut != NULL, "future not null");
+
+    /* Destroying a pending future must be rejected, not free it under a live worker */
+    ASSERT(loom_future_destroy(fut) == LOOMWORKS_ERR_INVALID, "destroy pending future rejected");
+
+    /* The future must still be usable after the rejected destroy */
+    g_gate_release = 1;
+    void *result   = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_OK, "wait after release");
+    ASSERT(result != NULL, "result not null");
+    free(result);
+
+    ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "destroy completed future ok");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ---------- Test: future not cancelled after task completes ---------- */
 static void test_future_no_cancel_after_complete(void)
 {
@@ -3335,6 +3372,7 @@ int main(void)
     test_future_cancel_wait_cancelled();
     test_future_cancel_lane_cancelled();
     test_future_cancel_all_cancelled();
+    test_future_destroy_pending_rejected();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

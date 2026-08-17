@@ -179,11 +179,14 @@ loom_result_t loom_future_wait(loom_future_t *future, void **result);
 /**
  * @brief Destroy a future, freeing associated resources.
  *
- * Must be called after loom_future_wait() has returned.
+ * Must be called after loom_future_wait() has returned. Destroying a
+ * pending future is rejected with LOOMWORKS_ERR_INVALID.
  *
  * @param future   The future handle (NULL-safe).
+ * @return         LOOMWORKS_OK on success, LOOMWORKS_ERR_INVALID if the
+ *                 future is NULL or has not completed yet.
  */
-void loom_future_destroy(loom_future_t *future);
+loom_result_t loom_future_destroy(loom_future_t *future);
 
 /**
  * @brief Gracefully shut down the pool, draining all pending tasks.

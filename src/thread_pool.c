@@ -1481,21 +1481,29 @@ loom_future_wait_timeout(loom_future_t *future, void **result, const struct time
 /* ================================================================
  *  loom_future_destroy — free a future's synchronisation primitives.
  *
+ *  Only a completed future (ready == true) may be destroyed. Destroying
+ *  a pending future would free the mutex/cond while the worker that runs
+ *  the task may still signal them, so it is rejected with ERR_INVALID.
  *  The result pointer stored in the future is NOT freed; the caller
  *  is responsible for freeing it after loom_future_wait().
  * ================================================================ */
-void loom_future_destroy(loom_future_t *future)
+loom_result_t loom_future_destroy(loom_future_t *future)
 {
     if (!future) {
-        return;
+        return LOOMWORKS_ERR_INVALID;
     }
     pthread_mutex_lock(&future->mutex);
+    if (!future->ready) {
+        pthread_mutex_unlock(&future->mutex);
+        return LOOMWORKS_ERR_INVALID;
+    }
     future->result     = NULL;
     future->has_result = false;
     pthread_mutex_unlock(&future->mutex);
     pthread_mutex_destroy(&future->mutex);
     pthread_cond_destroy(&future->cond);
     free(future);
+    return LOOMWORKS_OK;
 }
 
 /* ================================================================
