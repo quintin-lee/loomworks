@@ -1721,6 +1721,7 @@ typedef struct {
     int started;
     int completed;
     int cancelled;
+    int failed;
 } metrics_event_ctx_t;
 
 static void
@@ -1741,6 +1742,9 @@ metrics_event_callback(loom_metric_event_t event, const loom_thread_pool_t *pool
     case LOOMWORKS_METRIC_CANCELLED:
         ctx->cancelled++;
         break;
+    case LOOMWORKS_METRIC_FAILED:
+        ctx->failed++;
+        break;
     default:
         break;
     }
@@ -1752,7 +1756,7 @@ static void test_metrics_callback_all_events(void)
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
-    metrics_event_ctx_t ctx     = {0, 0, 0, 0};
+    metrics_event_ctx_t ctx     = {0};
     loom_metrics_t     *metrics = NULL;
     ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
            "create metrics");
@@ -1830,7 +1834,7 @@ static void test_metrics_callback_started(void)
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
-    metrics_event_ctx_t ctx     = {0, 0, 0, 0};
+    metrics_event_ctx_t ctx     = {0};
     loom_metrics_t     *metrics = NULL;
     ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
            "create metrics");
@@ -1847,6 +1851,35 @@ static void test_metrics_callback_started(void)
      * but completed and submitted should always fire */
     ASSERT(ctx.submitted >= 5, "submitted events received");
     ASSERT(ctx.completed >= 5, "completed events received");
+}
+
+/* ---------- Test: worker crash detection via FAILED metric ---------- */
+static void crash_task(void *arg)
+{
+    (void)arg;
+    pthread_exit(NULL); /* abnormal exit — worker never sets clean_exit */
+}
+
+static void test_worker_crash_detected(void)
+{
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 16};
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool created");
+
+    metrics_event_ctx_t ctx     = {0};
+    loom_metrics_t     *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
+           "metrics created");
+
+    /* The single worker runs the crash task and dies abnormally. */
+    ASSERT(loom_pool_submit(pool, crash_task, NULL, NULL) == LOOMWORKS_OK, "crash task submitted");
+
+    loom_pool_shutdown(pool);
+    ASSERT(ctx.failed == 1, "worker crash reported as FAILED metric");
+    ASSERT(loom_metrics_failed(metrics) == 1, "metrics_failed counter reflects crash");
+
+    loom_metrics_destroy(&metrics);
+    loom_pool_destroy(&pool);
 }
 
 /* ---------- Test: submit_blocking with unbounded queue ---------- */
@@ -3387,6 +3420,7 @@ int main(void)
     test_future_cancel_all_cancelled();
     test_future_destroy_pending_rejected();
     test_pool_destroy_without_shutdown();
+    test_worker_crash_detected();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

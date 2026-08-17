@@ -239,6 +239,11 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
     }
+    pool->thread_clean_exit = (_Atomic bool *)calloc(pool->max_worker_count, sizeof(_Atomic bool));
+    if (!pool->thread_clean_exit) {
+        pool_destroy_internal(pool);
+        return LOOMWORKS_ERR_ALLOC;
+    }
     return LOOMWORKS_OK;
 }
 
@@ -289,6 +294,7 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
 
     free(pool->threads);
     free(pool->thread_alive);
+    free(pool->thread_clean_exit);
     free(pool);
 }
 
@@ -338,6 +344,7 @@ static void *worker_entry(void *arg)
             /* Do NOT clear thread_alive here — the joining side (resize
              * shrink / shutdown) clears it after pthread_join, so no
              * displaced worker is ever skipped by a stale false read. */
+            atomic_store_explicit(&pool->thread_clean_exit[idx], true, memory_order_release);
             break;
         }
         /* All workers exit once shutdown is set and nothing is pending —
@@ -348,6 +355,7 @@ static void *worker_entry(void *arg)
             atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0) {
             pthread_mutex_unlock(&pool->lock);
             /* thread_alive stays true until shutdown joins this worker. */
+            atomic_store_explicit(&pool->thread_clean_exit[idx], true, memory_order_release);
             break;
         }
         loom_coro_exit();
@@ -1539,7 +1547,18 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
     pthread_mutex_unlock(&pool->lock);
     for (uint32_t i = 0; i < pool->max_worker_count; i++) {
         if (atomic_load_explicit(&pool->thread_alive[i], memory_order_acquire)) {
-            pthread_join(pool->threads[i], NULL);
+            int jrc = pthread_join(pool->threads[i], NULL);
+            /* A worker that exited via the clean-exit path sets
+             * thread_clean_exit before leaving; a worker that crashed
+             * (pthread_exit mid-task, SIGSEGV, ...) never does.  Report
+             * any abnormal exit as a FAILED metric so callers can detect
+             * worker crashes that would otherwise look like normal
+             * shutdown. */
+            if (jrc != 0 ||
+                !atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_acquire)) {
+                metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
+            }
+            atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
         }
     }
     pthread_mutex_lock(&pool->lock);
@@ -1922,8 +1941,17 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         }
         /* Zero the newly-extended tail: fresh slots must read as not-alive. */
         memset(new_alive + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
-        pool->thread_alive     = new_alive;
-        pool->max_worker_count = count;
+        pool->thread_alive = new_alive;
+        _Atomic bool *new_clean_exit =
+            (_Atomic bool *)realloc(pool->thread_clean_exit, count * sizeof(_Atomic bool));
+        if (!new_clean_exit) {
+            pthread_mutex_unlock(&pool->lock);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        /* Zero the newly-extended tail: fresh slots must read as not-exited. */
+        memset(new_clean_exit + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
+        pool->thread_clean_exit = new_clean_exit;
+        pool->max_worker_count  = count;
     }
     uint32_t old_count = pool->worker_count;
     pool->worker_count = count;
@@ -1992,6 +2020,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 sched_yield();
             }
             atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
+            atomic_store_explicit(&pool->thread_clean_exit[i], false, memory_order_release);
         }
     }
     return LOOMWORKS_OK;

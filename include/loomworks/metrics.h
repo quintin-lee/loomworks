@@ -25,7 +25,7 @@ typedef enum {
     LOOMWORKS_METRIC_STARTED,   /**< A task started executing. */
     LOOMWORKS_METRIC_COMPLETED, /**< A task finished successfully. */
     LOOMWORKS_METRIC_CANCELLED, /**< A task was cancelled before execution. */
-    LOOMWORKS_METRIC_FAILED,    /**< A task raised an exception (reserved). */
+    LOOMWORKS_METRIC_FAILED,    /**< A worker exited abnormally (crash or pthread_exit mid-task). */
 } loom_metric_event_t;
 
 /**
@@ -84,7 +84,7 @@ uint64_t loom_metrics_cancelled(const loom_metrics_t *metrics);
 uint64_t loom_metrics_started(const loom_metrics_t *metrics);
 
 /**
- * @brief Get the number of failed tasks (reserved; always 0 for now).
+ * @brief Get the number of failed tasks (fires when a worker exits abnormally).
  */
 uint64_t loom_metrics_failed(const loom_metrics_t *metrics);
 

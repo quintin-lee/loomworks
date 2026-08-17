@@ -171,11 +171,13 @@ struct loom_thread_pool {
     loom_work_deque_t *deques;      /**< Array sized max_worker_count. NULL = lane-only mode. */
     _Atomic size_t     deque_total; /**< Total tasks resident in all deques. */
 
-    pthread_t       *threads;      /**< pthread_t array (one per worker). */
-    _Atomic bool    *thread_alive; /**< Parallel to threads[]: true while slot has a live worker. */
-    uint32_t         max_worker_count; /**< Max capacity of threads array. */
-    _Atomic uint64_t next_task_id;     /**< Monotonically increasing task ID counter. */
-    void            *metrics;          /**< Optional metrics collector (loom_metrics_t*). */
+    pthread_t    *threads;      /**< pthread_t array (one per worker). */
+    _Atomic bool *thread_alive; /**< Parallel to threads[]: true while slot has a live worker. */
+    _Atomic bool
+            *thread_clean_exit;    /**< Parallel to threads[]: true once a worker exits normally. */
+    uint32_t max_worker_count;     /**< Max capacity of threads array. */
+    _Atomic uint64_t next_task_id; /**< Monotonically increasing task ID counter. */
+    void            *metrics;      /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback fields to avoid circular dependency */
     void (*metric_cb)(void *, void *, void *);
     void *metric_user_data;
