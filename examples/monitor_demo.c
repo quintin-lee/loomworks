@@ -40,6 +40,7 @@ int main(void)
     loom_metrics_t *metrics = NULL;
     if (loom_metrics_create(pool, NULL, NULL, &metrics) != LOOMWORKS_OK) {
         fprintf(stderr, "Failed to create metrics\n");
+        loom_pool_shutdown(pool);
         loom_pool_destroy(&pool);
         return 1;
     }

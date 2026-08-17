@@ -201,11 +201,16 @@ void loom_pool_shutdown(loom_thread_pool_t *pool);
 /**
  * @brief Destroy the pool and release all resources.
  *
- * The pool must have been shut down first via loom_pool_shutdown().
+ * The pool must have been shut down first via loom_pool_shutdown(); calling
+ * this on a pool that is still running is rejected with
+ * LOOMWORKS_ERR_INVALID and the handle is left untouched, because freeing a
+ * live pool would let workers keep executing against freed memory.
  *
  * @param pool  Pointer to the pool handle (set to NULL on return).
+ * @return LOOMWORKS_OK on success, LOOMWORKS_ERR_INVALID when the pool has
+ *         not been shut down yet (handle unchanged).
  */
-void loom_pool_destroy(loom_thread_pool_t **pool);
+loom_result_t loom_pool_destroy(loom_thread_pool_t **pool);
 
 /**
  * @brief Get the number of worker threads in the pool.

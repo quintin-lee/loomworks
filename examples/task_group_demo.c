@@ -28,6 +28,7 @@ int main(void)
     printf("All tasks done.\n");
 
     loom_task_group_destroy(&group);
+    loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
     return 0;
 }

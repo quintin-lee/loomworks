@@ -1813,17 +1813,27 @@ void loom_pool_set_metrics(loom_thread_pool_t *pool, loom_metrics_t *metrics)
  *  loom_pool_destroy — free the pool and set the handle to NULL.
  *
  *  Must be called after loom_pool_shutdown().  Calling this on a
- *  non-shutdown pool will leak worker threads.
+ *  non-shutdown pool is rejected with LOOMWORKS_ERR_INVALID and the
+ *  handle is left untouched: freeing a pool whose workers may still
+ *  be running would let them trample freed memory, so the caller
+ *  must shut the pool down first.
  *
- *  Safe to call with a NULL handle or a handle already set to NULL.
+ *  Safe to call with a NULL handle or a handle already set to NULL
+ *  (returns LOOMWORKS_OK without touching anything).
  * ================================================================ */
-void loom_pool_destroy(loom_thread_pool_t **pool)
+loom_result_t loom_pool_destroy(loom_thread_pool_t **pool)
 {
     if (!pool || !*pool) {
-        return;
+        return LOOMWORKS_OK;
     }
+
+    if (!atomic_load_explicit(&(*pool)->shutdown, memory_order_acquire)) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+
     pool_destroy_internal(*pool);
     *pool = NULL;
+    return LOOMWORKS_OK;
 }
 
 /* ================================================================

@@ -464,6 +464,19 @@ static void test_destroy_null(void)
     ASSERT(p == NULL, "destroy null leaves null");
 }
 
+/* ---------- Test: destroying an unshutdown pool is rejected ---------- */
+static void test_pool_destroy_without_shutdown(void)
+{
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 16};
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool created");
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_ERR_INVALID, "destroy unshutdown pool rejected");
+    ASSERT(pool != NULL, "pool still valid after rejected destroy");
+    loom_pool_shutdown(pool);
+    ASSERT(loom_pool_destroy(&pool) == LOOMWORKS_OK, "destroy shutdown pool ok");
+    ASSERT(pool == NULL, "pool nulled after ok destroy");
+}
+
 /* ---------- Test: future wait already completed ---------- */
 static void test_future_wait_completed(void)
 {
@@ -3373,6 +3386,7 @@ int main(void)
     test_future_cancel_lane_cancelled();
     test_future_cancel_all_cancelled();
     test_future_destroy_pending_rejected();
+    test_pool_destroy_without_shutdown();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
