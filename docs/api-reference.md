@@ -1,6 +1,11 @@
 # loomworks API Reference
 
 > This document describes all public APIs of the loomworks library. All handles are opaque pointers; struct definitions are not exposed in headers.
+>
+> **Platform support**: Linux x86-64 / aarch64 is the primary target (hand-written
+> context-switch assembly, QEMU cross-compile CI). macOS 10.12+ and BSD are
+> supported through POSIX fallbacks (ucontext context backend, portable
+> clean_exit-poll joins, `MAP_ANON` mmap). Windows is not supported.
 
 ---
 

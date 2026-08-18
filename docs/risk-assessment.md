@@ -30,7 +30,7 @@ Risk ratings use the conventional 3×3 grid:
 | R10 | Docs | Assertion counts in README/CHANGELOG drift from actual (see §Verification) | Low | Low | **Low** |
 | R11 | CI | Duplicate valgrind suppression files diverge; root `loomworks.valgrind-supp` is orphaned (CI uses `.github/valgrind.supp`) | High | Low | **Low** — ✅ resolved (2026-08-16) |
 | R15 | CI | Missing trailing newline at EOF in `src/coro_ctx.h`/`src/task_group.c` trips clang-tidy `newline-eof` → all CI builds red on master | High | Medium | **High** — ✅ resolved (2026-08-16): trailing newlines restored |
-| R12 | Portability | Linux/x86-64 only; no Windows/macOS build, `_GNU_SOURCE` + `pthread_tryjoin_np` are GNU extensions | High | Medium | **Medium** |
+| R12 | Portability | Linux/x86-64 only; no Windows/macOS build, `_GNU_SOURCE` + `pthread_tryjoin_np` are GNU extensions | High | Medium | **Medium** — ✅ resolved (2026-08-18): clean_exit-poll join + POSIX-only shim (portability.h); CMake `LOOMWORKS_POSIX_FALLBACK` simulates non-GNU platforms in CI; platform floor macOS 10.12+/Linux |
 | R13 | Coroutine | Cross-thread coroutine misuse (resume/terminate) hard-fails with `ERR_INVALID`, but `destroy()` is unguarded — caller must only destroy in DONE/ERROR | Low | Medium | **Low** — ✅ closed (2026-08-17): `destroy()` now gates on state NEW/DONE/ERROR; RUNNING/SUSPENDED rejected |
 | R14 | Thread Pool | `cancel_by_id` reused after pool shutdown returns `ERR_SHUTDOWN`; cancel-on-shutdown semantics are subtle (running tasks are never preempted) | Low | Low | **Low** |
 | R16 | Thread Pool | `loom_pool_destroy` without prior shutdown frees worker-shared structures while workers still run → heap corruption | Medium | High | **Medium** — ✅ closed (2026-08-17): rejected with `ERR_INVALID` until shutdown |
@@ -259,10 +259,21 @@ missing), so this only surfaced in CI.
 build exists (future-work item, Low priority). macOS lacks `ucontext` and
 `pthread_tryjoin_np` (not in macOS libpthread).
 
-**Mitigation**: `coro_ctx.h` isolates `ucontext`; a `pthread_tryjoin_np`
-portability shim (join-with-timeout via timed-wait on exit flag) would
-unblock macOS. The code already zero-checks every alloc and has a lane-only
-fallback, so non-Linux ports degrade gracefully rather than crash.
+**Status: ✅ RESOLVED (2026-08-18).** The last hard GNU dependency —
+`pthread_tryjoin_np` in the three resize/shrink join loops — is gone. The
+loops now poll the library's own `thread_clean_exit[idx]` atomic flag (set
+by `worker_entry` on every exit path) and then `pthread_join` explicitly;
+no GNU extension is needed. The new internal `src/portability.h` owns the
+`_POSIX_C_SOURCE` definition (previously thread_pool.c defined
+`_GNU_SOURCE` unconditionally) and provides the `MAP_ANONYMOUS`/`MAP_ANON`
+fallback for BSD. A CMake switch `LOOMWORKS_POSIX_FALLBACK=ON` forces the
+portable path on Linux; the build-posix CI-equivalent run passes ctest 4/4
+with identical assertion counts. Platform floor: Linux (primary,
+x86-64/aarch64, QEMU CI) and macOS 10.12+ / BSD via POSIX fallbacks
+(ucontext + portable join). Windows remains out of scope. A `pthread_kill`
+probe was tried first and falsified: glibc returns 0 (EINVAL) for an exited
+but unjoined thread, so a simulated EBUSY never clears — the clean_exit
+poll replaces it.
 
 ### R13 — `destroy()` is unguarded by design
 
@@ -343,11 +354,9 @@ All claims above are grounded in the source as of master @ b5d8ab2:
 
 ## Maintenance priority
 
-1. **R12** (portability) — long pole for macOS; `pthread_tryjoin_np` shim is
-   the first step. `coro_ctx.h` already de-risks the ucontext half (asm
-   backends landed 2026-08-17 for x86-64/aarch64).
-2. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
+1. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
    R1/R9/R13/R15/R16/R17/R18 are closed as of 2026-08-17; R4 was resolved on
    2026-08-17 with the timed group wait; R6 was resolved on 2026-08-17 with
    the resize fault-injection suite; R8 was resolved on 2026-08-17 with the
-   pipeline payload ownership flag.
+   pipeline payload ownership flag; R12 was resolved on 2026-08-18 with the
+   portable clean_exit-poll join (portability.h).

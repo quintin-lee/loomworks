@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creation, and the leak-only combination (ownership flag + internal pool +
   no handler) is rejected at creation. Legacy `loom_pc_create()` is an
   unchanged zero-flag wrapper.
+- **Portable join (R12)**: the resize/shrink join loops no longer need
+  `pthread_tryjoin_np` (a GNU extension) — they poll the per-worker
+  `clean_exit` flag and join explicitly, closing the last hard
+  platform dependency. A CMake switch `LOOMWORKS_POSIX_FALLBACK=ON`
+  forces the portable path on Linux so CI proves both code paths behave
+  identically; platform floor is now macOS 10.12+ / Linux.
 
 ### Changed
 - **`group_wait()` no longer shuts down the backing pool**: it now waits only

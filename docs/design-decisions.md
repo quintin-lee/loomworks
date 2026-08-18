@@ -397,3 +397,24 @@ it can only leak; with no internal pool the flag is a no-op.
 The old entry point is preserved as a zero-flag wrapper, so payload-owning
 callers migrate by opting into `create_ex` — the free-by-default behavior
 never silently changes for existing users.
+
+## 20. Portable join via clean_exit poll (2026-08-18)
+
+`pthread_tryjoin_np` is a GNU extension absent from macOS/BSD, so the three
+resize/shrink join loops were the library's last hard GNU dependency
+(`_GNU_SOURCE` was defined unconditionally in `thread_pool.c`). The shipped
+fix does not shim tryjoin at all: each loop polls the library's own
+`thread_clean_exit[idx]` atomic flag — set by `worker_entry` on every exit
+path before breaking out — and then calls `pthread_join`, which returns
+immediately once the flag is set. This is platform-neutral, cheaper than a
+probe, and removes the feature-test-macro dependency entirely.
+
+A `pthread_kill(thread, 0)` probe was tried first and falsified on glibc: a
+thread that has exited but not yet been joined returns 0 (errno EINVAL),
+never ESRCH, so a simulated EBUSY never clears and the join loop spins
+forever on the fallback path. The new internal `src/portability.h` only
+owns `_POSIX_C_SOURCE` (before any system header) and the
+`MAP_ANONYMOUS`/`MAP_ANON` fallback. The CMake switch
+`LOOMWORKS_POSIX_FALLBACK=ON` forces the portable path on Linux so CI can
+prove both code paths behave identically (build-posix ctest 4/4, same
+assertion counts).
