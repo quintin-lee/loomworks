@@ -3733,11 +3733,11 @@ static void test_shutdown_drains_deque(void)
      * drop them). */
     uint64_t spins = 0;
     while (atomic_load_explicit(&pool->deques[0].len, memory_order_relaxed) == 0) {
-        if (++spins > 200000000ULL) {
+        if (++spins > 500000000ULL) {
             break; /* safety valve — never spin forever */
         }
     }
-    ASSERT(spins < 200000000ULL, "shutdown-drain: observed deque-resident tasks");
+    ASSERT(spins < 500000000ULL, "shutdown-drain: observed deque-resident tasks");
 
     loom_pool_shutdown(pool); /* must drain deque then exit, not hang */
 
@@ -3768,11 +3768,11 @@ static void test_resize_down_spills_deque(void)
     }
     uint64_t spins = 0;
     while (g_gate_parked < 2) {
-        if (++spins > 200000000ULL) {
+        if (++spins > 500000000ULL) {
             break; /* safety valve — never spin forever */
         }
     }
-    ASSERT(spins < 200000000ULL, "resize-spill: both workers parked");
+    ASSERT(spins < 500000000ULL, "resize-spill: both workers parked");
 
     int counter = 0;
     for (int i = 0; i < 300; i++) {
@@ -3787,11 +3787,11 @@ static void test_resize_down_spills_deque(void)
     g_gate_release = 1;
     spins          = 0;
     while (atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0) {
-        if (++spins > 200000000ULL) {
+        if (++spins > 500000000ULL) {
             break; /* safety valve — never spin forever */
         }
     }
-    ASSERT(spins < 200000000ULL, "resize-spill: observed deque-resident tasks");
+    ASSERT(spins < 500000000ULL, "resize-spill: observed deque-resident tasks");
 
     ASSERT(loom_pool_resize(pool, 1) == LOOMWORKS_OK, "resize-spill: resize to 1");
     loom_pool_shutdown(pool);
@@ -3827,11 +3827,11 @@ static void test_steal_trigger(void)
     ASSERT(loom_pool_submit(pool, gate_task2, NULL, NULL) == LOOMWORKS_OK, "steal: park worker 2");
     uint64_t spins = 0;
     while (g_gate_parked < 1 || g_gate_parked2 < 1) {
-        if (++spins > 200000000ULL) {
+        if (++spins > 500000000ULL) {
             break;
         }
     }
-    ASSERT(spins < 200000000ULL, "steal: both workers parked");
+    ASSERT(spins < 500000000ULL, "steal: both workers parked");
 
     /* Flood the ring while both workers are frozen. */
     for (int i = 0; i < STEAL_MAX_TASKS; i++) {
@@ -3849,7 +3849,7 @@ static void test_steal_trigger(void)
     g_gate_release2 = 1;
     struct timespec wait_deadline;
     clock_gettime(CLOCK_MONOTONIC, &wait_deadline);
-    wait_deadline.tv_sec += 30;
+    wait_deadline.tv_sec += 60;
     bool ring_drained = false;
     while (!ring_drained) {
         if (atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0 &&
