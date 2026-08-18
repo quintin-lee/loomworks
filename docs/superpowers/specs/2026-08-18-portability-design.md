@@ -45,41 +45,34 @@ platform note).
 ### 3.1 New internal header `src/portability.h`
 
 Library-internal only (same residence as `thread_pool_internal.h`); NOT
-installed, NOT exported.
+installed, NOT exported. Header-only (`static inline`), no new source file,
+no LOOMWORKS_SOURCES change. `_GNU_SOURCE` is defined HERE, before any system
+header, and only where the GNU path is actually compiled:
 
 ```c
 #ifndef LOOMWORKS_PORTABILITY_H
 #define LOOMWORKS_PORTABILITY_H
 
-/*
- * Cross-platform glue for non-POSIX APIs threads use.
- */
-
-#include <pthread.h>
-
-/* GNU-only pthread_tryjoin_np is not available on macOS/BSD.  Provide the
- * same contract via a POSIX-only probe: pthread_kill(thread, 0) == 0 means
- * the thread is still running (-> EBUSY); ESRCH means it has exited and is
- * waiting to be reaped, so pthread_join returns immediately.  There is no
- * race: joining a thread that exits right after a successful probe is the
- * caller's next loop iteration, and the shrink/spill loops already re-post
- * the semaphore token on EBUSY, so a thread that exits right after a probe
- * is picked up by that re-post. */
-int loom_tryjoin(pthread_t thread, void **retval);
-
-/* Some BSDs call the anonymous-mmap flag MAP_ANON. */
-#ifndef MAP_ANONYMOUS
-#define MAP_ANONYMOUS MAP_ANON
+/* GNU-only pthread_tryjoin_np is not available on macOS/BSD.  Define
+ * _GNU_SOURCE here (before any system header) only when the native GNU
+ * path is compiled; the fallback below needs nothing but POSIX. */
+#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #endif
 
-#endif /* LOOMWORKS_PORTABILITY_H */
-```
+#include <pthread.h>
+#include <errno.h>
 
-```c
-/* portability.c — implementation */
-#include "portability.h"
-
-int loom_tryjoin(pthread_t thread, void **retval)
+/* Try-join with a portable, race-free simulation of pthread_tryjoin_np:
+ * pthread_kill(thread, 0) == 0 means the thread is still running
+ * (-> EBUSY); ESRCH means it has exited and awaits reaping, so
+ * pthread_join returns immediately.  There is no race: a thread that
+ * exits right after a successful probe is picked up by the caller's
+ * next loop iteration (the shrink/spill loops re-post the semaphore
+ * token on EBUSY, waking it for the reaper). */
+static inline int loom_tryjoin(pthread_t thread, void **retval)
 {
 #if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
     return pthread_tryjoin_np(thread, retval);
@@ -90,46 +83,48 @@ int loom_tryjoin(pthread_t thread, void **retval)
     return pthread_join(thread, retval);
 #endif
 }
+
+/* Some BSDs call the anonymous-mmap flag MAP_ANON. */
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+
+#endif /* LOOMWORKS_PORTABILITY_H */
 ```
 
 Contract mirrors `pthread_tryjoin_np`: returns 0 on successful reaping, EBUSY
 if the thread is still running, other errno on failure. The three call sites'
 existing `while (rc != 0) { sem_post; sched_yield; }` loops require no change.
 
-### 3.2 Threads shim in library only
+### 3.2 Consumers
 
-Where do the tryjoin calls live? `src/thread_pool.c` shrink + grow rollback.
-The three call sites are replaced with `loom_tryjoin`:
+`src/thread_pool.c`:
+- include `"portability.h"` FIRST, before the existing system-header
+  includes (the pre-existing unconditional `#define _GNU_SOURCE` at L21 is
+  removed; the shim now owns the feature-test macro)
+- three call sites replaced with `loom_tryjoin`:
+  - grow rollback loop A (worker_arg malloc failure, ~L2071)
+  - grow rollback loop B (pthread_create failure, ~L2096)
+  - shrink join loop (displaced workers, ~L2132)
 
-- grow rollback loop A (worker_arg malloc failure)
-- grow rollback loop B (pthread_create failure)
-- shrink join loop (displaced workers)
-
-`#define _GNU_SOURCE` moves from thread_pool.c into a single guarded location.
-To keep the `pthread_tryjoin_np` path compiled only when it is actually
-available, `_GNU_SOURCE` is defined in portability.c before including
-`portability.h`, conditioned the same way (Linux && !fallback):
-
-```c
-#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
-#define _GNU_SOURCE
-#endif
-```
-
-(pre-warning: this is the same rule; the existing unconditional
-`#define _GNU_SOURCE` at thread_pool.c:21 is removed; any other file
-needing it keeps its own.)
+`src/coroutine.c`:
+- include `"portability.h"` so the `MAP_ANONYMOUS`/`MAP_ANON` fallback covers
+  the anonymous mmap at L208 on BSD platforms
 
 ### 3.3 CMake switch
 
-`CMakeLists.txt`:
+`CMakeLists.txt` — append to the shared definition list so BOTH library
+targets (and any consumer using `${LOOMWORKS_CTX_DEFINES}`) get the macro;
+this is the same variable that carries `LOOMWORKS_CTX_ASM_*` and is already
+applied to `loomworks_static` (L73) and `loomworks_shared` (L82). Add after
+the backend-selection block (~L31):
 
 ```cmake
 option(LOOMWORKS_POSIX_FALLBACK
        "Force the portable pthread_tryjoin fallback (simulates non-GNU platforms)"
        OFF)
 if(LOOMWORKS_POSIX_FALLBACK)
-    target_compile_definitions(loomworks PRIVATE LOOMWORKS_POSIX_FALLBACK)
+    list(APPEND LOOMWORKS_CTX_DEFINES LOOMWORKS_POSIX_FALLBACK=1)
 endif()
 ```
 
