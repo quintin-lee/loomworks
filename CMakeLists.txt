@@ -31,6 +31,15 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Portability: force the non-GNU pthread_tryjoin fallback path on any platform
+# (simulates macOS/BSD limited pthreads for CI coverage of the shim).
+# ---------------------------------------------------------------------------
+option(LOOMWORKS_POSIX_FALLBACK "Force the portable pthread_tryjoin fallback (simulates non-GNU platforms)" OFF)
+if(LOOMWORKS_POSIX_FALLBACK)
+    list(APPEND LOOMWORKS_CTX_DEFINES LOOMWORKS_POSIX_FALLBACK=1)
+endif()
+
+# ---------------------------------------------------------------------------
 # clang-tidy: run static analysis as part of every compilation
 # ---------------------------------------------------------------------------
 option(ENABLE_CLANG_TIDY "Run clang-tidy on every compile" ON)
