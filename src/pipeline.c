@@ -49,13 +49,15 @@ struct loom_pc {
     uint32_t            len;       /* Current queue occupancy (guarded by lock). */
     pthread_cond_t      cond;      /* Notified on enqueue/dequeue/shutdown. */
     bool                shutdown;  /* Set once by shutdown(); submits then fail. */
+    uint32_t            flags;     /* Ownership flags (LOOM_PC_*); fixed at create. */
     _Atomic uint64_t    submitted; /* Total successful enqueues (lock-free). */
     _Atomic uint64_t    taken;     /* Total successful dequeues (lock-free). */
     /* Optional discard handler: called for payloads that are dropped instead
      * of handed to a consumer — i.e. items still queued when destroy() drains
      * the pipeline (the historical behaviour leaked them).  Used by internal
-     * pool consumers too.  NULL keeps the old free() behaviour for internal
-     * consumers and a leak-free-with-caller-ownership drain. */
+     * pool consumers too.  NULL + no OWN_PAYLOADS keeps the old free()
+     * behaviour for internal consumers; with OWN_PAYLOADS a handler is
+     * mandatory (create_ex rejects the leak-only combination). */
     void (*on_discard)(void *data, void *ctx);
     void *discard_ctx;
 };
@@ -86,30 +88,48 @@ static void consumer_pool_task(void *arg)
     while (loom_pc_take(pc, &item) == LOOMWORKS_OK) {
         /* Discard item — internal consumers just keep workers alive.  If the
          * caller registered a discard handler the payload goes to it (it owns
-         * cleanup); otherwise the historical free() is kept. */
+         * cleanup).  Otherwise the historical free() is kept — except with
+         * OWN_PAYLOADS, where create_ex rejects the no-handler combination, so
+         * the free() below is unreachable in that mode (dead-branch proof). */
         if (pc->on_discard) {
             pc->on_discard(item, pc->discard_ctx);
-        } else {
+        } else if (!(pc->flags & LOOM_PC_OWN_PAYLOADS)) {
             free(item);
         }
     }
 }
 
-loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t **pc)
+loom_result_t loom_pc_create_ex(uint32_t worker_count,
+                                uint32_t capacity,
+                                uint32_t flags,
+                                void (*discard)(void *data, void *ctx),
+                                void       *discard_ctx,
+                                loom_pc_t **pc)
 {
     if (!pc) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    if (flags & ~LOOM_PC_OWN_PAYLOADS) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    if ((flags & LOOM_PC_OWN_PAYLOADS) && worker_count > 0 && discard == NULL) {
+        /* OWN_PAYLOADS with internal consumers and no handler can only leak:
+         * consumers would have to drop caller-owned payloads. */
         return LOOMWORKS_ERR_INVALID;
     }
     loom_pc_t *p = (loom_pc_t *)calloc(1, sizeof(*p));
     if (!p) {
         return LOOMWORKS_ERR_ALLOC;
     }
-    p->pool     = NULL;
-    p->capacity = capacity;
-    p->head     = NULL;
-    p->tail     = NULL;
-    p->len      = 0;
-    p->shutdown = false;
+    p->pool        = NULL;
+    p->capacity    = capacity;
+    p->head        = NULL;
+    p->tail        = NULL;
+    p->len         = 0;
+    p->shutdown    = false;
+    p->flags       = flags;
+    p->on_discard  = discard;
+    p->discard_ctx = discard_ctx;
     atomic_store(&p->submitted, 0);
     atomic_store(&p->taken, 0);
     if (pthread_mutex_init(&p->lock, NULL) != 0) {
@@ -141,6 +161,11 @@ loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t
 
     *pc = p;
     return LOOMWORKS_OK;
+}
+
+loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t **pc)
+{
+    return loom_pc_create_ex(worker_count, capacity, 0, NULL, NULL, pc);
 }
 
 void loom_pc_destroy(loom_pc_t **pc)

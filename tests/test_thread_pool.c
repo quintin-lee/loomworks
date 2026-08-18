@@ -46,9 +46,10 @@ static void record_exec(void *arg)
 
 static _Atomic int g_gate_started = 0;
 static _Atomic int g_gate_release = 0;
-static _Atomic int g_gate_parked = 0; /* gate_task entry count (multi-worker, atomic: several workers park concurrently) */
-static _Atomic int g_gate_release2 = 0;
-static _Atomic int g_gate_parked2 = 0; /* gate_task2 entry count */
+static _Atomic int g_gate_parked =
+    0; /* gate_task entry count (multi-worker, atomic: several workers park concurrently) */
+static _Atomic int  g_gate_release2 = 0;
+static _Atomic int  g_gate_parked2  = 0; /* gate_task2 entry count */
 static volatile int g_cancel_hit    = 0;
 
 /* Steal tests: per-task owner thread records (append via atomic index;
@@ -3217,6 +3218,82 @@ static void test_pipeline_stress(void)
     pthread_mutex_destroy(&lock);
 }
 
+/* ---------- Test: pipeline ownership ---------- */
+static _Atomic int g_pc_discarded;
+
+static void pc_counting_discard(void *data, void *ctx)
+{
+    (void)ctx;
+    free(data);
+    atomic_fetch_add_explicit(&g_pc_discarded, 1, memory_order_relaxed);
+}
+
+static void test_pc_create_ex_owns_no_handler_rejected(void)
+{
+    loom_pc_t *pc = (loom_pc_t *)0x1; /* sentinel: must stay untouched */
+    ASSERT(loom_pc_create_ex(2, 16, LOOM_PC_OWN_PAYLOADS, NULL, NULL, &pc) == LOOMWORKS_ERR_INVALID,
+           "OWNS + internal + no handler rejected");
+    ASSERT(pc == (loom_pc_t *)0x1, "pc untouched on rejection");
+}
+
+static void test_pc_create_ex_owns_internal_handler(void)
+{
+    loom_pc_t *pc  = NULL;
+    g_pc_discarded = 0;
+    ASSERT(loom_pc_create_ex(1, 64, LOOM_PC_OWN_PAYLOADS, pc_counting_discard, NULL, &pc) ==
+               LOOMWORKS_OK,
+           "create OWNS + handler");
+    const int N = 5000;
+    for (int i = 0; i < N; i++) {
+        int *payload = (int *)malloc(sizeof(int));
+        *payload     = i;
+        ASSERT(loom_pc_submit(pc, payload) == LOOMWORKS_OK, "submit payload");
+    }
+    struct timespec sleep_ts = {0, 2L * 1000 * 1000}; /* 2 ms */
+    nanosleep(&sleep_ts, NULL);
+    loom_pc_shutdown(pc);
+    loom_pc_destroy(&pc);
+    ASSERT(g_pc_discarded == N, "every owned payload reclaimed exactly once");
+}
+
+static void test_pc_create_ex_owns_external(void)
+{
+    loom_pc_t *pc  = NULL;
+    g_pc_discarded = 0;
+    ASSERT(loom_pc_create_ex(0, 0, LOOM_PC_OWN_PAYLOADS, NULL, NULL, &pc) == LOOMWORKS_OK,
+           "OWNS with no internal pool is a valid no-op");
+    const int N = 1000;
+    for (int i = 0; i < N; i++) {
+        int *payload = (int *)malloc(sizeof(int));
+        *payload     = i;
+        ASSERT(loom_pc_submit(pc, payload) == LOOMWORKS_OK, "submit payload");
+    }
+    for (int i = 0; i < N; i++) {
+        void *item = NULL;
+        ASSERT(loom_pc_take(pc, &item) == LOOMWORKS_OK, "take payload");
+        int *payload = (int *)item;
+        ASSERT(*payload == i, "payload intact (ownership preserved)");
+        free(payload);
+    }
+    ASSERT(loom_pc_taken_count(pc) == (uint64_t)N, "taken count == N");
+    ASSERT(loom_pc_pending_count(pc) == 0, "queue drained");
+    loom_pc_destroy(&pc);
+    ASSERT(g_pc_discarded == 0, "external consumers free, handler never fires");
+}
+
+static void test_pc_create_ex_unknown_flag(void)
+{
+    loom_pc_t *pc = NULL;
+    ASSERT(loom_pc_create_ex(0, 10, 0x80000000u, NULL, NULL, &pc) == LOOMWORKS_ERR_INVALID,
+           "unknown flag bit rejected");
+}
+
+static void test_pc_create_ex_null_pc(void)
+{
+    ASSERT(loom_pc_create_ex(0, 10, 0, NULL, NULL, NULL) == LOOMWORKS_ERR_INVALID,
+           "NULL pc rejected");
+}
+
 /* ================================================================
  *  Work-stealing deque unit tests (internal loom_work_deque_t)
  * ================================================================ */
@@ -3772,6 +3849,11 @@ int main(void)
     test_pipeline_shutdown_waiting();
     test_pipeline_destroy_then_submit();
     test_pipeline_stress();
+    test_pc_create_ex_owns_no_handler_rejected();
+    test_pc_create_ex_owns_internal_handler();
+    test_pc_create_ex_owns_external();
+    test_pc_create_ex_unknown_flag();
+    test_pc_create_ex_null_pc();
     test_priority_ordering();
     test_priority_future();
     test_metrics_callback();

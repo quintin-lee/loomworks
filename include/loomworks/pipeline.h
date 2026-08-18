@@ -41,10 +41,43 @@ extern "C" {
 /** Opaque pipeline handle. */
 typedef struct loom_pc loom_pc_t;
 
+/** Pipeline ownership flag: with this set the library never frees a payload.
+ *  Internal consumers hand every item to the discard handler instead; the
+ *  caller keeps ownership.  Only meaningful with worker_count > 0. */
+#define LOOM_PC_OWN_PAYLOADS (1u << 0)
+
 /**
- * @brief Create a producer-consumer pipeline.
+ * @brief Create a producer-consumer pipeline with explicit ownership flags.
  *
- * @param worker_count  Number of worker threads (0 = auto).
+ * @param worker_count  Number of internal consumer threads (0 = none; the
+ *                      caller consumes via loom_pc_take()).
+ * @param capacity      Max items in the queue (0 = unbounded).
+ * @param flags         Ownership flags (bitmask of LOOM_PC_*).  Unknown
+ *                      bits are rejected with LOOMWORKS_ERR_INVALID.
+ * @param discard       Discard handler installed atomically at creation.
+ *                      With LOOM_PC_OWN_PAYLOADS and worker_count > 0 this
+ *                      MUST be non-NULL (the only way payloads are reclaimed);
+ *                      the combination is rejected with
+ *                      LOOMWORKS_ERR_INVALID otherwise.
+ * @param discard_ctx   Opaque context passed to @p discard.
+ * @param pc            Output pointer for the created pipeline handle.
+ * @return              LOOMWORKS_OK on success.
+ */
+loom_result_t loom_pc_create_ex(uint32_t worker_count,
+                                uint32_t capacity,
+                                uint32_t flags,
+                                void (*discard)(void *data, void *ctx),
+                                void       *discard_ctx,
+                                loom_pc_t **pc);
+
+/**
+ * @brief Create a producer-consumer pipeline (default ownership).
+ *
+ * Equivalent to loom_pc_create_ex(worker_count, capacity, 0, NULL, NULL, pc):
+ * with no discard handler, internal consumers free() every payload.
+ *
+ * @param worker_count  Number of internal consumer threads (0 = none; the
+ *                      caller consumes via loom_pc_take()).
  * @param capacity      Max items in the queue (0 = unbounded).
  * @param pc            Output pointer for the created pipeline handle.
  * @return              LOOMWORKS_OK on success.
