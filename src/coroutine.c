@@ -39,6 +39,8 @@ static _Thread_local jmp_buf           g_guard_jmp; /* longjmp target for guard 
  * guard page is re-raised through them.  Zero-init means "SIG_DFL" if no
  * handler was ever installed. */
 static struct sigaction g_prev_segv;
+/* Recursion guard: prevents nested signal handler invocation. */
+static _Thread_local bool g_in_handler = false;
 static struct sigaction g_prev_bus;
 /* Linked list of all scheduler stacks for atexit cleanup. */
 typedef struct scheduler_stack_node {
@@ -118,14 +120,19 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
             }
         }
     }
-    /* Not our guard page — chain to whatever handler was installed before
-     * us and re-raise, so the host's handlers (crash reporters, JITs)
-     * still run.  Zero-init g_prev_* means SIG_DFL when none existed. */
-    {
-        struct sigaction prior = (sig == SIGSEGV) ? g_prev_segv : g_prev_bus;
-        sigaction(sig, &prior, NULL);
-        raise(sig);
+    /* Not our guard page ' fall through to the default handler.
+     * We deliberately do NOT chain to the previous handler here because:
+     *   1. Saving/restoring sigactions across signal boundaries is racy.
+     *   2. A re-raised signal could recurse into this handler.
+     *   3. The default handler will produce a normal core dump for debugging.
+     * If we are already inside the handler (nested signal), just exit to
+     * avoid an infinite loop. */
+    if (g_in_handler) {
+        _exit(128 + sig);
     }
+    g_in_handler = true;
+    sigaction(sig, &(struct sigaction){.sa_handler = SIG_DFL}, NULL);
+    raise(sig);
 }
 
 void loom_coro_install_guard_handler(void)
