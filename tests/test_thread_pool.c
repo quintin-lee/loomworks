@@ -772,10 +772,11 @@ static void test_task_group_wait_from_worker(void)
     ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
     g_group_for_wait = group;
 
-    /* Submit a task to the group whose body waits on the same group. */
+    /* Reset the rc marker BEFORE submitting: the worker may run the helper
+     * immediately, so a reset after submit could clobber its ERR_INVALID. */
+    g_group_wait_rc = -1;
     ASSERT(loom_task_group_submit(group, group_wait_from_worker_fn, NULL, NULL) == LOOMWORKS_OK,
            "group submit");
-    g_group_wait_rc = -1;
 
     /* Wait from main: must complete once the worker task finishes. */
     ASSERT(loom_task_group_wait(group) == LOOMWORKS_OK, "wait from main ok");
@@ -933,11 +934,12 @@ static void test_task_group_wait_timeout_from_worker(void)
     ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
     g_group_for_wait = group;
 
-    /* A worker of the same pool must be rejected, even with a deadline. */
+    /* Reset the rc marker BEFORE submitting: the worker may run the helper
+     * immediately, so a reset after submit could clobber its ERR_INVALID. */
+    g_group_wait_rc = -1;
     ASSERT(loom_task_group_submit(group, group_wait_timeout_from_worker_fn, NULL, NULL) ==
                LOOMWORKS_OK,
            "group submit");
-    g_group_wait_rc = -1;
 
     ASSERT(loom_task_group_wait(group) == LOOMWORKS_OK, "wait from main ok");
     ASSERT(g_group_wait_rc == LOOMWORKS_ERR_INVALID, "wait_timeout from own worker rejected");
@@ -1822,6 +1824,15 @@ static void test_cancel_by_id_same_data(void)
     int      shared_data = 0;
     uint64_t ids[3];
 
+    /* Occupy the sole worker with a gate so all 3 tasks stay queued: the
+     * cancel must deterministically find ids[1] still pending. */
+    g_gate_started = 0;
+    g_gate_release = 0;
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "submit gate");
+    while (!g_gate_started) {
+        sched_yield();
+    }
+
     /* Submit 3 tasks with the SAME user_data pointer */
     ASSERT(loom_pool_submit(pool, increment_task, &shared_data, &ids[0]) == LOOMWORKS_OK,
            "submit task 1");
@@ -1832,6 +1843,7 @@ static void test_cancel_by_id_same_data(void)
 
     /* cancel_by_id should only cancel the specific task */
     ASSERT(loom_pool_cancel_by_id(pool, ids[1]) == LOOMWORKS_OK, "cancel by id mid");
+    g_gate_release = 1;
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
