@@ -3,7 +3,7 @@
 Industrial-grade C11 concurrency library featuring a **thread pool**, a **stackful coroutine** subsystem, and higher-level **pipeline**, **task group**, and **metrics** layers.
 
 ```
-Tests: ~12539 pool + ~5603 coroutine + ~78731 integration — all passing
+Tests: ~20744 pool + ~5611 coroutine + ~78746 integration + ~200014 ctx_smoke — all passing
 Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 ```
 
@@ -60,7 +60,7 @@ Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 | Signal handling | SIGSEGV/SIGBUS caught for stack overflow; `longjmp` returns error state |
 | Per-thread scheduler | Scheduler context uses `_Thread_local` for cross-thread safety |
 | Full lifecycle | `create → resume → yield/resume → terminate → destroy` |
-| 64-bit safe | `makecontext` args passed via `uintptr_t → unsigned long` cast |
+| 64-bit safe | asm backends (x86-64/aarch64) pass arguments in registers; ucontext fallback passes them via `uintptr_t` |
 
 ## Project Structure
 
@@ -79,28 +79,39 @@ loomworks/
 │   ├── thread_pool_internal.h
 │   ├── coroutine.c            # Coroutine implementation
 │   ├── coroutine_internal.h
+│   ├── coro_ctx.h             # Context-switch backend abstraction
+│   ├── ctx_x86_64.S           # asm backend (x86-64, SysV)
+│   ├── ctx_aarch64.S          # asm backend (aarch64, AAPCS64)
 │   ├── pipeline.c             # Pipeline implementation
 │   ├── task_group.c           # Task group implementation
 │   └── metrics.c              # Metrics implementation
 ├── tests/
-│   ├── test_thread_pool.c     # ~12539 assertions
-│   ├── test_coroutine.c       # ~5603 assertions
-│   └── test_integration.c     # ~78731 assertions
+│   ├── test_thread_pool.c     # ~20744 assertions
+│   ├── test_coroutine.c       # ~5611 assertions
+│   ├── test_integration.c     # ~78746 assertions
+│   └── ctx_smoke.c            # ~200014 context-switch smoke checks
 ├── examples/
 │   ├── basic_pool.c           # Minimal pool usage
 │   ├── bench.c                # Benchmark harness
+│   ├── backpressure_demo.c    # Bounded-queue backpressure demo
+│   ├── cancel_demo.c          # Cancellation demo
+│   ├── coroutine_demo.c       # Coroutine usage demo
 │   ├── monitor_demo.c         # Metrics monitoring demo
 │   ├── pipeline_demo.c        # Pipeline usage demo
+│   ├── priority_demo.c        # Priority scheduling demo
+│   ├── resize_demo.c          # Resize demo
 │   └── task_group_demo.c      # Task group usage demo
 ├── tools/
 │   └── bench_compare.py       # A/B benchmark comparator
 └── docs/
     ├── architecture.md
+    ├── architecture-review.md # Third-party design review (2026-08-17)
     ├── api-reference.md
     ├── contributing.md
     ├── design-decisions.md
     ├── faq.md
-    └── migration.md
+    ├── migration.md
+    └── risk-assessment.md     # Risk register + resolution history
 ```
 
 ## Build and Test
@@ -236,7 +247,7 @@ typedef enum {
 | Memory safety | `mmap` + `mprotect` PROT_NONE guard pages, NULL checks |
 | False-sharing prevention | Locks and queues use `__attribute__((aligned(64)))` separation |
 | System call robustness | All `pthread_*`/`malloc`/`mmap`/`mprotect` return values checked |
-| 64-bit compatible | `makecontext` args cast via `uintptr_t → unsigned long` |
+| 64-bit compatible | asm backends pass arguments in registers; ucontext fallback casts via `uintptr_t` |
 
 ## Contributing
 
@@ -255,4 +266,4 @@ Migrating from ctpool? See [docs/migration.md](docs/migration.md).
 - **Shared library supported.** CMake builds both `libloomworks.a` (static) and `libloomworks.so` (shared, SOVERSION 1). The shared library works at runtime, including the coroutine subsystem, on modern toolchains (default `-fPIC` handles `_Thread_local` correctly).
 - **Signal handler safety:** The coroutine guard-page handler uses `longjmp`, which means `loom_coro_resume()` may return from a non-deterministic point. Do not rely on state after a guard-page error beyond calling `loom_coro_destroy()`.
 - **Scheduler stack residency:** Each thread allocates a 128 KiB scheduler stack on first coroutine use. It is freed at thread exit by `loom_coro_exit()`, and any stragglers are freed at process exit.
-- **POSIX dependency:** Requires a POSIX-compliant platform with `ucontext(3)`, `mmap(2)`, and `pthread(3)`. Tested on Linux/x86_64. macOS and other POSIX platforms may work with minor adjustments.
+- **POSIX dependency:** Requires a POSIX-compliant platform with `mmap(2)` and `pthread(3)`. The context backend is hand-written assembly on x86-64 and aarch64; POSIX `ucontext(3)` is used only as a compile-time fallback on other platforms. Tested on Linux/x86_64 and aarch64 (QEMU in CI).

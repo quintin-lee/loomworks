@@ -11,7 +11,7 @@ loomworks is a pure C11 concurrency library comprising five subsystems:
 │ Thread Pool   │  Coroutine    │  Pipeline    │ Task Group   │  Metrics  │
 │ thread_pool.h │ coroutine.h   │ pipeline.h   │ task_group.h │ metrics.h │
 ├───────────────┼───────────────┼──────────────┼──────────────┼───────────┤
-│ • Worker mgmt │ • ucontext    │ • Bounded/   │ • Tracked    │ • Event   │
+│ • Worker mgmt │ • asm ctx    │ • Bounded/   │ • Tracked    │ • Event   │
 │ • 256 prio    │   save/restore│   unbounded  │   submissions│   counters│
 │   buckets     │ • mmap guard  │   FIFO       │ • Cancel by  │ • Latency │
 │ • Lock-free   │   stacks      │ • Internal   │   pointer    │   sum/max │
@@ -241,7 +241,7 @@ shutdown/join skip slots whose workers already exited.
                     ┌──────────────────────┐
                     │  loom_coroutine_t  │  (opaque, per-coroutine)
                     │  ┌────────────────┐  │
-                    │  │ ucontext_t ctx │  │  ← save/restore points
+                    │  │ loom_coro_ctx_t │  │  ← save/restore points
                     │  ├────────────────┤  │
                     │  │ mmap stack     │  │  ← [GUARD][usable][GUARD][GUARD]
                     │  │ (pooled)       │  │
@@ -319,19 +319,18 @@ Main thread                      Coroutine stack
   │  loom_coro_resume(coro)       │
   │  ├─ setjmp(g_guard_jmp)         │
   │  ├─ ensure_scheduler()          │  (alloc + registry append, once)
-  │  ├─ getcontext(&coro->ctx)      │
-  │  ├─ makecontext(ctx, coro_entry, 1, coro_ptr)
-  │  └─ swapcontext(&scheduler, &coro->ctx)
+  │  ├─ save coro->ctx              │
+  │  └─ switch to coroutine stack   │  (asm / ucontext backend)
   │          ◄───────────────────────  switch to coroutine stack
   │                                  │  coro_entry(coro_ptr)
   │                                  │  ├─ g_current = coro
   │                                  │  ├─ coro->entry_fn(data)
   │                                  │  │    ├─ ... user code ...
   │                                  │  │    └─ loom_coro_yield()
-  │                                  │  │         └─ swapcontext(&coro->ctx, &scheduler)
+  │                                  │  │         └─ switch back to scheduler stack
   │                                  │  └─ coro->state = DONE / SUSPENDED
   │          ───────────────────────►  switch back to scheduler stack
-  │  swapcontext returns              │
+  │  context switch returns          │
   │  return LOOMWORKS_CORO_OK           │
   │                                  │
 ```
@@ -368,10 +367,10 @@ is installed idempotently (`_Atomic g_guard_installed`).
 ### 3.7 Lifecycle Rules
 
 - `NEW → resume → (yield/resume)* → terminate → destroy`
-- The **entire lifecycle must stay on one thread** (`ucontext` is not
-  thread-safe; `swapcontext` across threads is undefined). Running a
-  coroutine inside a pool worker is fine — create/resume/destroy all happen
-  inside that worker.
+- The **entire lifecycle must stay on one thread** (the scheduler state
+  `g_scheduler` is `_Thread_local`; resuming on another thread would switch
+  onto the wrong scheduler stack). Running a coroutine inside a pool worker is
+  fine — create/resume/destroy all happen inside that worker.
 - A coroutine records the `pthread_t owner` that created it; `resume()` and
   `terminate()` from any other thread are rejected with
   `LOOMWORKS_CORO_ERR_INVALID`. `destroy()` is deliberately not guarded
@@ -523,7 +522,7 @@ cancellable too):
 Thread A: coro = loom_coro_create(...)
 Thread A: loom_coro_resume(coro)   ← runs on Thread A's g_scheduler
 Thread B: loom_coro_resume(coro)   ← runs on Thread B's g_scheduler
-        ↑ UNSAFE: ucontext_t is not thread-safe; swapcontext across threads is undefined behavior
+        ↑ UNSAFE: scheduler state is per-thread (_Thread_local); resuming on Thread B switches onto Thread B's scheduler stack
 ```
 
 To use a coroutine safely, the entire lifecycle (create → resume → destroy)
@@ -604,7 +603,7 @@ loom_coro_exit() / coro_atexit()
 | `mprotect` | munmap the already-allocated region, return `LOOMWORKS_CORO_ERR_MPROTECT` |
 | `ring` / cancel-slot calloc failure | Fall back to lane-only mode (correct, slower) |
 | `sigaction` | Print stderr error, do not abort, continue running (no guard protection) |
-| `swapcontext` | Set `state = LOOMWORKS_CORO_ERROR`, return `LOOMWORKS_CORO_ERR_CONTEXT` |
+| Context switch failure | Set `state = LOOMWORKS_CORO_ERROR`, return `LOOMWORKS_CORO_ERR_CONTEXT` |
 | Stack overflow (guard page) | `longjmp` to `g_guard_jmp`, coroutine → `ERROR`, return `LOOMWORKS_CORO_ERR_GUARD` |
 | Bounded queue full, 60 s wait | Return `LOOMWORKS_ERR_TIMEOUT` |
 
