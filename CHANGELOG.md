@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other thread return `LOOMWORKS_CORO_ERR_INVALID`.
 - Build: merged the duplicate clang-format block in `CMakeLists.txt` (also
   gating the lint target on the tool actually being found).
+- **Execution order documented as a design contract (R7)**: work-stealing
+  ordering — LIFO local pops, FIFO cross-worker steals — is recorded in the
+  risk register as an accepted trade-off (2026-08-18), with
+  pipeline/sequence-number guidance for callers needing strict ordering;
+  the public headers make no FIFO/order promise.
+- **Assertion counts synchronized (R10)**: README and CHANGELOG now reflect
+  the current suite — ~20771 pool + ~5611 coroutine + ~78759 integration +
+  ~200014 ctx_smoke.
 
 ### Fixed
 - **Lifecycle destroy gates (2026-08-17)**: `loom_pool_destroy` requires
