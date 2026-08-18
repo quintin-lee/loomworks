@@ -22,7 +22,7 @@ Risk ratings use the conventional 3×3 grid:
 | R2 | Coroutine | `ucontext` is deprecated by POSIX.1-2008 and marked obsolescent in glibc 2.16+; removed on macOS | Medium | Medium | **Medium** — ✅ mitigated (2026-08-17): hand-written asm backends for x86-64/aarch64 are default; ucontext is a compile-time fallback |
 | R3 | Metrics | Callback fires synchronously on the task-executing thread; must be cheap or it throttles the producer | Medium | Medium | **Medium** — ✅ closed (2026-08-18): contract locked by regression tests (worker thread, lock-free, no drops) |
 | R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): timed group wait (`loom_task_group_wait_timeout`, absolute `CLOCK_MONOTONIC` deadline); `destroy()` remains blocking by documented contract |
-| R5 | Thread Pool | `loom_pool_cancel()` performs an O(cancel_cap) linear scan of the cancel index on the fast path | Medium | Low | **Low** |
+| R5 | Thread Pool | `loom_pool_cancel()` (user_data match) performs an O(cancel_cap) linear scan of the cancel index; `cancel_by_id` is hash-indexed O(1) | Medium | Low | **Low** — ✅ accepted trade-off (2026-08-18): cancellation is rare; scan is microseconds; secondary index has negative ROI |
 | R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** — ✅ resolved (2026-08-17): fault-injection suite covers every grow-path allocation (6 call sites incl. lane-only degrade); five related defects fixed with regression locks |
 | R7 | Thread Pool | Work-stealing executes tasks out of submission order (LIFO local, FIFO steal) — FIFO is only guaranteed for NORMAL+ring when ≤1 worker actively drains | Low | Medium | **Low** |
 | R8 | Pipeline | Internal-consumer mode (`worker_count>0`) consumes and **frees** every payload by default unless a discard handler is set | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): explicit ownership flag (`LOOM_PC_OWN_PAYLOADS` via `loom_pc_create_ex`) with creation-time validation; the leak-only combo (internal pool + no handler + ownership flag) is rejected |
@@ -125,6 +125,21 @@ cancel is O(n). Cancelling many tasks across a large pool is quadratic-ish.
 keeps the submit fast path lock-free. Acceptable for v1.0.1; a hash index
 keyed by task_id (instead of open addressing over ids+1) would reduce the
 scan.
+
+**Status: ✅ ACCEPTED (2026-08-18).** Investigation corrected the scope of
+this row: `loom_pool_cancel_by_id` is already O(1) expected via the
+lock-free open-addressing hash index (`cancel_index_find`); the O(n) scan
+applies only to `loom_pool_cancel(data)`, which must match by `user_data`
+and has no reverse index. Per-call cost is ~`cancel_cap` acquire atomic
+reads (≥1024 slots for 8 workers — microseconds), cancellation is rare
+relative to submit/execute, and the contract already tolerates the
+"task may have already run" race. A secondary user_data hash index would
+require delete-chain maintenance for shared user_data, roughly double index
+memory, and add a new concurrency surface — negative ROI on a Low risk.
+Cancel semantics remain regression-locked (`test_ring_cancel_data`,
+`test_ring_cancel_by_id`, `test_cancel_by_id_after_shutdown`,
+`test_cancel_by_id_running`, future-cancel family). See
+`docs/superpowers/specs/2026-08-18-cancel-tradeoff-design.md`.
 
 ### R6 — `resize()` is a large subtle code path
 
@@ -369,4 +384,7 @@ All claims above are grounded in the source as of master @ b5d8ab2:
    the resize fault-injection suite; R8 was resolved on 2026-08-17 with the
    pipeline payload ownership flag; R12 was resolved on 2026-08-18 with the
    portable clean_exit-poll join (portability.h); R3 was closed on 2026-08-18
-   with the metrics callback contract lockdown (regression tests).
+   with the metrics callback contract lockdown (regression tests); R5 was
+   accepted as a documented trade-off on 2026-08-18 (cancel_by_id is
+   hash-indexed O(1); the cancel(data) user_data scan stays as a
+   microseconds-scale documented cost).
