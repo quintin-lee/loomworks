@@ -18,7 +18,7 @@
  *   loom_future_t protected by its own mutex+condvar.  The caller
  *   blocks on loom_future_wait() until the worker signals readiness.
  */
-#define _GNU_SOURCE /* pthread_tryjoin_np (loom_pool_resize shrink) */
+#include "portability.h" /* must precede system headers: owns _GNU_SOURCE */
 #include "loomworks/thread_pool.h"
 #include "loomworks/coroutine.h"
 #include "loomworks/metrics.h"
@@ -2068,7 +2068,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                          * deadlock. Re-post wake tokens until it actually
                          * exits (same pattern as the shrink join below). */
                         void *ret;
-                        while (pthread_tryjoin_np(pool->threads[j], &ret) != 0) {
+                        while (loom_tryjoin(pool->threads[j], &ret) != 0) {
                             sem_post(&pool->work_sem);
                             sched_yield();
                         }
@@ -2093,7 +2093,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                          * deadlock. Re-post wake tokens until it actually
                          * exits (same pattern as the shrink join below). */
                         void *ret;
-                        while (pthread_tryjoin_np(pool->threads[j], &ret) != 0) {
+                        while (loom_tryjoin(pool->threads[j], &ret) != 0) {
                             sem_post(&pool->work_sem);
                             sched_yield();
                         }
@@ -2129,7 +2129,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
          * pthread_tryjoin_np's EBUSY means it is still blocked; re-post. */
         for (uint32_t i = count; i < old_count; i++) {
             void *ret;
-            while (pthread_tryjoin_np(pool->threads[i], &ret) != 0) {
+            while (loom_tryjoin(pool->threads[i], &ret) != 0) {
                 sem_post(&pool->work_sem);
                 sched_yield();
             }

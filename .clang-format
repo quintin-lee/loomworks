@@ -18,5 +18,8 @@ BinPackParameters: false
 BinPackArguments: false
 PointerAlignment: Right
 SortIncludes: true
+IncludeCategories:
+  - Regex: '.*portability.*'
+    Priority: -1
 InsertBraces: true
 ...

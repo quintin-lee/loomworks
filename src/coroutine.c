@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "portability.h" /* MAP_ANON fallback for the guard-page mmap */
 #include "loomworks/coroutine.h"
 #include "coroutine_internal.h"
 
