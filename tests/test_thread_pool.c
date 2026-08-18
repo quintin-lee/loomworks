@@ -34,6 +34,22 @@ static void simple_task(void *arg)
     __sync_fetch_and_add(counter, 1);
 }
 
+/* Slow variant of simple_task for the drain/spill observation tests: the
+ * worker keeps its local deque non-empty for ~10ms (300 tasks x ~30us)
+ * instead of a sub-us window, so the main-thread observer reliably catches
+ * deque-resident work (F1 flake: the observer missed the instantaneous
+ * drain, spun 40M times on an already-empty deque, and falsely FAILed). */
+static void slow_count_task(void *arg)
+{
+    volatile long sink = 0;
+    for (long i = 0; i < 65536L; i++) {
+        sink += i;
+    }
+    (void)sink;
+    volatile int *counter = (volatile int *)arg;
+    __sync_fetch_and_add(counter, 1);
+}
+
 /* ---------- Bucket/queue regression helpers ---------- */
 static int g_exec_order[128];
 static int g_exec_count;
@@ -771,6 +787,7 @@ static void test_task_group_wait_from_worker(void)
     loom_task_group_t *group = NULL;
     ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
     g_group_for_wait = group;
+    g_group_wait_rc  = -1;
 
     /* Reset the rc marker BEFORE submitting: the worker may run the helper
      * immediately, so a reset after submit could clobber its ERR_INVALID. */
@@ -933,6 +950,7 @@ static void test_task_group_wait_timeout_from_worker(void)
     loom_task_group_t *group = NULL;
     ASSERT(loom_task_group_create(pool, &group) == LOOMWORKS_OK, "group create");
     g_group_for_wait = group;
+    g_group_wait_rc  = -1;
 
     /* Reset the rc marker BEFORE submitting: the worker may run the helper
      * immediately, so a reset after submit could clobber its ERR_INVALID. */
@@ -3704,7 +3722,7 @@ static void test_shutdown_drains_deque(void)
     /* The worker bulk-dequeues these into its local deque after release. */
     int counter = 0;
     for (int i = 0; i < 300; i++) {
-        ASSERT(loom_pool_submit(pool, simple_task, &counter, NULL) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit(pool, slow_count_task, &counter, NULL) == LOOMWORKS_OK,
                "shutdown-drain: submit task");
     }
 
@@ -3758,7 +3776,7 @@ static void test_resize_down_spills_deque(void)
 
     int counter = 0;
     for (int i = 0; i < 300; i++) {
-        ASSERT(loom_pool_submit(pool, simple_task, &counter, NULL) == LOOMWORKS_OK,
+        ASSERT(loom_pool_submit(pool, slow_count_task, &counter, NULL) == LOOMWORKS_OK,
                "resize-spill: submit task");
     }
 
