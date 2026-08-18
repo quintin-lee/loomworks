@@ -1983,6 +1983,135 @@ metrics_event_callback(loom_metric_event_t event, const loom_thread_pool_t *pool
     }
 }
 
+/* ---------- Test: metrics callback contract lockdown ---------- */
+/* The public contract (api-reference §5, design decision 21): the callback
+ * fires synchronously from the thread that produces the event — worker
+ * threads for STARTED/COMPLETED, the submitting thread for SUBMITTED, the
+ * shutting-down thread for FAILED — and always OUTSIDE the pool lock, so it
+ * must be cheap and non-blocking.  These tests lock that contract: any future
+ * refactor that invokes the callback under the lock will deadlock the
+ * pending_count probe below and fail the suite. */
+static pthread_t    g_metric_cb_thread;
+static pthread_t    g_main_thread;
+static volatile int g_cb_pending_ok;
+static _Atomic int  g_cb_calls;
+
+static void
+metrics_contract_cb(loom_metric_event_t event, const loom_thread_pool_t *pool, void *user_data)
+{
+    (void)event;
+    (void)user_data;
+    g_metric_cb_thread = pthread_self();
+    atomic_fetch_add_explicit(&g_cb_calls, 1, memory_order_relaxed);
+    /* pending_count acquires the pool lock.  If we were called while holding
+     * it, this would deadlock and ctest would time out — proving the callback
+     * always runs lock-free.  The return value is irrelevant: reaching the
+     * assignment at all proves the lock was acquirable. */
+    (void)loom_pool_pending_count(pool);
+    g_cb_pending_ok = 1;
+}
+
+static void test_metrics_callback_on_worker_thread(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    metrics_event_ctx_t ctx     = {0};
+    loom_metrics_t     *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_contract_cb, &ctx, &metrics) == LOOMWORKS_OK,
+           "metrics created");
+
+    g_main_thread      = pthread_self();
+    g_metric_cb_thread = pthread_self();
+    g_cb_calls         = 0;
+    g_gate_started     = 0;
+    g_gate_release     = 0;
+    g_gate_parked      = 0;
+
+    /* Gate first so the increment below is guaranteed to run on a worker. */
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "gate submitted");
+    while (!g_gate_started) {
+        sched_yield();
+    }
+    int counter = 0;
+    ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
+           "increment submitted");
+    g_gate_release = 1;
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(!pthread_equal(g_metric_cb_thread, g_main_thread),
+           "callback ran on a worker thread, not the submitting thread");
+    ASSERT(atomic_load_explicit(&g_cb_calls, memory_order_relaxed) >= 1,
+           "callback fired at least once");
+    ASSERT(counter >= 1, "task executed");
+}
+
+static void test_metrics_callback_outside_lock(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    metrics_event_ctx_t ctx     = {0};
+    loom_metrics_t     *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_contract_cb, &ctx, &metrics) == LOOMWORKS_OK,
+           "metrics created");
+
+    g_cb_pending_ok = 0;
+    g_cb_calls      = 0;
+    g_gate_started  = 0;
+    g_gate_release  = 0;
+    g_gate_parked   = 0;
+
+    int counter = 0;
+    for (int i = 0; i < 4; i++) {
+        ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
+               "increment submitted");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(g_cb_pending_ok == 1, "callback probed the pool lock without deadlocking");
+    ASSERT(atomic_load_explicit(&g_cb_calls, memory_order_relaxed) >= 4,
+           "every task produced a callback");
+    ASSERT(counter == 4, "all tasks executed");
+}
+
+static void test_metrics_callback_lifecycle_counts(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 100};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    metrics_event_ctx_t ctx     = {0};
+    loom_metrics_t     *metrics = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
+           "metrics created");
+
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_gate_parked  = 0;
+
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "gate submitted");
+    int counter = 0;
+    ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "increment 1");
+    ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "increment 2");
+    /* Park the worker mid-gate so no task completes before we count. */
+    while (g_gate_parked < 1) {
+        sched_yield();
+    }
+    g_gate_release = 1;
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    ASSERT(ctx.submitted == 3, "all 3 submissions counted");
+    ASSERT(ctx.completed == 3, "all 3 tasks completed");
+    ASSERT(ctx.cancelled == 0, "no cancellations");
+    ASSERT(ctx.failed == 0, "no failures");
+    ASSERT(counter == 2, "both increments executed");
+}
+
 static void test_metrics_callback_all_events(void)
 {
     loom_thread_pool_t *pool = NULL;
@@ -3890,6 +4019,9 @@ int main(void)
     test_metrics_latency_nonzero();
     test_metrics_latency_concurrent();
     test_metrics_callback_started();
+    test_metrics_callback_on_worker_thread();
+    test_metrics_callback_outside_lock();
+    test_metrics_callback_lifecycle_counts();
     test_submit_blocking_unbounded();
     test_submit_blocking_with_id();
     test_submit_blocking_after_shutdown();
