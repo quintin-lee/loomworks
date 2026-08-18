@@ -24,7 +24,7 @@ Risk ratings use the conventional 3×3 grid:
 | R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): timed group wait (`loom_task_group_wait_timeout`, absolute `CLOCK_MONOTONIC` deadline); `destroy()` remains blocking by documented contract |
 | R5 | Thread Pool | `loom_pool_cancel()` (user_data match) performs an O(cancel_cap) linear scan of the cancel index; `cancel_by_id` is hash-indexed O(1) | Medium | Low | **Low** — ✅ accepted trade-off (2026-08-18): cancellation is rare; scan is microseconds; secondary index has negative ROI |
 | R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** — ✅ resolved (2026-08-17): fault-injection suite covers every grow-path allocation (6 call sites incl. lane-only degrade); five related defects fixed with regression locks |
-| R7 | Thread Pool | Work-stealing executes tasks out of submission order (LIFO local, FIFO steal) — FIFO is only guaranteed for NORMAL+ring when ≤1 worker actively drains | Low | Medium | **Low** |
+| R7 | Thread Pool | Work-stealing executes tasks out of submission order (LIFO local, FIFO steal) — FIFO is only guaranteed for NORMAL+ring when ≤1 worker actively drains | Low | Medium | **Low** — ✅ accepted trade-off (2026-08-18): documented design contract for steal scalability; pipeline/sequence numbers for strict ordering; register row source-verified |
 | R8 | Pipeline | Internal-consumer mode (`worker_count>0`) consumes and **frees** every payload by default unless a discard handler is set | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): explicit ownership flag (`LOOM_PC_OWN_PAYLOADS` via `loom_pc_create_ex`) with creation-time validation; the leak-only combo (internal pool + no handler + ownership flag) is rejected |
 | R9 | Pipeline | 60s `CLOCK_REALTIME` timedwait is subject to wall-clock jumps (NTP slews, manual clock changes) | Low | Low | **Low** — ✅ resolved (2026-08-17): timeouts now use `CLOCK_MONOTONIC` |
 | R10 | Docs | Assertion counts in README/CHANGELOG drift from actual (see §Verification) | Low | Low | **Low** |
@@ -188,6 +188,17 @@ NORMAL+ring-with-1-worker approximates strict FIFO.
 
 **Mitigation**: documented in architecture.md. Users needing strict ordering
 should use the pipeline (FIFO by design) or sequence numbers.
+
+**Status: ✅ ACCEPTED (2026-08-18)** — source-verified: `deque_pop`
+(thread_pool.c:650) pops the newest end (LIFO, own deque); `deque_steal`
+(thread_pool.c:701) takes the oldest end (FIFO, victim deque); ring batches
+are FIFO; REALTIME/HIGH bypass the ring through the 256 priority buckets
+(architecture.md §2.3). Public headers (`thread_pool.h`, `pipeline.h`)
+make no ordering promise, so no caller is misled. Out-of-order execution is
+the intended cost of steal scalability; established regression coverage
+(`steal-FIFO-order`, `steal-stress`) already locks the semantics — no new
+tests. Restoring strict FIFO would reintroduce the single-queue bottleneck
+the 1.0.1 scheduler removed.
 
 ### R8 — Pipeline internal consumers free payloads by default
 
@@ -387,4 +398,6 @@ All claims above are grounded in the source as of master @ b5d8ab2:
    with the metrics callback contract lockdown (regression tests); R5 was
    accepted as a documented trade-off on 2026-08-18 (cancel_by_id is
    hash-indexed O(1); the cancel(data) user_data scan stays as a
-   microseconds-scale documented cost).
+   microseconds-scale documented cost); R7 was accepted as a documented
+   design contract on 2026-08-18 (work-steal ordering — LIFO local / FIFO
+   steal; strict FIFO via pipeline or sequence numbers).
