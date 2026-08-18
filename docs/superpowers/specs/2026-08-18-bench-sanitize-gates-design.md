@@ -46,9 +46,11 @@ not be starved.
 
 **Mechanics**:
 - `worker_count = 0` (auto = 2×cpu, clamped 64). `queue_capacity = 0`.
-- Phase 1 (flood): one pthread producer submits `g_task_count` LOW tasks
-  back-to-back (`loom_pool_submit_priority(..., LOOMWORKS_PRIORITY_LOW, ...)`)
-  with zero delay — the drain loop is saturated.
+- Phase 1 (flood): **one pthread producer submits LOW tasks in a loop for
+  the entire duration of the probe phase** (not a fixed batch — a fixed
+  batch of `g_task_count` drains in µs, far shorter than the probe window,
+  so the flood must be *continuous* until probing ends). Flood task = tiny
+  busy work (e.g. `volatile` counter loop) so workers stay saturated.
 - Phase 2 (probe): while the flood runs, the main thread submits a REALTIME
   probe task (`LOOMWORKS_PRIORITY_REALTIME = 0`) whose fn stamps the time at
   entry into an atomic, then `loom_future_wait`s it. Repeat `g_iterations`
@@ -156,6 +158,9 @@ sanitize:
   steps:
     ... configure/build with matrix.build_type ...
     - name: Test
+      env:
+        UBSAN_OPTIONS: halt_on_error=1   # UB must fail the job (default prints + continues)
+        ASAN_OPTIONS: detect_leaks=1
       run: cd build && ctest --output-on-failure   # NO || true
 ```
 
