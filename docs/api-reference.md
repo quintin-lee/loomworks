@@ -276,7 +276,12 @@ Stack layout per coroutine mapping: `[guard][usable][guard][guard]` (one guard a
 A FIFO item queue with optional internal worker pool. Capacity-bounded (back-pressure) or unbounded.
 
 ```c
+#define LOOM_PC_OWN_PAYLOADS (1u << 0)
+
 loom_result_t loom_pc_create(uint32_t worker_count, uint32_t capacity, loom_pc_t **pc);
+loom_result_t loom_pc_create_ex(uint32_t worker_count, uint32_t capacity, uint32_t flags,
+                                void (*discard)(void *data, void *ctx), void *discard_ctx,
+                                loom_pc_t **pc);
 void          loom_pc_destroy(loom_pc_t **pc);
 loom_result_t loom_pc_submit(loom_pc_t *pc, void *item);
 loom_result_t loom_pc_take(loom_pc_t *pc, void **item);
@@ -288,16 +293,30 @@ uint64_t      loom_pc_taken_count(const loom_pc_t *pc);
 
 | Parameter | Description |
 |-----------|-------------|
-| `worker_count` | 0 = auto internal worker pool; >0 creates an internal pool with that many workers which drain the queue via `take()` |
+| `worker_count` | 0 = no internal pool (caller consumes via `take()`); >0 creates an internal pool with that many workers which drain the queue via `take()` |
 | `capacity` | 0 = unbounded; >0 = max pending items; `submit` waits up to 60 s at capacity then `ERR_TIMEOUT` |
+| `flags` | `loom_pc_create_ex` only. Bitmask; unknown bits → `ERR_INVALID`. `LOOM_PC_OWN_PAYLOADS`: the library never frees a payload; discard handlers (or the caller) own cleanup |
+| `discard` / `discard_ctx` | `loom_pc_create_ex` only. Optional discard handler installed atomically at creation; the `set_discard_handler` form remains for post-create install |
 | `item` | Opaque user pointer enqueued / dequeued |
 
 **Behavior notes:**
+- `loom_pc_create(...)` is identical to `create_ex(worker_count, capacity, 0, NULL, NULL, pc)`.
 - `submit()` after `shutdown()` returns `LOOMWORKS_ERR_SHUTDOWN`.
 - `take()` after shutdown returns `LOOMWORKS_ERR_SHUTDOWN` with `*item = NULL` (queue drained first).
-- When an internal pool is configured, its consumer tasks **discard** the items they take — the queue nodes are freed and the user payload is not processed. For consumer semantics use your own tasks with `loom_pc_take()`.
+- **Payload ownership (three-way contract).** The library frees a payload only
+  when: internal consumers are used (`worker_count > 0`) **and** no discard
+  handler is installed **and** `LOOM_PC_OWN_PAYLOADS` is not set. With a
+  discard handler installed, the handler (not the library) owns cleanup and is
+  invoked on the internal worker thread during consumption and on the calling
+  thread during the `destroy()` drain. With `LOOM_PC_OWN_PAYLOADS`, the
+  library never calls `free()`: handlers still run when present, and items are
+  otherwise dropped without freeing. `create_ex` rejects
+  `OWN_PAYLOADS` + internal pool + no handler at creation (it can only leak).
+  With `worker_count == 0` the flag is a no-op: the library never touches
+  payloads — `take()` hands them to the caller and `destroy()` drains
+  leftovers without freeing.
 - `shutdown()`: closes the queue for submits, wakes blocked takers, and shuts down the internal pool if present.
-- `destroy()`: shuts down + joins the internal pool, then drains any leftover items.
+- `destroy()`: shuts down + joins the internal pool, then drains any leftover items (via the discard handler if set, else dropped without freeing).
 
 ---
 

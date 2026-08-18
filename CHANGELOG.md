@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pluggable context-switching backend**: new `src/coro_ctx.h` abstracts
   `getcontext`/`makecontext`/`swapcontext` (default: POSIX ucontext), so an
   alternative backend can be dropped in without touching `src/coroutine.c`.
+- **Pipeline payload ownership flag**: new `loom_pc_create_ex()` takes a
+  flags bitmask in which `LOOM_PC_OWN_PAYLOADS` promises the library will
+  never `free()` payloads; the discard handler is installable atomically at
+  creation, and the leak-only combination (ownership flag + internal pool +
+  no handler) is rejected at creation. Legacy `loom_pc_create()` is an
+  unchanged zero-flag wrapper.
 
 ### Changed
 - **`group_wait()` no longer shuts down the backing pool**: it now waits only

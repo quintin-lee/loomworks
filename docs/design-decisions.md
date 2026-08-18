@@ -381,3 +381,19 @@ rollback, a rollback join deadlock, lane-only mode stranding ring tasks,
 freed uninitialized fallback memory, and a work-steal parity gap that could
 strand tasks on even worker counts) — each fixed and locked with a
 regression test, so the hook pays for itself as a resealable test seam.
+
+## 19. Pipeline Payload Ownership Flag (2026-08-17)
+
+Internal-consumer pipelines freed every payload by default, which is correct
+for fire-and-forget callers but a foot-gun for callers that reclaim
+payloads. Ownership is now explicit at creation: `loom_pc_create_ex()` takes
+a flags bitmask, and `LOOM_PC_OWN_PAYLOADS` promises the library never calls
+`free()` on a payload. The discard handler — the caller's cleanup hook — can
+be installed atomically at creation (it still fires on the internal worker
+thread during consumption and on the destroy drain). The combination
+ownership flag + internal pool + no handler is rejected at creation because
+it can only leak; with no internal pool the flag is a no-op.
+
+The old entry point is preserved as a zero-flag wrapper, so payload-owning
+callers migrate by opting into `create_ex` — the free-by-default behavior
+never silently changes for existing users.

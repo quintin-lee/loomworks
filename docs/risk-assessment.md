@@ -25,7 +25,7 @@ Risk ratings use the conventional 3×3 grid:
 | R5 | Thread Pool | `loom_pool_cancel()` performs an O(cancel_cap) linear scan of the cancel index on the fast path | Medium | Low | **Low** |
 | R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** — ✅ resolved (2026-08-17): fault-injection suite covers every grow-path allocation (6 call sites incl. lane-only degrade); five related defects fixed with regression locks |
 | R7 | Thread Pool | Work-stealing executes tasks out of submission order (LIFO local, FIFO steal) — FIFO is only guaranteed for NORMAL+ring when ≤1 worker actively drains | Low | Medium | **Low** |
-| R8 | Pipeline | Internal-consumer mode (`worker_count>0`) consumes and **frees** every payload by default unless a discard handler is set | Medium | Medium | **Medium** |
+| R8 | Pipeline | Internal-consumer mode (`worker_count>0`) consumes and **frees** every payload by default unless a discard handler is set | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): explicit ownership flag (`LOOM_PC_OWN_PAYLOADS` via `loom_pc_create_ex`) with creation-time validation; the leak-only combo (internal pool + no handler + ownership flag) is rejected |
 | R9 | Pipeline | 60s `CLOCK_REALTIME` timedwait is subject to wall-clock jumps (NTP slews, manual clock changes) | Low | Low | **Low** — ✅ resolved (2026-08-17): timeouts now use `CLOCK_MONOTONIC` |
 | R10 | Docs | Assertion counts in README/CHANGELOG drift from actual (see §Verification) | Low | Low | **Low** |
 | R11 | CI | Duplicate valgrind suppression files diverge; root `loomworks.valgrind-supp` is orphaned (CI uses `.github/valgrind.supp`) | High | Low | **Low** — ✅ resolved (2026-08-16) |
@@ -175,8 +175,18 @@ consumer) will see memory freed out from under them.
 
 **Mitigation**: a discard handler (`loom_pc_set_discard_handler`) must be set
 to reclaim payloads — but note it fires on the *internal* worker thread during
-internal consumption, not just at destroy. Semantics are documented; the
-"consume-and-free" default is a deliberate choice.
+internal consumption, not just at destroy.
+
+**Status: ✅ RESOLVED (2026-08-17)** — `loom_pc_create_ex` introduces an
+explicit ownership flag (`LOOM_PC_OWN_PAYLOADS`): the library then never
+calls `free()` on a payload. The discard handler may be installed atomically
+at creation (it runs both on the internal worker thread during consumption
+and on the destroy drain). The combination `OWN_PAYLOADS` + internal pool +
+no handler is rejected at creation — it can only leak. Default `loom_pc_create`
+is unchanged (zero flags): consume-and-free remains the documented default
+for fire-and-forget callers. Locked by 5 tests (rejected combo, exactly-once
+handler across internal consumption and drain, external-mode no-op, unknown
+flag bits, NULL handle).
 
 ### R9 — Wall-clock timeouts
 
@@ -336,9 +346,8 @@ All claims above are grounded in the source as of master @ b5d8ab2:
 1. **R12** (portability) — long pole for macOS; `pthread_tryjoin_np` shim is
    the first step. `coro_ctx.h` already de-risks the ucontext half (asm
    backends landed 2026-08-17 for x86-64/aarch64).
-2. **R8** (pipeline free-by-default) — document loudly; consider an explicit
-   `LOOM_PC_OWN_PAYLOADS` flag in a future minor release.
-3. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
+2. Others — accepted trade-offs, re-evaluate as usage grows. Hardening items
    R1/R9/R13/R15/R16/R17/R18 are closed as of 2026-08-17; R4 was resolved on
    2026-08-17 with the timed group wait; R6 was resolved on 2026-08-17 with
-   the resize fault-injection suite.
+   the resize fault-injection suite; R8 was resolved on 2026-08-17 with the
+   pipeline payload ownership flag.
