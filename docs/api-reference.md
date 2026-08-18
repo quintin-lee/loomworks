@@ -410,6 +410,19 @@ void loom_pool_set_metrics(loom_thread_pool_t *pool, loom_metrics_t *metrics);
 - `pool_set_metrics_callback()`: attach/detach a callback directly on the pool (independent of a collector object).
 - `pool_set_metrics()`: attach a collector object to a pool so the worker loop updates it.
 
+### Callback contract (regression-locked)
+
+The callback fires **synchronously on the thread that produces the event**:
+worker threads for `STARTED`/`COMPLETED`, the submitting thread for
+`SUBMITTED`, the shutting-down thread for `FAILED`. It is **always invoked
+outside the pool lock**, so the callback may safely call back into the pool
+(e.g. `pending_count()`); conversely it **must be cheap and non-blocking** —
+a slow callback throttles its producing thread, and a blocking one can stall
+the whole pool. The counters themselves are lock-free relaxed atomics. This
+contract is enforced by regression tests
+(`test_metrics_callback_on_worker_thread`,
+`test_metrics_callback_outside_lock`, `test_metrics_callback_lifecycle_counts`).
+
 ---
 
 ## 6. Result Codes Quick Reference

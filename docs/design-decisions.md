@@ -418,3 +418,20 @@ owns `_POSIX_C_SOURCE` (before any system header) and the
 `LOOMWORKS_POSIX_FALLBACK=ON` forces the portable path on Linux so CI can
 prove both code paths behave identically (build-posix ctest 4/4, same
 assertion counts).
+
+## 21. Synchronous lock-free metrics callback (2026-08-18)
+
+`loom_metrics_fire` calls the user callback synchronously on the thread that
+produces the event, always outside the pool lock. This is a deliberate
+contract, not an implementation detail: synchronous delivery keeps counters
+and callback observationally consistent with program order, and lock-free
+delivery means a callback can safely call back into the pool
+(`pending_count()` etc.) without deadlock. The live cost is ~3 relaxed
+atomics plus one optional `clock_gettime` per task.
+
+An async batch queue was considered and rejected: it changes event-timing
+semantics (observers see stale counts), adds a queue with its own memory and
+thread-safety surface, and breaks every existing synchronous counting
+consumer. Instead the contract is locked by three regression tests:
+worker-thread delivery, lock-free delivery (probes `pending_count` from
+inside the callback), and exact once-per-event lifecycle counts.

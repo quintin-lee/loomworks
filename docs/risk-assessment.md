@@ -20,7 +20,7 @@ Risk ratings use the conventional 3×3 grid:
 |----|------|------|-----------|--------|----------|
 | R1 | Coroutine | Process-global `SIGSEGV`/`SIGBUS` handlers installed via `sigaction` without chaining to prior handlers | Medium | Medium | **Medium** — ✅ closed (2026-08-17): handlers now save and restore the prior handler |
 | R2 | Coroutine | `ucontext` is deprecated by POSIX.1-2008 and marked obsolescent in glibc 2.16+; removed on macOS | Medium | Medium | **Medium** — ✅ mitigated (2026-08-17): hand-written asm backends for x86-64/aarch64 are default; ucontext is a compile-time fallback |
-| R3 | Metrics | Callback fires synchronously on the worker thread; must be cheap or it throttles the pool | Medium | Medium | **Medium** |
+| R3 | Metrics | Callback fires synchronously on the task-executing thread; must be cheap or it throttles the producer | Medium | Medium | **Medium** — ✅ closed (2026-08-18): contract locked by regression tests (worker thread, lock-free, no drops) |
 | R4 | Task Group | `group_destroy()` blocks until in-flight wrappers finish — no timeout; deadlock if tasks block forever | Medium | Medium | **Medium** — ✅ resolved (2026-08-17): timed group wait (`loom_task_group_wait_timeout`, absolute `CLOCK_MONOTONIC` deadline); `destroy()` remains blocking by documented contract |
 | R5 | Thread Pool | `loom_pool_cancel()` performs an O(cancel_cap) linear scan of the cancel index on the fast path | Medium | Low | **Low** |
 | R6 | Thread Pool | `loom_pool_resize()` is the most subtle code path (~200 lines of lock-step realloc, rollback, token-storm join) — high regression surface | Low | High | **Low** — ✅ resolved (2026-08-17): fault-injection suite covers every grow-path allocation (6 call sites incl. lane-only degrade); five related defects fixed with regression locks |
@@ -86,6 +86,15 @@ directly throttles that worker and can starve the pool under load.
 **Mitigation**: documented in the public header ("must be cheap"). The
 lock-free counters themselves add ~3 relaxed atomics + one optional
 clock_gettime per task, which is negligible.
+
+**Status: ✅ CLOSED (2026-08-18).** The contract is now locked by regression
+tests (`test_metrics_callback_on_worker_thread`,
+`test_metrics_callback_outside_lock`, `test_metrics_callback_lifecycle_counts`):
+the callback fires synchronously on the thread that produces the event
+(worker for STARTED/COMPLETED, submitter for SUBMITTED, shutting-down thread
+for FAILED), always outside the pool lock — the tests probe `pending_count`
+from inside the callback (acquisition would deadlock and time out the suite)
+and verify every lifecycle event is counted exactly once.
 
 ### R4 — `group_destroy()` can block indefinitely
 
@@ -359,4 +368,5 @@ All claims above are grounded in the source as of master @ b5d8ab2:
    2026-08-17 with the timed group wait; R6 was resolved on 2026-08-17 with
    the resize fault-injection suite; R8 was resolved on 2026-08-17 with the
    pipeline payload ownership flag; R12 was resolved on 2026-08-18 with the
-   portable clean_exit-poll join (portability.h).
+   portable clean_exit-poll join (portability.h); R3 was closed on 2026-08-18
+   with the metrics callback contract lockdown (regression tests).

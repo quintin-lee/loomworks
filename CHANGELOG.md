@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform dependency. A CMake switch `LOOMWORKS_POSIX_FALLBACK=ON`
   forces the portable path on Linux so CI proves both code paths behave
   identically; platform floor is now macOS 10.12+ / Linux.
+- **Metrics callback contract lockdown (R3)**: the callback contract —
+  synchronous, on the event-producing thread, always outside the pool lock,
+  must be cheap — is now enforced by regression tests
+  (`test_metrics_callback_on_worker_thread`,
+  `test_metrics_callback_outside_lock`,
+  `test_metrics_callback_lifecycle_counts`), so any future refactor that
+  invokes the callback under the lock or drops events fails the suite.
 
 ### Changed
 - **`group_wait()` no longer shuts down the backing pool**: it now waits only
