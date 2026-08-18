@@ -2065,13 +2065,17 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                     if (atomic_load_explicit(&pool->thread_alive[j], memory_order_acquire)) {
                         /* A freshly spawned worker may never have woken and is
                          * blocked on work_sem; a plain pthread_join would
-                         * deadlock. Re-post wake tokens until it actually
-                         * exits (same pattern as the shrink join below). */
-                        void *ret;
-                        while (loom_tryjoin(pool->threads[j], &ret) != 0) {
+                         * deadlock. Re-post wake tokens until its exit check
+                         * runs: worker_entry sets thread_clean_exit[j] right
+                         * before breaking out on every exit path, so polling
+                         * the flag is the portable wait-for-exit primitive
+                         * (pthread_tryjoin_np is a GNU extension). */
+                        while (!atomic_load_explicit(&pool->thread_clean_exit[j],
+                                                     memory_order_acquire)) {
                             sem_post(&pool->work_sem);
                             sched_yield();
                         }
+                        pthread_join(pool->threads[j], NULL);
                         atomic_store_explicit(&pool->thread_alive[j], false, memory_order_release);
                         atomic_store_explicit(
                             &pool->thread_clean_exit[j], false, memory_order_release);
@@ -2090,13 +2094,17 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                     if (atomic_load_explicit(&pool->thread_alive[j], memory_order_acquire)) {
                         /* A freshly spawned worker may never have woken and is
                          * blocked on work_sem; a plain pthread_join would
-                         * deadlock. Re-post wake tokens until it actually
-                         * exits (same pattern as the shrink join below). */
-                        void *ret;
-                        while (loom_tryjoin(pool->threads[j], &ret) != 0) {
+                         * deadlock. Re-post wake tokens until its exit check
+                         * runs: worker_entry sets thread_clean_exit[j] right
+                         * before breaking out on every exit path, so polling
+                         * the flag is the portable wait-for-exit primitive
+                         * (pthread_tryjoin_np is a GNU extension). */
+                        while (!atomic_load_explicit(&pool->thread_clean_exit[j],
+                                                     memory_order_acquire)) {
                             sem_post(&pool->work_sem);
                             sched_yield();
                         }
+                        pthread_join(pool->threads[j], NULL);
                         atomic_store_explicit(&pool->thread_alive[j], false, memory_order_release);
                         atomic_store_explicit(
                             &pool->thread_clean_exit[j], false, memory_order_release);
@@ -2125,14 +2133,15 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
          * and find no work sleep again — consuming another token each cycle
          * in a thundering-herd race — so a displaced worker can starve with
          * no wake and its exit check never runs, blocking the join forever.
-         * Keep posting tokens until each displaced thread actually exits:
-         * pthread_tryjoin_np's EBUSY means it is still blocked; re-post. */
+         * Keep posting tokens until its exit check runs: worker_entry sets
+         * thread_clean_exit[i] before breaking out on every exit path, so
+         * polling the flag is the portable wait-for-exit primitive. */
         for (uint32_t i = count; i < old_count; i++) {
-            void *ret;
-            while (loom_tryjoin(pool->threads[i], &ret) != 0) {
+            while (!atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_acquire)) {
                 sem_post(&pool->work_sem);
                 sched_yield();
             }
+            pthread_join(pool->threads[i], NULL);
             atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
             atomic_store_explicit(&pool->thread_clean_exit[i], false, memory_order_release);
         }
