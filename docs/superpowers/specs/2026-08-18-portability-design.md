@@ -45,44 +45,30 @@ platform note).
 ### 3.1 New internal header `src/portability.h`
 
 Library-internal only (same residence as `thread_pool_internal.h`); NOT
-installed, NOT exported. Header-only (`static inline`), no new source file,
-no LOOMWORKS_SOURCES change. `_GNU_SOURCE` is defined HERE, before any system
-header, and only where the GNU path is actually compiled:
+installed, NOT exported. Header-only, no new source file, no
+LOOMWORKS_SOURCES change. **Design revision (2026-08-18, supersedes the
+original `loom_tryjoin` probe):** an earlier draft simulated
+`pthread_tryjoin_np` with a `pthread_kill(thread, 0)` probe, but glibc
+returns 0 (errno EINVAL) for a thread that has exited but not yet been
+joined — never ESRCH — so the simulated EBUSY never clears and the
+resize/shrink join loops spin forever on the fallback path. The shipped
+design instead polls the library's existing `thread_clean_exit[idx]`
+atomic flag (set by `worker_entry` on every exit path before breaking
+out) and then joins explicitly. No GNU extension is needed at all:
 
 ```c
 #ifndef LOOMWORKS_PORTABILITY_H
 #define LOOMWORKS_PORTABILITY_H
 
-/* GNU-only pthread_tryjoin_np is not available on macOS/BSD.  Define
- * _GNU_SOURCE here (before any system header) only when the native GNU
- * path is compiled; the fallback below needs nothing but POSIX. */
-#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
+/* POSIX.1-2008 must be defined before any system header; glibc with
+ * strict -std=c11 hides clock_gettime / pthread_condattr_setclock /
+ * posix_memalign without it. Guarded so coroutine.c's own definition
+ * does not warn. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
 #endif
 
 #include <pthread.h>
-#include <errno.h>
-
-/* Try-join with a portable, race-free simulation of pthread_tryjoin_np:
- * pthread_kill(thread, 0) == 0 means the thread is still running
- * (-> EBUSY); ESRCH means it has exited and awaits reaping, so
- * pthread_join returns immediately.  There is no race: a thread that
- * exits right after a successful probe is picked up by the caller's
- * next loop iteration (the shrink/spill loops re-post the semaphore
- * token on EBUSY, waking it for the reaper). */
-static inline int loom_tryjoin(pthread_t thread, void **retval)
-{
-#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
-    return pthread_tryjoin_np(thread, retval);
-#else
-    if (pthread_kill(thread, 0) == 0) {
-        return EBUSY;
-    }
-    return pthread_join(thread, retval);
-#endif
-}
 
 /* Some BSDs call the anonymous-mmap flag MAP_ANON. */
 #ifndef MAP_ANONYMOUS
@@ -92,20 +78,36 @@ static inline int loom_tryjoin(pthread_t thread, void **retval)
 #endif /* LOOMWORKS_PORTABILITY_H */
 ```
 
-Contract mirrors `pthread_tryjoin_np`: returns 0 on successful reaping, EBUSY
-if the thread is still running, other errno on failure. The three call sites'
-existing `while (rc != 0) { sem_post; sched_yield; }` loops require no change.
+No `loom_tryjoin` helper exists in the shipped design: the three join
+loops poll `thread_clean_exit[idx]` directly (see §3.2), which is
+platform-neutral and removes the `_GNU_SOURCE`/`pthread_tryjoin_np`
+dependency entirely.
 
 ### 3.2 Consumers
 
 `src/thread_pool.c`:
 - include `"portability.h"` FIRST, before the existing system-header
   includes (the pre-existing unconditional `#define _GNU_SOURCE` at L21 is
-  removed; the shim now owns the feature-test macro)
-- three call sites replaced with `loom_tryjoin`:
+  removed; the shim owns the feature-test macro)
+- three join loops replaced with a clean_exit-flag poll + explicit join:
   - grow rollback loop A (worker_arg malloc failure, ~L2071)
   - grow rollback loop B (pthread_create failure, ~L2096)
   - shrink join loop (displaced workers, ~L2132)
+
+Each loop body becomes:
+
+```c
+while (!atomic_load_explicit(&pool->thread_clean_exit[idx], memory_order_acquire)) {
+    sem_post(&pool->work_sem);
+    sched_yield();
+}
+pthread_join(pool->threads[idx], NULL);
+```
+
+`worker_entry` sets `thread_clean_exit[idx] = true` on every exit path
+before breaking out, so the poll is the portable wait-for-exit primitive;
+the explicit join then returns immediately. The loops still re-post the
+semaphore token (waking the displaced worker) exactly as before.
 
 `src/coroutine.c`:
 - include `"portability.h"` so the `MAP_ANONYMOUS`/`MAP_ANON` fallback covers
@@ -121,15 +123,17 @@ the backend-selection block (~L31):
 
 ```cmake
 option(LOOMWORKS_POSIX_FALLBACK
-       "Force the portable pthread_tryjoin fallback (simulates non-GNU platforms)"
+       "Force the portable (non-GNU) code path (simulates non-GNU platforms)"
        OFF)
 if(LOOMWORKS_POSIX_FALLBACK)
     list(APPEND LOOMWORKS_CTX_DEFINES LOOMWORKS_POSIX_FALLBACK=1)
 endif()
 ```
 
-Switching it ON builds the exact code path macOS/BSD would compile, enabling
-deterministic verification on Linux.
+The switch exists to compile the exact code path macOS/BSD would compile,
+enabling deterministic verification on Linux (the shim's GNU-path branch is
+still selected for feature parity, but the flag exists so CI can prove the
+fallback behaves identically).
 
 ## 4. Testing
 
@@ -137,28 +141,30 @@ deterministic verification on Linux.
 |---|---|---|
 | Default GNU path | `cmake --build build --parallel 4` + `ctest --test-dir build --output-on-failure` | 4/4 pass, baselines 20744 / 5611 / 78746 (±40) / 200014 |
 | Fallback simulation | `cmake -S . -B build-posix -DLOOMWORKS_POSIX_FALLBACK=ON` + build + ctest | 4/4 pass with identical assertions |
-| tryjoin exercised | both runs include resize grow/shrink tests that hit the 3 call sites | pass |
+| join loops exercised | both runs include resize grow/shrink tests that hit the 3 clean_exit-poll join loops | pass |
 
 Existing baselines must stay green or only increase.
 
 ## 5. Docs
 
-- `docs/risk-assessment.md`: R12 register row → `✅ resolved (2026-08-18): portable tryjoin shim (portability.h) with POSIX-only fallback; CMake LOOMWORKS_POSIX_FALLBACK simulates non-GNU platforms in CI; platform floor macOS 10.12+/Linux`. Detailed section + maintenance-priority rewrite (R12 removed from open list).
+- `docs/risk-assessment.md`: R12 register row → `✅ resolved (2026-08-18): portable clean_exit-poll join + POSIX-only shim (portability.h); CMake LOOMWORKS_POSIX_FALLBACK simulates non-GNU platforms in CI; platform floor macOS 10.12+/Linux`. Detailed section + maintenance-priority rewrite (R12 removed from open list).
 - `CHANGELOG.md` [Unreleased] Added/Fixed bullet.
-- `docs/design-decisions.md`: decision 20 — portable tryjoin shim (why shim instead of restructuring; why EBUSY probe is race-free; why fallback force-switch exists).
+- `docs/design-decisions.md`: decision 20 — portability shim (why clean_exit-poll join instead of tryjoin; why the kill probe was falsified; why fallback force-switch exists).
 - `docs/api-reference.md`: platform note (Linux x86-64/aarch64 primary; macOS 10.12+ BSD via fallback; no Windows).
 
 ## 6. Commit Plan
 
-- `refactor(pool): add portable tryjoin shim (R12)`
+- `refactor(pool): add portable tryjoin shim (R12)` (2658bab — shipped)
+- `fix(pool): wait on clean_exit flag instead of tryjoin probe (R12)` (93b92be — shipped; kill probe falsified)
+- `build: add LOOMWORKS_POSIX_FALLBACK switch (R12)` (86cce21 — shipped)
 - `docs: record portability shim (R12 resolved)`
 
 ## 7. Acceptance Criteria
 
-AC1. `loom_tryjoin` compiles on both paths; default path delegates to
-     `pthread_tryjoin_np`, fallback uses kill-probe + join.
-AC2. All three tryjoin call sites delegate through `loom_tryjoin`; call-site
-     loop logic unchanged.
+AC1. The three join loops poll `thread_clean_exit[idx]` and join explicitly
+     on both paths; no `pthread_tryjoin_np` / kill-probe remains in code.
+AC2. All three join loops keep the semaphore re-post + sched_yield pattern;
+     loop logic unchanged apart from the wait condition.
 AC3. `MAP_ANONYMOUS` defined as `MAP_ANON` fallback where missing.
 AC4. `_GNU_SOURCE` no longer unconditional in thread_pool.c.
 AC5. Default build: ctest 4/4, baselines not regressed.
