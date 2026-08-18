@@ -33,7 +33,7 @@ static _Thread_local loom_coro_ctx_t   g_scheduler; /* per-thread scheduler cont
 static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
-static _Thread_local jmp_buf           g_guard_jmp; /* longjmp target for guard violations */
+static _Thread_local sigjmp_buf         g_guard_jmp; /* longjmp target for guard violations */
 /* Prior SIGSEGV/SIGBUS dispositions, saved on first install so they can be
  * chained to: uninstall restores them and a fault that is not on a coroutine
  * guard page is re-raised through them.  Zero-init means "SIG_DFL" if no
@@ -116,7 +116,7 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
             if (fp == base || fp == end - ps) {
                 c->state  = LOOMWORKS_CORO_ERROR;
                 g_current = NULL;
-                longjmp(g_guard_jmp, 1);
+                siglongjmp(g_guard_jmp, 1);
             }
         }
     }
@@ -403,7 +403,7 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
     /* Guard-page longjmp target: a stack overflow inside this coroutine
      * (or any coroutine on this thread) unwinds here with a nonzero
      * setjmp value, reporting LOOMWORKS_CORO_ERR_GUARD. */
-    if (setjmp(g_guard_jmp) != 0) {
+    if (sigsetjmp(g_guard_jmp, 1) != 0) {
         return LOOMWORKS_CORO_ERR_GUARD;
     }
     if (!ensure_scheduler()) {
