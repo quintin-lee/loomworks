@@ -56,16 +56,21 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: history_size=7:atomic=ignore_destructor_unloads
         run: |
           cd build
-          if [ "${{ matrix.build_type }}" = "TSan" ]; then
-            export TSAN_OPTIONS="history_size=7 atomic=ignore_destructor_unloads"
-            ctest --output-on-failure || true
-          else
-            export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/lib${{ matrix.build_type }}.so
-            ctest --output-on-failure || true
-          fi
-        continue-on-error: true
+          ctest --output-on-failure
+        # ASan/UBSan are hard gates: the library must be leak-clean and
+        # free of undefined behaviour (halt_on_error makes UBSan fatal).
+        # TSan is best-effort only: the lock-free core (ABA-tagged Treiber
+        # stack, Vyukov ring, Chase-Lev deques) is deliberately
+        # unsynchronized, and ThreadSanitizer cannot follow the coroutine
+        # context switch at all (it crashes in its own interceptors).
+        # See docs/risk-assessment.md R19.
+        continue-on-error: ${{ matrix.build_type == 'TSan' }}
 
   valgrind:
     runs-on: ubuntu-latest
