@@ -16,6 +16,7 @@ import json
 import sys
 
 THRESHOLD = 0.60  # 60% allowed regression on queue-depth throughput
+P99_LIMIT = 2.0   # 200% allowed regression on p99 latency (initial, to be calibrated)
 
 
 def load(path):
@@ -26,6 +27,22 @@ def load(path):
         print(f"error: no JSON object found in {path} (run bench with --json)", file=sys.stderr)
         sys.exit(1)
     return json.loads(text[start:])
+
+
+def gate_p99(name, base, new):
+    """Compare a percentile object {p50,p99,...} between base and new.
+    Missing in the baseline (older bench build) -> warn and skip."""
+    b = (base.get(name) or {}).get("p99")
+    n = (new.get(name) or {}).get("p99")
+    if b is None or n is None:
+        print(f"warning: {name}.p99 missing in base (old bench build); skipping comparison")
+        return 0
+    ratio = n / b
+    print(f"{name:>26}  base={b:>10.0f} ns  new={n:>10.0f} ns  ratio={ratio:>5.2f}x")
+    if ratio > P99_LIMIT:
+        print(f"FAIL: {name}.p99 regressed {ratio:.2f}x (limit {P99_LIMIT:.2f}x)")
+        return 1
+    return 0
 
 
 def main():
@@ -54,7 +71,14 @@ def main():
         print(f"FAIL: queue-depth throughput regressed {worst:.1f}% (limit {THRESHOLD * 100:.0f}%)")
         return 1
     print(f"OK: worst delta {worst:.1f}% within {THRESHOLD * 100:.0f}% limit")
-    return 0
+    rc = 0
+    rc |= gate_p99("fairness_resp_ns", base, new)
+    rc |= gate_p99("tail_latency_ns", base, new)
+    if rc:
+        print(f"FAIL: fairness/tail p99 above {P99_LIMIT:.2f}x limit")
+        return 1
+    print(f"OK: fairness/tail p99 within {P99_LIMIT:.2f}x limit (queue-depth gate above)")
+    return rc
 
 
 if __name__ == "__main__":
