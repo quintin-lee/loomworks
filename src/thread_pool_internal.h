@@ -75,6 +75,25 @@ typedef struct loom_work_deque {
     _Atomic size_t len;                 /* tasks currently resident */
 } loom_work_deque_t;
 
+/* Timer heap entry: a sleeping coroutine task awaiting its deadline. */
+typedef struct {
+    int64_t  deadline_ns; /* CLOCK_MONOTONIC absolute deadline. */
+    uint64_t task_id;     /* Task id of the sleeping coroutine task. */
+    uint32_t worker_idx;  /* Owner worker slot (stable across resize). */
+    void    *coro_ctx;    /* loom_coroutine_t* — the sleeping coroutine. */
+    void    *task;        /* loom_task_t* — its task node (recycle bookkeeping). */
+} loom_timer_entry_t;
+
+/* Per-worker coroutine ready FIFO node. Owned by the worker; the timer
+ * thread may push under coro_lock then sem_post the worker's work_sem.
+ * The owner worker is the only thread that resumes the coroutine. */
+typedef struct loom_coro_ready {
+    struct loom_coroutine  *coro;    /* Suspended coroutine eligible for resume. */
+    uint64_t                task_id; /* For recycle bookkeeping. */
+    struct loom_task       *task;    /* Pool task node (cancellation checks). */
+    struct loom_coro_ready *next;
+} loom_coro_ready_t;
+
 /* ================================================================
  *  Future task context — bridges a loom_future_t to the pool's
  *  fire-and-forget task mechanism.
@@ -171,6 +190,20 @@ struct loom_thread_pool {
     loom_work_deque_t *deques;      /**< Array sized max_worker_count. NULL = lane-only mode. */
     _Atomic size_t     deque_total; /**< Total tasks resident in all deques. */
 
+    /* Per-worker coroutine ready FIFO (one head per worker slot). */
+    struct loom_coro_ready  **coro_ready; /* Array sized max_worker_count; NULL = none. */
+    pthread_mutex_t coro_lock LOOMWORKS_CACHELINE_ALIGN; /* Guards timer->ready push + owner pop. */
+
+    /* Timer min-heap for sleeping coroutine tasks. */
+    loom_timer_entry_t        *timer_heap;                /* Array-backed min-heap. */
+    size_t                     timer_len;                 /* Number of live entries. */
+    size_t                     timer_cap;                 /* Allocated capacity. */
+    pthread_mutex_t timer_lock LOOMWORKS_CACHELINE_ALIGN; /* Guards heap + timer thread. */
+    sem_t                      timer_sem;                 /* Wake signal for the timer thread. */
+    pthread_t                  timer_thread;              /* Pool timer thread (lazily created). */
+    _Atomic bool               timer_thread_alive; /* False until created; set false to stop. */
+    bool                       timer_created;      /* True once timer thread exists. */
+
     pthread_t    *threads;      /**< pthread_t array (one per worker). */
     _Atomic bool *thread_alive; /**< Parallel to threads[]: true while slot has a live worker. */
     _Atomic bool
@@ -237,5 +270,13 @@ loom_task_t *deque_steal(loom_thread_pool_t *pool, loom_work_deque_t *d);
  */
 void   task_destroy(loom_thread_pool_t *pool, loom_task_t *t);
 size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
+
+/* ================================================================
+ *  Timer heap (src/timer.c).  Internal, pool-scoped.
+ * ================================================================ */
+void loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e);
+bool loom_timer_peek(const loom_thread_pool_t *pool, int64_t *deadline_ns);
+bool loom_timer_pop_due(loom_thread_pool_t *pool, loom_timer_entry_t *out);
+void loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id);
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */

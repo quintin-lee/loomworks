@@ -59,6 +59,8 @@ static const char *state_str(loom_coro_state_t s)
         return "RUNNING";
     case LOOMWORKS_CORO_SUSPENDED:
         return "SUSPENDED";
+    case LOOMWORKS_CORO_SLEEPING:
+        return "SLEEPING";
     case LOOMWORKS_CORO_DONE:
         return "DONE";
     case LOOMWORKS_CORO_ERROR:

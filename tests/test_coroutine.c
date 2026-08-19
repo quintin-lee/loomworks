@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static int g_passes   = 0;
@@ -53,6 +54,17 @@ static void multi_yield_coro_fn(void *arg)
     __sync_fetch_and_add(counter, 1); /* 2nd resume */
     loom_coro_yield();
     __sync_fetch_and_add(counter, 1); /* 3rd resume */
+}
+
+static void sleepy_coro_fn(void *arg)
+{
+    int *state = (int *)arg;
+    (*state)++;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_ns = (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
+    loom_coro_sleep_until(now_ns + 10000000); /* +10 ms */
+    (*state)++;
 }
 
 static loom_coroutine_t *g_self_terminate_target;
@@ -603,6 +615,35 @@ static void test_coro_destroy_suspended_rejected(void)
     ASSERT(coro == NULL, "handle nulled after ok destroy");
 }
 
+/* ---------- Test: sleep_until (stand-alone, pure suspend) ---------- */
+static void test_coro_sleep_until(void)
+{
+    loom_coroutine_t *coro  = NULL;
+    int               state = 0;
+    loom_coro_create(sleepy_coro_fn, &state, 0, &coro);
+
+    loom_coro_result_t rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "sleep resume 1 (enters sleep)");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SLEEPING, "state SLEEPING");
+    ASSERT(state == 1, "counter=1 before sleep");
+
+    /* Early resume: rejected, stays SLEEPING. */
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_RUNNING, "early resume rejected");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SLEEPING, "still SLEEPING");
+
+    /* Wait out the deadline, then resume normally. */
+    clock_nanosleep(
+        CLOCK_MONOTONIC, 0, &(struct timespec){.tv_nsec = 12000000}, NULL); /* 12ms > 10ms */
+
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "post-deadline resume");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after sleep completes");
+    ASSERT(state == 2, "counter=2 after sleep");
+
+    loom_coro_destroy(&coro);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -636,6 +677,7 @@ int main(void)
     test_small_stack();
     test_cross_thread_guard();
     test_coro_destroy_suspended_rejected();
+    test_coro_sleep_until();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

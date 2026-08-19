@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__has_include) && __has_include(<valgrind/valgrind.h>)
 #include <valgrind/valgrind.h>
@@ -428,6 +429,21 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
         loom_coro_ctx_make(&coro->ctx, coro_entry, coro);
     }
 
+    /* SLEEPING coroutines resume only after their deadline, matching the
+     * contract of loom_coro_sleep_until.  An early resume is a scheduling
+     * miss: keep SLEEPING and report ERR_RUNNING ("not resumable yet").
+     * The pool timer thread wakes the owner at the deadline; stand-alone
+     * callers must wait out the deadline themselves. */
+    if (coro->state == LOOMWORKS_CORO_SLEEPING) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now_ns = (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
+        if (now_ns < coro->wake_deadline_ns) {
+            return LOOMWORKS_CORO_ERR_RUNNING;
+        }
+        coro->wake_deadline_ns = 0; /* deadline met: clear and resume below */
+    }
+
     /* (Re)enter as RUNNING for every resume: NEW (first run), SUSPENDED
      * (multi-yield: the coroutine may yield again and expect the next
      * resume to continue), and SLEEPING (see loom_coro_sleep_until).
@@ -459,6 +475,39 @@ void loom_coro_yield(void)
 void loom_coro_suspend(void)
 {
     loom_coro_yield();
+}
+
+loom_coro_result_t loom_coro_sleep_until(int64_t deadline_ns)
+{
+    loom_coroutine_t *cur = g_current;
+    if (cur == NULL || cur->state != LOOMWORKS_CORO_RUNNING) {
+        return LOOMWORKS_CORO_ERR_INVALID;
+    }
+    cur->state            = LOOMWORKS_CORO_SLEEPING;
+    cur->wake_deadline_ns = deadline_ns;
+    if (cur->sleep_reg != NULL) {
+        /* Pool coroutine task: register the deadline with the pool timer
+         * heap. The timer thread resumes us via the owner worker. */
+        cur->sleep_reg(cur, cur->task_id, deadline_ns);
+    }
+    /* Return control to the scheduler. The resume() that eventually runs
+     * us again validates the deadline (SLEEPING branch above). */
+    if (loom_coro_ctx_swap(&cur->ctx, &g_scheduler) != 0) {
+        cur->state = LOOMWORKS_CORO_ERROR;
+        return LOOMWORKS_CORO_ERR_CONTEXT;
+    }
+    return LOOMWORKS_CORO_OK;
+}
+
+loom_coro_result_t loom_coro_sleep(int64_t duration_ns)
+{
+    if (duration_ns < 0) {
+        return LOOMWORKS_CORO_ERR_INVALID;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_ns = (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
+    return loom_coro_sleep_until(now_ns + duration_ns);
 }
 
 loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro)
@@ -499,7 +548,8 @@ loom_coro_result_t loom_coro_destroy(loom_coroutine_t **coro)
     /* Reject destroying a coroutine whose stack may still be live:
      * RUNNING/SUSPENDED means the context has not swizzled back into
      * the scheduler, so freeing the stack would be use-after-free. */
-    if (c->state == LOOMWORKS_CORO_RUNNING || c->state == LOOMWORKS_CORO_SUSPENDED) {
+    if (c->state == LOOMWORKS_CORO_RUNNING || c->state == LOOMWORKS_CORO_SUSPENDED ||
+        c->state == LOOMWORKS_CORO_SLEEPING) {
         return LOOMWORKS_CORO_ERR_INVALID;
     }
     deallocate_stack(c);

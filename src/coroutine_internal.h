@@ -46,7 +46,17 @@ struct loom_coroutine {
     void  *stack_end;   /**< End of the usable region (exclusive). */
 
     uintptr_t valgrind_stack_id; /**< Valgrind stack registration ID. */
-    uint64_t  padding[5];        /**< Pad to 64-byte cache-line boundary. */
+
+    uint64_t task_id;          /* Pool task id (0 for stand-alone coroutines). */
+    int64_t  wake_deadline_ns; /* 0 = not sleeping; CLOCK_MONOTONIC absolute. */
+    uint32_t worker_idx;       /* Owner worker slot; stamped at create time. */
+    void    *sleep_reg_ctx;    /* Pool pointer for the sleep_reg hook (NULL = stand-alone). */
+    void    *task_node;        /* Pool loom_task_t* carrying this coroutine (NULL = stand-alone). */
+    /* Optional pool hook: registers this coroutine's deadline with the pool
+     * timer heap. NULL = stand-alone (pure suspension; caller resumes). */
+    void (*sleep_reg)(void *ctx, uint64_t task_id, int64_t deadline_ns);
+
+    uint64_t padding[5]; /**< Pad to 64-byte cache-line boundary. */
 };
 
 /**

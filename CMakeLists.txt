@@ -18,7 +18,7 @@ find_package(Threads REQUIRED)
 set(LOOMWORKS_CTX_BACKEND "asm" CACHE STRING "Context backend: asm|ucontext")
 set_property(CACHE LOOMWORKS_CTX_BACKEND PROPERTY STRINGS asm ucontext)
 
-set(LOOMWORKS_SOURCES src/thread_pool.c src/coroutine.c src/task_group.c src/metrics.c src/pipeline.c)
+set(LOOMWORKS_SOURCES src/thread_pool.c src/coroutine.c src/task_group.c src/metrics.c src/pipeline.c src/timer.c)
 set(LOOMWORKS_CTX_DEFINES "")
 if(LOOMWORKS_CTX_BACKEND STREQUAL "asm" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     list(APPEND LOOMWORKS_SOURCES src/ctx_x86_64.S)

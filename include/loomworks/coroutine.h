@@ -44,6 +44,7 @@ typedef enum {
     LOOMWORKS_CORO_NEW,       /**< Coroutine created but not started. */
     LOOMWORKS_CORO_RUNNING,   /**< Currently executing. */
     LOOMWORKS_CORO_SUSPENDED, /**< Paused via yield or initial suspend. */
+    LOOMWORKS_CORO_SLEEPING,  /**< Sleeping until a deadline; resumable only after it. */
     LOOMWORKS_CORO_DONE,      /**< Completed execution. */
     LOOMWORKS_CORO_ERROR,     /**< Error state (e.g., guard page hit). */
 } loom_coro_state_t;
@@ -123,6 +124,31 @@ void loom_coro_yield(void);
 void loom_coro_suspend(void);
 
 /**
+ * @brief Sleep the current coroutine until an absolute CLOCK_MONOTONIC deadline.
+ *
+ * Valid only inside a running coroutine (otherwise
+ * LOOMWORKS_CORO_ERR_INVALID). The coroutine transitions to SLEEPING.
+ * Stand-alone coroutines must be resumed by the caller after the deadline;
+ * in pool coroutine tasks the pool timer resumes them automatically.
+ * A resume before the deadline is rejected with LOOMWORKS_CORO_ERR_RUNNING
+ * and the coroutine stays SLEEPING.
+ *
+ * @param deadline_ns  Absolute CLOCK_MONOTONIC deadline (nanoseconds).
+ * @return             LOOMWORKS_CORO_OK on success, error code otherwise.
+ */
+loom_coro_result_t loom_coro_sleep_until(int64_t deadline_ns);
+
+/**
+ * @brief Sleep the current coroutine for a relative duration.
+ *
+ * Convenience for loom_coro_sleep_until(monotonic_now_ns() + duration_ns).
+ *
+ * @param duration_ns  Sleep duration in nanoseconds (>= 0).
+ * @return             LOOMWORKS_CORO_OK on success, error code otherwise.
+ */
+loom_coro_result_t loom_coro_sleep(int64_t duration_ns);
+
+/**
  * @brief Terminate a coroutine before it completes naturally.
  *
  * The coroutine moves to the DONE state. Any pending tasks in a thread
@@ -140,12 +166,12 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro);
  * May be called from any thread once the coroutine is in NEW, DONE or
  * ERROR state (the underlying stack is reclaimed through a
  * mutex-guarded global pool).  Calling this on a coroutine that is
- * still RUNNING or SUSPENDED is rejected with
+ * still RUNNING, SUSPENDED or SLEEPING is rejected with
  * LOOMWORKS_CORO_ERR_INVALID and the handle is left untouched.
  *
  * @param coro  Pointer to the coroutine handle (set to NULL on return).
  * @return LOOMWORKS_CORO_OK on success, or LOOMWORKS_CORO_ERR_INVALID
- *         if the handle is NULL or the coroutine is RUNNING/SUSPENDED.
+ *         if the handle is NULL or the coroutine is RUNNING/SUSPENDED/SLEEPING.
  */
 loom_coro_result_t loom_coro_destroy(loom_coroutine_t **coro);
 
