@@ -33,7 +33,7 @@ static _Thread_local loom_coro_ctx_t   g_scheduler; /* per-thread scheduler cont
 static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
-static _Thread_local sigjmp_buf         g_guard_jmp; /* longjmp target for guard violations */
+static sigjmp_buf         g_guard_jmp; /* longjmp target for guard violations */
 /* Prior SIGSEGV/SIGBUS dispositions, saved on first install so they can be
  * chained to: uninstall restores them and a fault that is not on a coroutine
  * guard page is re-raised through them.  Zero-init means "SIG_DFL" if no
