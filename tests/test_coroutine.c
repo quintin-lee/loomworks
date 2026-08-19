@@ -55,6 +55,19 @@ static void multi_yield_coro_fn(void *arg)
     __sync_fetch_and_add(counter, 1); /* 3rd resume */
 }
 
+static loom_coroutine_t *g_self_terminate_target;
+static int               g_self_terminate_survivor;
+
+/* Self-terminates mid-run; the handle is reached via a file-scope
+ * pointer because create() assigns *out only after arg is bound. */
+static void self_terminate_coro_fn(void *arg)
+{
+    (void)arg;
+    loom_coro_result_t rc = loom_coro_terminate(g_self_terminate_target);
+    (void)rc; /* never reached: terminate(self) as g_current swaps away */
+    __sync_fetch_and_add(&g_self_terminate_survivor, 1); /* must not run */
+}
+
 /* ---------- Test: null args ---------- */
 static void test_null_args(void)
 {
@@ -419,6 +432,23 @@ static void test_stack_pool_guard_on_reuse(void)
     loom_coro_destroy(&coro);
 }
 
+/* ---------- Test: self-terminate mid-run ---------- */
+static void test_self_terminate(void)
+{
+    loom_coroutine_t *coro = NULL;
+
+    ASSERT(loom_coro_create(self_terminate_coro_fn, NULL, 0, &coro) == LOOMWORKS_CORO_OK,
+           "create self-terminate coroutine");
+    g_self_terminate_target = coro;
+    /* First resume: the coroutine terminates itself, which must swap
+     * back to the scheduler (not crash / not continue). */
+    ASSERT(loom_coro_resume(coro) == LOOMWORKS_CORO_OK, "resume self-terminate");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after self-terminate");
+    ASSERT(g_self_terminate_survivor == 0, "post-terminate code did not run");
+    g_self_terminate_target = NULL;
+    ASSERT(loom_coro_destroy(&coro) == LOOMWORKS_CORO_OK, "destroy after self-terminate");
+}
+
 /* ---------- Test: yield then terminate ---------- */
 static void test_yield_then_terminate(void)
 {
@@ -594,6 +624,7 @@ int main(void)
     test_terminate_done();
     test_many_coroutines();
     test_yield_then_terminate();
+    test_self_terminate();
     test_stack_info_after_destroy();
     test_coro_null_data();
     test_small_stack();

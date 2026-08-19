@@ -123,6 +123,39 @@ static void init_monotonic_condattr(void)
     pthread_condattr_setclock(&g_condattr_mono, CLOCK_MONOTONIC);
 }
 
+/* Allocate the work-stealing deques array with the alignment the struct
+ * requires.  loom_work_deque_t embeds _Alignas(64) members (bottom/top),
+ * so the whole struct needs 64-byte alignment; calloc()/realloc() only
+ * guarantee max_align_t (16 bytes), which UBSan flags as misaligned
+ * member access.  posix_memalign is used instead of aligned_alloc for
+ * the macOS 10.12 platform floor (aligned_alloc is 10.15+). */
+static loom_work_deque_t *deques_alloc(size_t count)
+{
+    loom_work_deque_t *p = NULL;
+    if (posix_memalign(
+            (void **)&p, _Alignof(loom_work_deque_t), count * sizeof(loom_work_deque_t)) != 0) {
+        return NULL;
+    }
+    memset(p, 0, count * sizeof(loom_work_deque_t));
+    return p;
+}
+
+/* Free the slot arrays of deques [from, to) and NULL them.  Used to roll
+ * back a partially-grown deques array when a later allocation in
+ * loom_pool_resize fails: max_worker_count stays unchanged, so the next
+ * successful resize would re-enter the grow path and memset the tail to
+ * zero — orphaning those committed slot arrays (a 12288-byte leak). */
+static void rollback_deques_tail(loom_thread_pool_t *pool, uint32_t from, uint32_t to)
+{
+    if (pool->deques == NULL) {
+        return;
+    }
+    for (uint32_t i = from; i < to; i++) {
+        free((void *)pool->deques[i].slots);
+        pool->deques[i].slots = NULL;
+    }
+}
+
 static loom_result_t pool_init(loom_thread_pool_t *pool)
 {
     if (pool->worker_count == 0) {
@@ -219,7 +252,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     pool->max_worker_count = pool->worker_count;
 
     /* --- Work-stealing deques (one Chase-Lev deque per worker slot) --- */
-    pool->deques = (loom_work_deque_t *)calloc(pool->max_worker_count, sizeof(loom_work_deque_t));
+    pool->deques = deques_alloc(pool->max_worker_count);
     if (pool->deques != NULL) {
         bool ok = true;
         for (uint32_t i = 0; i < pool->max_worker_count; i++) {
@@ -1971,21 +2004,19 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
          * so do it FIRST — on failure nothing else has been touched yet. */
         uint32_t old_max = pool->max_worker_count;
         if (pool->deques != NULL) {
-            loom_work_deque_t *new_deques =
-                test_alloc_fail_next()
-                    ? NULL
-                    : (loom_work_deque_t *)realloc(pool->deques, count * sizeof(loom_work_deque_t));
+            /* Grow the deques array with proper 64-byte alignment
+             * (realloc cannot preserve it — see deques_alloc). */
+            loom_work_deque_t *new_deques = test_alloc_fail_next() ? NULL : deques_alloc(count);
             if (!new_deques) {
                 pthread_mutex_unlock(&pool->lock);
                 return LOOMWORKS_ERR_ALLOC;
             }
+            memcpy(new_deques, pool->deques, old_max * sizeof(loom_work_deque_t));
+            free(pool->deques);
             pool->deques = new_deques;
-            /* Zero the freshly-extended tail: realloc leaves it
-             * uninitialized, and the lane-only fallback below frees
-             * every slots pointer in [old_max, count) — a garbage
-             * pointer there would corrupt the heap. */
-            memset(new_deques + old_max, 0, (count - old_max) * sizeof(loom_work_deque_t));
-            /* Initialize the freshly-extended deques (mirror pool_init). */
+            /* Initialize the freshly-extended deques (mirror pool_init).
+             * deques_alloc already zeroed the whole array, so the tail
+             * slots pointers read NULL until initialized here. */
             bool slots_failed = false;
             for (uint32_t i = old_max; i < count && !slots_failed; i++) {
                 pool->deques[i].capacity = LOOMWORKS_DEQUE_CAPACITY;
@@ -2003,11 +2034,13 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
             }
             if (slots_failed) {
                 /* Fall back to lane-only mode (same policy as pool_init):
-                 * free every slots array we created, then the array itself.
+                 * free every slots array (old AND new — the old ones below
+                 * old_max are about to be abandoned too, so freeing only the
+                 * new tail would leak them), then the array itself.
                  * Existing workers below old_max already hold `my` pointing
                  * into this array — worker_entry re-reads `my` under the
                  * lock each iteration, so NULL here is safe for them too. */
-                for (uint32_t i = old_max; i < count; i++) {
+                for (uint32_t i = 0; i < count; i++) {
                     free((void *)pool->deques[i].slots);
                     pool->deques[i].slots = NULL;
                 }
@@ -2019,6 +2052,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
             test_alloc_fail_next() ? NULL
                                    : (pthread_t *)realloc(pool->threads, count * sizeof(pthread_t));
         if (!new_threads) {
+            rollback_deques_tail(pool, old_max, count);
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
         }
@@ -2028,6 +2062,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 ? NULL
                 : (_Atomic bool *)realloc(pool->thread_alive, count * sizeof(_Atomic bool));
         if (!new_alive) {
+            rollback_deques_tail(pool, old_max, count);
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
         }
@@ -2039,6 +2074,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
                 ? NULL
                 : (_Atomic bool *)realloc(pool->thread_clean_exit, count * sizeof(_Atomic bool));
         if (!new_clean_exit) {
+            rollback_deques_tail(pool, old_max, count);
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
         }

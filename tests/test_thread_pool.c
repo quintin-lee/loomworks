@@ -2059,6 +2059,7 @@ static void test_metrics_callback_on_worker_thread(void)
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
+    loom_metrics_destroy(&metrics);
     ASSERT(!pthread_equal(g_metric_cb_thread, g_main_thread),
            "callback ran on a worker thread, not the submitting thread");
     ASSERT(atomic_load_explicit(&g_cb_calls, memory_order_relaxed) >= 1,
@@ -2090,6 +2091,7 @@ static void test_metrics_callback_outside_lock(void)
     }
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
+    loom_metrics_destroy(&metrics);
     ASSERT(g_cb_pending_ok == 1, "callback probed the pool lock without deadlocking");
     ASSERT(atomic_load_explicit(&g_cb_calls, memory_order_relaxed) >= 4,
            "every task produced a callback");
@@ -2123,6 +2125,7 @@ static void test_metrics_callback_lifecycle_counts(void)
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
+    loom_metrics_destroy(&metrics);
     ASSERT(ctx.submitted == 3, "all 3 submissions counted");
     ASSERT(ctx.completed == 3, "all 3 tasks completed");
     ASSERT(ctx.cancelled == 0, "no cancellations");

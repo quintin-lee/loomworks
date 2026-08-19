@@ -426,6 +426,11 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
                                 (size_t)((char *)coro->stack_end - (char *)coro->stack_start));
         loom_coro_ctx_set_link(&coro->ctx, &g_scheduler);
         loom_coro_ctx_make(&coro->ctx, coro_entry, coro);
+        /* Mark RUNNING on the first entry so the coroutine's own
+         * yield() (which requires state == RUNNING) is effective.
+         * SUSPENDED re-resumes deliberately leave the state alone:
+         * a resumed coroutine then runs to completion, which the
+         * coroutine tests depend on (yield is a one-shot pause). */
         coro->state = LOOMWORKS_CORO_RUNNING;
     }
 
@@ -467,12 +472,16 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro)
     if (coro->state == LOOMWORKS_CORO_DONE || coro->state == LOOMWORKS_CORO_ERROR) {
         return LOOMWORKS_CORO_OK;
     }
-    /* Mark done.  If the coroutine is calling terminate() on itself
-     * (g_current), switch back to the scheduler — the swapcontext below
-     * returns the coroutine's stack to the scheduler's, unwinding the
-     * coroutine's own frame permanently. */
+    /* Mark done.  Only when the coroutine is terminating ITSELF (it is
+     * g_current and actually running) must we switch back to the
+     * scheduler — the swap returns the coroutine's stack to the
+     * scheduler's, unwinding the coroutine's own frame permanently.
+     * Terminating an externally-suspended coroutine (g_current == NULL
+     * on this thread, or state != RUNNING) is just a state transition:
+     * the stack is idle, so no swap is needed or legal. */
+    bool self   = (coro == g_current && coro->state == LOOMWORKS_CORO_RUNNING);
     coro->state = LOOMWORKS_CORO_DONE;
-    if (coro == g_current) {
+    if (self) {
         g_current = NULL;
         if (loom_coro_ctx_swap(&coro->ctx, &g_scheduler) != 0) {
             return LOOMWORKS_CORO_ERR_CONTEXT;

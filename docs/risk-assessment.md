@@ -36,6 +36,8 @@ Risk ratings use the conventional 3×3 grid:
 | R16 | Thread Pool | `loom_pool_destroy` without prior shutdown frees worker-shared structures while workers still run → heap corruption | Medium | High | **Medium** — ✅ closed (2026-08-17): rejected with `ERR_INVALID` until shutdown |
 | R17 | Thread Pool | A worker terminated via `pthread_exit`/crash leaves the pool unable to tell a dead worker from a live one → silent loss of capacity | Low | High | **Low** — ✅ closed (2026-08-17): per-worker `clean_exit` flag reports abnormal exits as `LOOMWORKS_METRIC_FAILED` |
 | R18 | Thread Pool | A cancelled pending future never completes → `future_wait` hangs forever | Low | High | **Low** — ✅ closed (2026-08-17): cancelled futures complete with `LOOMWORKS_ERR_CANCELLED` |
+| R19 | CI | TSan cannot instrument the coroutine context switch (asm/ucontext backend) — crashes `test_coroutine` at the infra level (`can't find longjmp buf`); ThreadPoolTests also report deliberate test-code races | High | Medium | **High** — :unstable: (2026-08-18): TSan job stays `continue-on-error`; ASan/UBSan are the hard gates; coroutine coverage relies on ASan/UBSan + valgrind instead |
+| R20 | Thread Pool | `loom_pool_resize` grow path leaked per-deque slot arrays when a later realloc failed (12288B) and in the lane-only degrade path (4096B); the deques array used `calloc`/`realloc` despite `_Alignas(64)` members (misaligned access under UBSan) | Medium | Medium | **Medium** — ✅ closed (2026-08-18): `deques_alloc` (posix_memalign 64B) + `rollback_deques_tail` on later-realloc failure + slots_failed frees all slots; ASan (detect_leaks) + UBSan (halt_on_error) now clean across all suites |
 
 ---
 
