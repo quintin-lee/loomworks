@@ -10,14 +10,20 @@
  *   4. bounded_queue    — throughput with bounded vs unbounded queue
  *   5. future_overhead  — fire-and-forget vs future-based submission
  *   6. coro_create_destroy — coroutine create+destroy lifecycle cost (ns/cycle)
+ *   7. queue_depth      — single-worker throughput at growing queue depths (JSON)
+ *   8. priority_fairness — REALTIME response latency under LOW flood (JSON)
+ *   9. tail_latency     — completion latency p50/p99/p999, 4 workers (JSON)
+ *   10. coro_switch     — coroutine resume->yield->resume round-trip (JSON)
  *
- * Usage: ./bench [--iterations N] [--tasks M]
+ * Usage: ./bench [--iterations N] [--tasks M] [--json]
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/coroutine.h"
 #include "loomworks/thread_pool.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +40,9 @@ static double g_submit_latency_avg_ns = 0.0;
 static double g_throughput_tps        = 0.0;
 static double g_queue_depth_tps[4]    = {0.0, 0.0, 0.0, 0.0};
 static int    g_queue_depths[4]       = {1000, 10000, 50000, 100000};
+static double g_fairness_resp_ns[3]   = {0.0, 0.0, 0.0}; /* avg, p50, p99 */
+static double g_tail_latency_ns[3]    = {0.0, 0.0, 0.0}; /* p50, p99, p999 */
+static double g_coro_switch_ns        = 0.0;
 
 /* ---------- Timer ---------- */
 static double now_ns(void)
@@ -53,6 +62,14 @@ static void *noop_result_task(void *arg)
 {
     (void)arg;
     return NULL;
+}
+
+/* qsort comparator for latency samples */
+static int cmp_double(const void *a, const void *b)
+{
+    double x = *(const double *)a;
+    double y = *(const double *)b;
+    return (x > y) - (x < y);
 }
 
 /* ---------- Benchmark 1: submit_latency ----------
@@ -406,6 +423,255 @@ static void bench_coro_create_destroy(void)
     printf("  coro_create_destroy: %.1f ns/cycle (%d create+destroy cycles)\n", avg_ns, N);
 }
 
+/* ---------- Benchmark 8: priority_fairness ----------
+ * A flood producer saturates the pool with LOW tasks while the
+ * main thread probes REALTIME response latency.  REALTIME/HIGH
+ * bypass the ring via the 256 priority buckets, so response time
+ * must stay bounded regardless of flood depth.  Gate: p99 < 10ms.
+ * Runs only in JSON mode (used by the CI compare step).
+ * ---------- */
+typedef struct {
+    loom_thread_pool_t *pool;
+    volatile int        stop;
+    pthread_t           thread;
+} fairness_flood_t;
+
+static void flood_task(void *arg)
+{
+    /* tiny busy work so a flood of these keeps workers saturated */
+    volatile uint64_t x = (uintptr_t)arg;
+    for (uint64_t i = 0; i < 64; i++) {
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    }
+    (void)x;
+}
+
+static void *fairness_flood_producer(void *arg)
+{
+    fairness_flood_t *f = (fairness_flood_t *)arg;
+    while (!f->stop) {
+        /* continuous flood: keep the LOW pipe full */
+        for (int i = 0; i < 512; i++) {
+            if (loom_pool_submit_priority(
+                    f->pool, flood_task, NULL, LOOMWORKS_PRIORITY_LOW, NULL) != LOOMWORKS_OK) {
+                break;
+            }
+        }
+    }
+    return NULL;
+}
+
+static atomic_uint_fast64_t g_realtime_entry_ns;
+
+static void *realtime_probe_task(void *arg)
+{
+    (void)arg;
+    atomic_store_explicit(&g_realtime_entry_ns, (uint64_t)now_ns(), memory_order_release);
+    return NULL;
+}
+
+static void bench_priority_fairness(void)
+{
+    if (!g_json_output) {
+        printf("  (run with --json to collect fairness data)\n");
+        return;
+    }
+
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 0, .queue_capacity = 0};
+    if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
+        fprintf(stderr, "fairness: pool create failed\n");
+        exit(1);
+    }
+
+    double *samples = malloc((size_t)g_iterations * sizeof(double));
+    if (!samples) {
+        fprintf(stderr, "fairness: out of memory\n");
+        exit(1);
+    }
+
+    fairness_flood_t flood = {.pool = pool, .stop = 0};
+    if (pthread_create(&flood.thread, NULL, fairness_flood_producer, &flood) != 0) {
+        fprintf(stderr, "fairness: flood thread create failed\n");
+        exit(1);
+    }
+
+    atomic_store_explicit(&g_realtime_entry_ns, 0, memory_order_relaxed);
+    struct timespec pause = {0, 50000}; /* 50us between probes */
+    for (int i = 0; i < g_iterations; i++) {
+        double         t_submit = now_ns();
+        loom_future_t *fut      = NULL;
+        loom_result_t  rc       = loom_pool_submit_future_priority(
+            pool, realtime_probe_task, NULL, LOOMWORKS_PRIORITY_REALTIME, &fut, NULL);
+        if (rc != LOOMWORKS_OK || fut == NULL) {
+            fprintf(stderr, "fairness: REALTIME probe submit failed (rc=%d)\n", (int)rc);
+            exit(1);
+        }
+        loom_future_wait(fut, NULL);
+        loom_future_destroy(fut);
+        double t_entry = (double)atomic_load_explicit(&g_realtime_entry_ns, memory_order_acquire);
+        samples[i]     = t_entry - t_submit;
+        nanosleep(&pause, NULL);
+    }
+
+    flood.stop = 1;
+    pthread_join(flood.thread, NULL);
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    qsort(samples, (size_t)g_iterations, sizeof(double), cmp_double);
+    double avg = 0.0;
+    for (int i = 0; i < g_iterations; i++) {
+        avg += samples[i];
+    }
+    avg /= g_iterations;
+    double p50 = samples[g_iterations / 2];
+    double p99 = samples[(int)((g_iterations - 1) * 0.99)];
+
+    g_fairness_resp_ns[0] = avg;
+    g_fairness_resp_ns[1] = p50;
+    g_fairness_resp_ns[2] = p99;
+
+    printf("  priority_fairness: REALTIME resp under LOW flood  avg=%.1f ns  "
+           "p50=%.1f ns  p99=%.1f ns (%d probes)\n",
+           avg,
+           p50,
+           p99,
+           g_iterations);
+
+    free(samples);
+}
+
+/* ---------- Benchmark 9: tail_latency ----------
+ * N tasks submitted to a 4-worker pool; each task records its own
+ * completion latency (now - submit).  Reports p50/p99/p999 after
+ * drain.  Runs only in JSON mode (used by the CI compare step).
+ * ---------- */
+static double *g_tail_submit_ts;
+static double *g_tail_latency_samples;
+
+typedef struct {
+    double *submit;
+    double *lat;
+} tail_slot_t;
+
+static tail_slot_t *g_tail_slots;
+
+static void tail_latency_task(void *arg)
+{
+    tail_slot_t *s   = (tail_slot_t *)arg;
+    double       now = now_ns();
+    *s->lat          = now - *s->submit;
+}
+
+static void bench_tail_latency(void)
+{
+    if (!g_json_output) {
+        printf("  (run with --json to collect tail-latency data)\n");
+        return;
+    }
+
+    int                 n    = g_task_count;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
+    if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
+        fprintf(stderr, "tail_latency: pool create failed\n");
+        exit(1);
+    }
+
+    g_tail_submit_ts       = malloc((size_t)n * sizeof(double));
+    g_tail_latency_samples = malloc((size_t)n * sizeof(double));
+    g_tail_slots           = malloc((size_t)n * sizeof(tail_slot_t));
+    if (!g_tail_submit_ts || !g_tail_latency_samples || !g_tail_slots) {
+        fprintf(stderr, "tail_latency: out of memory\n");
+        exit(1);
+    }
+
+    for (int i = 0; i < n; i++) {
+        g_tail_submit_ts[i]    = now_ns();
+        g_tail_slots[i].submit = &g_tail_submit_ts[i];
+        g_tail_slots[i].lat    = &g_tail_latency_samples[i];
+        loom_pool_submit(pool, tail_latency_task, &g_tail_slots[i], NULL);
+    }
+    loom_pool_shutdown(pool); /* drains all tasks */
+    loom_pool_destroy(&pool);
+
+    qsort(g_tail_latency_samples, (size_t)n, sizeof(double), cmp_double);
+    double p50  = g_tail_latency_samples[n / 2];
+    double p99  = g_tail_latency_samples[(int)((n - 1) * 0.99)];
+    double p999 = g_tail_latency_samples[(int)((n - 1) * 0.999)];
+
+    g_tail_latency_ns[0] = p50;
+    g_tail_latency_ns[1] = p99;
+    g_tail_latency_ns[2] = p999;
+
+    printf(
+        "  tail_latency: p50=%.1f ns  p99=%.1f ns  p999=%.1f ns (%d tasks)\n", p50, p99, p999, n);
+
+    free(g_tail_submit_ts);
+    free(g_tail_latency_samples);
+    free(g_tail_slots);
+}
+
+/* ---------- Benchmark 10: coro_switch ----------
+ * Round-trip cost of coroutine resume -> yield -> resume.  One
+ * coroutine yields n times; the main thread resumes it (100 warmup,
+ * then R timed).  n yields need n+1 resumes to reach DONE (the loop
+ * exits one resume after the last yield), so n = R + 100 and the
+ * final resume runs the coroutine to DONE before destroy().
+ * Backend reported from the CMake build definition.  Always runs.
+ * ---------- */
+static intptr_t g_switch_yield_count;
+
+static void switch_yielder(void *arg)
+{
+    (void)arg;
+    for (intptr_t i = 0; i < g_switch_yield_count; i++) {
+        loom_coro_yield();
+    }
+}
+
+static void bench_coro_switch(void)
+{
+    const intptr_t R = (g_task_count > 0) ? g_task_count : 10000;
+    /* n yields need n+1 resumes to reach DONE */
+    g_switch_yield_count = R + 100;
+
+    loom_coroutine_t *coro = NULL;
+    if (loom_coro_create(switch_yielder, NULL, 0, &coro) != LOOMWORKS_CORO_OK) {
+        fprintf(stderr, "coro_switch: create failed\n");
+        exit(1);
+    }
+
+    for (intptr_t i = 0; i < 100; i++) { /* warmup */
+        loom_coro_resume(coro);
+    }
+
+    double t0 = now_ns();
+    for (intptr_t i = 0; i < R; i++) {
+        loom_coro_resume(coro);
+    }
+    double t1     = now_ns();
+    double avg_ns = (t1 - t0) / (double)R;
+
+    loom_coro_resume(coro); /* (n+1)th resume -> loop exits -> DONE */
+    loom_coro_destroy(&coro);
+    g_switch_yield_count = 0;
+
+    g_coro_switch_ns = avg_ns;
+
+#ifdef LOOMWORKS_BENCH_CTX_BACKEND
+    const char *backend = LOOMWORKS_BENCH_CTX_BACKEND;
+#else
+    const char *backend = "unknown";
+#endif
+    printf("  coro_switch: backend=%s  %.1f ns/round-trip (%lld resumes, %lld warmup)\n",
+           backend,
+           avg_ns,
+           (long long)R,
+           100LL);
+}
+
 /* ---------- Usage ---------- */
 static void print_usage(const char *prog)
 {
@@ -413,7 +679,8 @@ static void print_usage(const char *prog)
             "Usage: %s [--iterations N] [--tasks M] [--json]\n"
             "  --iterations  Number of repeat runs per benchmark (default: %d)\n"
             "  --tasks       Number of tasks in throughput benchmark (default: %d)\n"
-            "  --json        Output results in JSON format (adds queue_depth scenario)\n",
+            "  --json        Output results in JSON format (adds queue_depth,\n"
+            "                priority_fairness, tail_latency scenarios)\n",
             prog,
             g_iterations,
             g_task_count);
@@ -486,6 +753,18 @@ int main(int argc, char *argv[])
     fflush(stdout);
     bench_queue_depth();
 
+    printf("\n[8/10] priority_fairness\n");
+    fflush(stdout);
+    bench_priority_fairness();
+
+    printf("\n[9/10] tail_latency\n");
+    fflush(stdout);
+    bench_tail_latency();
+
+    printf("\n[10/10] coro_switch\n");
+    fflush(stdout);
+    bench_coro_switch();
+
     printf("\nDone.\n");
 
     if (g_json_output) {
@@ -500,11 +779,20 @@ int main(int argc, char *argv[])
                g_queue_depths[1],
                g_queue_depths[2],
                g_queue_depths[3]);
-        printf("  \"queue_depth_tps\": [%.0f, %.0f, %.0f, %.0f]\n",
+        printf("  \"queue_depth_tps\": [%.0f, %.0f, %.0f, %.0f],\n",
                g_queue_depth_tps[0],
                g_queue_depth_tps[1],
                g_queue_depth_tps[2],
                g_queue_depth_tps[3]);
+        printf("  \"fairness_resp_ns\": {\"avg\": %.1f, \"p50\": %.1f, \"p99\": %.1f},\n",
+               g_fairness_resp_ns[0],
+               g_fairness_resp_ns[1],
+               g_fairness_resp_ns[2]);
+        printf("  \"tail_latency_ns\": {\"p50\": %.1f, \"p99\": %.1f, \"p999\": %.1f},\n",
+               g_tail_latency_ns[0],
+               g_tail_latency_ns[1],
+               g_tail_latency_ns[2]);
+        printf("  \"coro_switch_ns\": %.1f\n", g_coro_switch_ns);
         printf("}\n");
     }
 
