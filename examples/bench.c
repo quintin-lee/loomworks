@@ -631,6 +631,14 @@ static void switch_yielder(void *arg)
     }
 }
 
+static void assert_resume_ok(loom_coro_result_t rc, const char *where)
+{
+    if (rc != LOOMWORKS_CORO_OK) {
+        fprintf(stderr, "coro_switch: resume %s failed: %s\n", where, loom_coro_result_str(rc));
+        exit(1);
+    }
+}
+
 static void bench_coro_switch(void)
 {
     const intptr_t R = (g_task_count > 0) ? g_task_count : 10000;
@@ -644,17 +652,17 @@ static void bench_coro_switch(void)
     }
 
     for (intptr_t i = 0; i < 100; i++) { /* warmup */
-        loom_coro_resume(coro);
+        assert_resume_ok(loom_coro_resume(coro), "warmup");
     }
 
     double t0 = now_ns();
     for (intptr_t i = 0; i < R; i++) {
-        loom_coro_resume(coro);
+        assert_resume_ok(loom_coro_resume(coro), "timed");
     }
     double t1     = now_ns();
     double avg_ns = (t1 - t0) / (double)R;
 
-    loom_coro_resume(coro); /* (n+1)th resume -> loop exits -> DONE */
+    assert_resume_ok(loom_coro_resume(coro), "final"); /* loop exit -> DONE */
     loom_coro_destroy(&coro);
     g_switch_yield_count = 0;
 

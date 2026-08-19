@@ -237,10 +237,16 @@ static void test_multi_yield_resume(void)
     ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "SUSPENDED after 1st yield");
     ASSERT(counter == 1, "counter=1 after 1st yield");
 
-    /* 2nd resume: executes remaining code, function completes */
+    /* 2nd resume: continues past 1st yield, stops at 2nd yield */
     rc = loom_coro_resume(coro);
     ASSERT(rc == LOOMWORKS_CORO_OK, "2nd resume");
-    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after 2nd resume");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_SUSPENDED, "SUSPENDED after 2nd yield");
+    ASSERT(counter == 2, "counter=2 after 2nd yield");
+
+    /* 3rd resume: completes */
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "3rd resume");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_DONE, "DONE after 3rd resume");
     ASSERT(counter == 3, "counter=3 after all increments");
 
     loom_coro_destroy(&coro);

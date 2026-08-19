@@ -33,7 +33,7 @@ static _Thread_local loom_coro_ctx_t   g_scheduler; /* per-thread scheduler cont
 static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
-static sigjmp_buf         g_guard_jmp; /* longjmp target for guard violations */
+static sigjmp_buf                      g_guard_jmp; /* longjmp target for guard violations */
 /* Prior SIGSEGV/SIGBUS dispositions, saved on first install so they can be
  * chained to: uninstall restores them and a fault that is not on a coroutine
  * guard page is re-raised through them.  Zero-init means "SIG_DFL" if no
@@ -41,7 +41,7 @@ static sigjmp_buf         g_guard_jmp; /* longjmp target for guard violations */
 static struct sigaction g_prev_segv;
 /* Recursion guard: prevents nested signal handler invocation. */
 static _Thread_local bool g_in_handler = false;
-static struct sigaction g_prev_bus;
+static struct sigaction   g_prev_bus;
 /* Linked list of all scheduler stacks for atexit cleanup. */
 typedef struct scheduler_stack_node {
     char                        *stack;
@@ -426,13 +426,13 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
                                 (size_t)((char *)coro->stack_end - (char *)coro->stack_start));
         loom_coro_ctx_set_link(&coro->ctx, &g_scheduler);
         loom_coro_ctx_make(&coro->ctx, coro_entry, coro);
-        /* Mark RUNNING on the first entry so the coroutine's own
-         * yield() (which requires state == RUNNING) is effective.
-         * SUSPENDED re-resumes deliberately leave the state alone:
-         * a resumed coroutine then runs to completion, which the
-         * coroutine tests depend on (yield is a one-shot pause). */
-        coro->state = LOOMWORKS_CORO_RUNNING;
     }
+
+    /* (Re)enter as RUNNING for every resume: NEW (first run), SUSPENDED
+     * (multi-yield: the coroutine may yield again and expect the next
+     * resume to continue), and SLEEPING (see loom_coro_sleep_until).
+     * The coroutine's own yield() requires state == RUNNING. */
+    coro->state = LOOMWORKS_CORO_RUNNING;
 
     if (loom_coro_ctx_swap(&g_scheduler, &coro->ctx) != 0) {
         coro->state = LOOMWORKS_CORO_ERROR;
