@@ -32,6 +32,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_metrics_callback_outside_lock`,
   `test_metrics_callback_lifecycle_counts`), so any future refactor that
   invokes the callback under the lock or drops events fails the suite.
+- **Benchmark scenarios**: `examples/bench` gains three scenarios —
+  `priority_fairness` (REALTIME response latency under a continuous LOW
+  flood, p99 must stay < 10 ms), `tail_latency` (completion latency
+  p50/p99/p999 across N tasks on 4 workers), and `coro_switch` (coroutine
+  resume→yield→resume round-trip with the active backend reported). The
+  `--json` output exports `fairness_resp_ns`, `tail_latency_ns`, and
+  `coro_switch_ns` so the CI perf gate can compare them.
+- **Sanitizer hard gates (R19/R20)**: the CI `sanitize` job now runs
+  ASan (with `detect_leaks=1`) and UBSan (with `halt_on_error=1`)
+  as hard gates — a leak or undefined behavior fails the job. TSan stays
+  best-effort (`continue-on-error`) because ThreadSanitizer cannot follow
+  the coroutine context switch and crashes inside its own interceptors.
+  The triage this enforced surfaced two real defects — a resize
+  rollback leak on allocation failure and misaligned 64-byte-aligned
+  deques arrays — both fixed with regression coverage.
 
 ### Changed
 - **`group_wait()` no longer shuts down the backing pool**: it now waits only
@@ -56,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pipeline/sequence-number guidance for callers needing strict ordering;
   the public headers make no FIFO/order promise.
 - **Assertion counts synchronized (R10)**: README and CHANGELOG now reflect
-  the current suite — ~20771 pool + ~5611 coroutine + ~78759 integration +
+  the current suite — ~20771 pool + ~5616 coroutine + ~78759 integration +
   ~200014 ctx_smoke.
 
 ### Fixed

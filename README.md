@@ -3,7 +3,7 @@
 Industrial-grade C11 concurrency library featuring a **thread pool**, a **stackful coroutine** subsystem, and higher-level **pipeline**, **task group**, and **metrics** layers.
 
 ```
-Tests: ~20771 pool + ~5611 coroutine + ~78759 integration + ~200014 ctx_smoke — all passing
+Tests: ~20771 pool + ~5616 coroutine + ~78759 integration + ~200014 ctx_smoke — all passing
 Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 ```
 
@@ -87,7 +87,7 @@ loomworks/
 │   └── metrics.c              # Metrics implementation
 ├── tests/
 │   ├── test_thread_pool.c     # ~20771 assertions
-│   ├── test_coroutine.c       # ~5611 assertions
+│   ├── test_coroutine.c       # ~5616 assertions
 │   ├── test_integration.c     # ~78759 assertions
 │   └── ctx_smoke.c            # ~200014 context-switch smoke checks
 ├── examples/
