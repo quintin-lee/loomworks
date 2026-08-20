@@ -17,6 +17,38 @@
 static int g_passes   = 0;
 static int g_failures = 0;
 
+/* Coroutine-task tests: counters are atomic because multiple worker
+ * threads run coroutines concurrently.  Sleep durations are chosen from an
+ * atomic sequence inside the coroutine itself (passing a small integer
+ * through void* trips -Wno-int-to-pointer-cast in this file). */
+static _Atomic int g_coro_tasks_done = 0;
+static _Atomic int g_coro_sleep_seq  = 0;
+
+static void pool_coro_yield_once(void *arg)
+{
+    (void)arg;
+    loom_coro_yield();
+    atomic_fetch_add_explicit(&g_coro_tasks_done, 1, memory_order_relaxed);
+}
+
+static void pool_coro_sleep(void *arg)
+{
+    (void)arg;
+    /* 5-15 ms, spread across tasks via the atomic sequence. */
+    long ns =
+        (long)(5 + (atomic_fetch_add_explicit(&g_coro_sleep_seq, 1, memory_order_relaxed) % 11)) *
+        1000000L;
+    loom_coro_sleep(ns);
+    atomic_fetch_add_explicit(&g_coro_tasks_done, 1, memory_order_relaxed);
+}
+
+static void pool_coro_sleep_long(void *arg)
+{
+    (void)arg;
+    loom_coro_sleep(60000000000L); /* 60 s */
+    atomic_fetch_add_explicit(&g_coro_tasks_done, 1, memory_order_relaxed);
+}
+
 #define ASSERT(expr, msg)                                                                          \
     do {                                                                                           \
         if (!(expr)) {                                                                             \
@@ -3957,6 +3989,78 @@ static void test_steal_stress(void)
 }
 
 /* ================================================================
+ *  Pool coroutine task tests (Chunk 3)
+ * ================================================================ */
+static void test_pool_submit_coroutine(void)
+{
+    const int           N    = 1000;
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "coro: create pool");
+    ASSERT(pool != NULL, "coro: pool non-NULL");
+
+    g_coro_tasks_done = 0;
+    for (int i = 0; i < N; i++) {
+        ASSERT(loom_pool_submit_coroutine(pool, pool_coro_yield_once, NULL, 0, NULL) ==
+                   LOOMWORKS_OK,
+               "coro: submit coroutine task");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    ASSERT(atomic_load(&g_coro_tasks_done) == N, "coro: all tasks completed");
+}
+
+static void test_pool_coro_sleep(void)
+{
+    const int           N        = 100;
+    struct timespec     ts_start = {0, 0};
+    struct timespec     ts_end   = {0, 0};
+    loom_thread_pool_t *pool     = NULL;
+    loom_pool_config_t  cfg      = {.worker_count = 4, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "sleep: create pool");
+    ASSERT(pool != NULL, "sleep: pool non-NULL");
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+
+    g_coro_tasks_done = 0;
+    for (int i = 0; i < N; i++) {
+        ASSERT(loom_pool_submit_coroutine(pool, pool_coro_sleep, NULL, 0, NULL) == LOOMWORKS_OK,
+               "sleep: submit coroutine task");
+    }
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    clock_gettime(CLOCK_MONOTONIC, &ts_end);
+
+    int64_t elapsed_ns = (int64_t)(ts_end.tv_sec - ts_start.tv_sec) * 1000000000L +
+                         (int64_t)(ts_end.tv_nsec - ts_start.tv_nsec);
+    ASSERT(atomic_load(&g_coro_tasks_done) == N, "sleep: all tasks completed");
+    ASSERT(elapsed_ns >= 4000000L, "sleep: elapsed respects the minimum 5ms sleep");
+}
+
+static void test_coro_cancel_sleeping(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "cancel-sleep: create pool");
+    ASSERT(pool != NULL, "cancel-sleep: pool non-NULL");
+
+    g_coro_tasks_done = 0;
+    uint64_t tid      = 0;
+    ASSERT(loom_pool_submit_coroutine(pool, pool_coro_sleep_long, NULL, 0, &tid) == LOOMWORKS_OK,
+           "cancel-sleep: submit long-sleeping coroutine");
+    ASSERT(tid != 0, "cancel-sleep: task id assigned");
+
+    struct timespec delay = {0, 20000000L}; /* 20 ms */
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &delay, NULL);
+
+    ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_OK, "cancel-sleep: cancel sleeping task");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    ASSERT(atomic_load(&g_coro_tasks_done) == 0, "cancel-sleep: task never ran to completion");
+}
+
+/* ================================================================
  *  Main
  * ================================================================ */
 
@@ -4088,7 +4192,9 @@ int main(void)
     test_future_destroy_pending_rejected();
     test_pool_destroy_without_shutdown();
     test_worker_crash_detected();
-
+    test_pool_submit_coroutine();
+    test_pool_coro_sleep();
+    test_coro_cancel_sleeping();
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
 }

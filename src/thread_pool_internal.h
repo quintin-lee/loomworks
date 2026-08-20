@@ -1,6 +1,7 @@
 #ifndef LOOMWORKS_THREAD_POOL_INTERNAL_H
 #define LOOMWORKS_THREAD_POOL_INTERNAL_H
 
+#include "loomworks/coroutine.h" /* loom_coro_fn for coroutine tasks */
 #include "loomworks/thread_pool.h"
 #include <pthread.h>
 #include <semaphore.h>
@@ -37,14 +38,17 @@
  * dequeue from the head of the lowest non-empty bucket.
  */
 typedef struct loom_task {
-    loom_task_fn      fn;        /**< Task function to execute. */
-    void             *user_data; /**< Opaque argument passed to @p fn. */
-    _Atomic bool      cancelled; /**< true if task was cancelled before execution. */
-    uint64_t          task_id;   /**< Unique task identifier (assigned on submission). */
-    uint8_t           priority;  /**< Task priority (lower = higher). */
-    struct loom_task *next;      /**< Next node in the queue. */
-    bool              free_data; /**< true if user_data should be freed in task_destroy. */
-    bool              is_future; /**< true if this task wraps a future_task_ctx_t. */
+    loom_task_fn      fn;         /**< Task function to execute. */
+    void             *user_data;  /**< Opaque argument passed to @p fn. */
+    _Atomic bool      cancelled;  /**< true if task was cancelled before execution. */
+    uint64_t          task_id;    /**< Unique task identifier (assigned on submission). */
+    uint8_t           priority;   /**< Task priority (lower = higher). */
+    struct loom_task *next;       /**< Next node in the queue. */
+    bool              free_data;  /**< true if user_data should be freed in task_destroy. */
+    bool              is_future;  /**< true if this task wraps a future_task_ctx_t. */
+    bool              is_coro;    /**< true if this task wraps a pool coroutine. */
+    loom_coro_fn      coro_fn;    /**< Coroutine entry (valid when is_coro). */
+    size_t            stack_size; /**< Coroutine stack size (0 = default). */
 } loom_task_t;
 
 /* Ring cell — canonical Vyukov sequence numbers.  seq == pos is "empty for
@@ -277,6 +281,6 @@ size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t
 void loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e);
 bool loom_timer_peek(const loom_thread_pool_t *pool, int64_t *deadline_ns);
 bool loom_timer_pop_due(loom_thread_pool_t *pool, loom_timer_entry_t *out);
-void loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id);
+bool loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id, loom_timer_entry_t *out);
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */

@@ -89,18 +89,24 @@ bool loom_timer_pop_due(loom_thread_pool_t *pool, loom_timer_entry_t *out)
     return true;
 }
 
-void loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id)
+/* Removes the entry for task_id (if any), returning it via *out when found. */
+bool loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id, loom_timer_entry_t *out)
 {
     for (size_t i = 0; i < pool->timer_len; i++) {
         if (pool->timer_heap[i].task_id == task_id) {
-            pool->timer_heap[i] = pool->timer_heap[pool->timer_len - 1];
+            loom_timer_entry_t e = pool->timer_heap[i];
+            pool->timer_heap[i]  = pool->timer_heap[pool->timer_len - 1];
             pool->timer_len--;
             if (pool->timer_len > 0) {
                 /* Restore heap invariant from position i in both directions. */
                 sift_down(pool->timer_heap, pool->timer_len, i);
                 sift_up(pool->timer_heap, i);
             }
-            return;
+            if (out) {
+                *out = e;
+            }
+            return true;
         }
     }
+    return false;
 }

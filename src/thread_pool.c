@@ -20,6 +20,7 @@
  */
 #include "portability.h" /* must precede system headers: owns _GNU_SOURCE */
 #include "loomworks/thread_pool.h"
+#include "coroutine_internal.h"
 #include "loomworks/coroutine.h"
 #include "loomworks/metrics.h"
 #include "thread_pool_internal.h"
@@ -59,15 +60,18 @@ static void          pool_destroy_internal(loom_thread_pool_t *pool);
 static void         *worker_entry(void *arg);
 static loom_task_t *
 task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority);
-void                task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
-static void         future_task_wrapper(void *arg);
-static bool         lane_has_priority(loom_thread_pool_t *pool, unsigned max_priority);
-static loom_task_t *dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool,
-                                                     unsigned            max_priority);
-static bool         ring_has_work(loom_thread_pool_t *pool);
-size_t              ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
-static void         cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task);
-static void         future_mark_cancelled(future_task_ctx_t *ctx);
+void                 task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
+static void          future_task_wrapper(void *arg);
+static bool          lane_has_priority(loom_thread_pool_t *pool, unsigned max_priority);
+static loom_task_t  *dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool,
+                                                      unsigned            max_priority);
+static bool          ring_has_work(loom_thread_pool_t *pool);
+size_t               ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t max);
+static void          cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *task);
+static void          future_mark_cancelled(future_task_ctx_t *ctx);
+static void         *timer_thread_fn(void *arg);
+static loom_result_t ensure_timer_thread(loom_thread_pool_t *pool);
+static void          coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns);
 
 /* ================================================================
  *  pool_init — initialise locks, defaults, and worker thread array
@@ -278,6 +282,44 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     }
     atomic_store_explicit(&pool->deque_total, 0, memory_order_relaxed);
 
+    /* Per-worker coroutine ready FIFO + timer heap for sleeping coroutines.
+     * The timer heap is lazily allocated by the timer thread.  On failure,
+     * roll back what was initialised before pool_destroy_internal() runs:
+     * that function only tears down the coro/timer locks when coro_ready
+     * is non-NULL, which here means every lock below was initialised. */
+    pool->coro_ready =
+        (struct loom_coro_ready **)calloc(pool->max_worker_count, sizeof(*pool->coro_ready));
+    if (!pool->coro_ready) {
+        pool_destroy_internal(pool);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    if (pthread_mutex_init(&pool->coro_lock, NULL) != 0) {
+        free((void *)pool->coro_ready);
+        pool->coro_ready = NULL;
+        pool_destroy_internal(pool);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    if (pthread_mutex_init(&pool->timer_lock, NULL) != 0) {
+        pthread_mutex_destroy(&pool->coro_lock);
+        free((void *)pool->coro_ready);
+        pool->coro_ready = NULL;
+        pool_destroy_internal(pool);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    if (sem_init(&pool->timer_sem, 0, 0) != 0) {
+        pthread_mutex_destroy(&pool->coro_lock);
+        pthread_mutex_destroy(&pool->timer_lock);
+        free((void *)pool->coro_ready);
+        pool->coro_ready = NULL;
+        pool_destroy_internal(pool);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    pool->timer_heap         = NULL;
+    pool->timer_len          = 0;
+    pool->timer_cap          = 0;
+    pool->timer_created      = false;
+    pool->timer_thread_alive = false;
+
     pool->threads = (pthread_t *)calloc(pool->max_worker_count, sizeof(pthread_t));
     if (!pool->threads) {
         pool_destroy_internal(pool);
@@ -330,6 +372,25 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
         free(pool->deques);
     }
 
+    /* Drain per-worker coroutine ready FIFOs and tear down the timer heap.
+     * coro_ready non-NULL implies coro_lock/timer_lock/timer_sem were all
+     * initialised (see pool_init rollback). */
+    if (pool->coro_ready != NULL) {
+        for (uint32_t i = 0; i < pool->max_worker_count; i++) {
+            struct loom_coro_ready *r = pool->coro_ready[i];
+            while (r) {
+                struct loom_coro_ready *n = r->next;
+                free(r);
+                r = n;
+            }
+        }
+        free((void *)pool->coro_ready);
+        pthread_mutex_destroy(&pool->coro_lock);
+        pthread_mutex_destroy(&pool->timer_lock);
+        sem_destroy(&pool->timer_sem);
+    }
+    free(pool->timer_heap);
+
     pthread_cond_destroy(&pool->drain_cond);
     pthread_cond_destroy(&pool->space_cond);
     sem_destroy(&pool->work_sem);
@@ -361,6 +422,146 @@ typedef struct {
     uint32_t            index;
 } worker_arg_t;
 
+/* --- Coroutine timer thread ---------------------------------------------
+ * Wakes sleeping coroutines exactly once their deadline passes.  It never
+ * resumes a coroutine itself (affinity is preserved): it only moves the
+ * task node from the timer heap into the owner worker's ready FIFO and
+ * posts a work token.  The owner worker picks it up in Step 0. */
+static void *timer_thread_fn(void *arg)
+{
+    loom_thread_pool_t *pool = (loom_thread_pool_t *)arg;
+    /* Drain-until-empty: keep running after timer_thread_alive goes false so
+     * shutdown still wakes every sleeping coroutine (their owners then resume
+     * and finish them).  timer_len is read under timer_lock below. */
+    for (;;) {
+        struct timespec abs;
+        clock_gettime(CLOCK_MONOTONIC, &abs);
+        int64_t now = (int64_t)abs.tv_sec * 1000000000 + (int64_t)abs.tv_nsec;
+        /* Sleep until the earliest deadline, or one second if the heap is
+         * empty (polling fallback — a push may race our peek). */
+        int64_t deadline = 0;
+        bool    has      = false;
+        bool    alive    = atomic_load_explicit(&pool->timer_thread_alive, memory_order_acquire);
+        pthread_mutex_lock(&pool->timer_lock);
+        if (pool->timer_len > 0) {
+            has      = true;
+            deadline = pool->timer_heap[0].deadline_ns;
+        }
+        bool empty = (pool->timer_len == 0);
+        pthread_mutex_unlock(&pool->timer_lock);
+        if (!alive && empty) {
+            break;
+        }
+        if (has && deadline > now) {
+            int64_t wait_ns = deadline - now;
+            abs.tv_sec += wait_ns / 1000000000;
+            abs.tv_nsec = (long)(wait_ns % 1000000000);
+            if (abs.tv_nsec >= 1000000000) {
+                abs.tv_sec += 1;
+                abs.tv_nsec -= 1000000000;
+            }
+        } else {
+            abs.tv_sec += 1;
+        }
+        /* sem_timedwait returns EINTR on signals; retry unless shutting
+         * down.  A spurious timeout just re-checks the heap. */
+        while (sem_timedwait(&pool->timer_sem, &abs) != 0 && errno == EINTR) {
+            if (!atomic_load_explicit(&pool->timer_thread_alive, memory_order_acquire)) {
+                break;
+            }
+        }
+        /* Drain every entry whose deadline has passed. */
+        clock_gettime(CLOCK_MONOTONIC, &abs);
+        now = (int64_t)abs.tv_sec * 1000000000 + (int64_t)abs.tv_nsec;
+        for (;;) {
+            pthread_mutex_lock(&pool->timer_lock);
+            bool due = (pool->timer_len > 0) && (pool->timer_heap[0].deadline_ns <= now);
+            if (!due) {
+                pthread_mutex_unlock(&pool->timer_lock);
+                break;
+            }
+            loom_timer_entry_t e;
+            loom_timer_pop_due(pool, &e);
+            struct loom_coro_ready *rn =
+                (struct loom_coro_ready *)calloc(1, sizeof(struct loom_coro_ready));
+            if (rn == NULL) {
+                /* OOM: re-arm the entry so the next pass retries it.  A
+                 * sleeping coroutine must never be lost silently. */
+                loom_timer_push(pool, e);
+                pthread_mutex_unlock(&pool->timer_lock);
+                sem_post(&pool->timer_sem);
+                break;
+            }
+            rn->coro    = (struct loom_coroutine *)e.coro_ctx;
+            rn->task_id = e.task_id;
+            rn->task    = (loom_task_t *)e.task;
+            rn->next    = NULL;
+            if (e.worker_idx < pool->max_worker_count) {
+                /* Push into the ready FIFO while still holding timer_lock:
+                 * a shrinking worker's exit check reads timer_len under
+                 * timer_lock and then the ready FIFO; if the ready node
+                 * landed between those two reads (after pop_due released
+                 * timer_lock) the worker could exit with a runnable
+                 * coroutine stranded in its FIFO.  One critical section
+                 * makes pop+push atomic w.r.t. that exit check. */
+                pthread_mutex_lock(&pool->coro_lock);
+                struct loom_coro_ready **tail = &pool->coro_ready[e.worker_idx];
+                while (*tail != NULL) {
+                    tail = &(*tail)->next;
+                }
+                *tail = rn;
+                pthread_mutex_unlock(&pool->coro_lock);
+                sem_post(&pool->work_sem);
+            } else {
+                free(rn); /* worker slot vanished after resize-down */
+            }
+            pthread_mutex_unlock(&pool->timer_lock);
+        }
+    }
+    return NULL;
+}
+
+/* Lazily start the pool's timer thread on first coroutine submission. */
+static loom_result_t ensure_timer_thread(loom_thread_pool_t *pool)
+{
+    pthread_mutex_lock(&pool->timer_lock);
+    if (pool->timer_created) {
+        pthread_mutex_unlock(&pool->timer_lock);
+        return LOOMWORKS_OK;
+    }
+    atomic_store_explicit(&pool->timer_thread_alive, true, memory_order_release);
+    if (pthread_create(&pool->timer_thread, NULL, timer_thread_fn, pool) != 0) {
+        atomic_store_explicit(&pool->timer_thread_alive, false, memory_order_release);
+        pthread_mutex_unlock(&pool->timer_lock);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    pool->timer_created = true;
+    pthread_mutex_unlock(&pool->timer_lock);
+    return LOOMWORKS_OK;
+}
+
+/* Register a sleeping pool coroutine with the timer heap.  Invoked from
+ * inside the coroutine itself (via loom_coro_sleep_until); ctx is the
+ * coroutine, whose sleep_reg_ctx points back at the pool. */
+static void coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns)
+{
+    struct loom_coroutine *coro = (struct loom_coroutine *)ctx;
+    loom_thread_pool_t    *pool = (loom_thread_pool_t *)coro->sleep_reg_ctx;
+    if (!pool) {
+        return;
+    }
+    loom_timer_entry_t e;
+    e.deadline_ns = deadline_ns;
+    e.task_id     = task_id;
+    e.worker_idx  = coro->worker_idx;
+    e.coro_ctx    = coro;
+    e.task        = coro->task_node;
+    pthread_mutex_lock(&pool->timer_lock);
+    loom_timer_push(pool, e);
+    pthread_mutex_unlock(&pool->timer_lock);
+    sem_post(&pool->timer_sem);
+}
+
 static void *worker_entry(void *arg)
 {
     worker_arg_t       *wa   = (worker_arg_t *)arg;
@@ -370,12 +571,129 @@ static void *worker_entry(void *arg)
     g_current_pool = pool;
     while (1) {
         pthread_mutex_lock(&pool->lock);
+        /* Step C0: resume this worker's ready coroutine FIFO (head first).
+         * Runs before every other step so sleeping/suspended coroutines make
+         * progress even while shutdown is draining.  The coroutine body may
+         * call pool APIs, so resume must never run under pool->lock. */
+        struct loom_coro_ready *head = NULL;
+        pthread_mutex_lock(&pool->coro_lock);
+        if (pool->coro_ready != NULL && pool->coro_ready[idx] != NULL) {
+            head                  = pool->coro_ready[idx];
+            pool->coro_ready[idx] = head->next;
+            head->next            = NULL;
+        }
+        pthread_mutex_unlock(&pool->coro_lock);
+        if (head != NULL) {
+            pthread_mutex_unlock(&pool->lock);
+            loom_coroutine_t *coro  = head->coro;
+            loom_task_t      *ctask = head->task;
+            if (ctask != NULL && atomic_load_explicit(&ctask->cancelled, memory_order_relaxed)) {
+                loom_coro_terminate(coro);
+                metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+                loom_coro_destroy(&coro);
+                if (ctask->free_data && ctask->user_data) {
+                    free(ctask->user_data);
+                }
+                task_destroy(pool, ctask);
+                free(head);
+                continue;
+            }
+            loom_coro_result_t crc = loom_coro_resume(coro);
+            if (crc == LOOMWORKS_CORO_OK) {
+                loom_coro_state_t st = loom_coro_state(coro);
+                if (st == LOOMWORKS_CORO_SUSPENDED) {
+                    pthread_mutex_lock(&pool->coro_lock);
+                    head->next                    = NULL;
+                    struct loom_coro_ready **tail = &pool->coro_ready[idx];
+                    while (*tail) {
+                        tail = &(*tail)->next;
+                    }
+                    *tail = head;
+                    pthread_mutex_unlock(&pool->coro_lock);
+                    continue;
+                }
+                if (st == LOOMWORKS_CORO_SLEEPING) {
+                    /* The coroutine re-slept; sleep_reg re-armed the timer
+                     * heap, so the ready node is consumed — the timer thread
+                     * will push a fresh one at the new deadline. */
+                    free(head);
+                    continue;
+                }
+                if (st == LOOMWORKS_CORO_DONE) {
+                    metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
+                }
+            } else if (crc != LOOMWORKS_CORO_ERR_RUNNING) {
+                metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
+            }
+            loom_coro_destroy(&coro);
+            free(head);
+            task_destroy(pool, ctask);
+            if (pool->queue_capacity > 0) {
+                pthread_mutex_lock(&pool->lock);
+                pthread_cond_signal(&pool->space_cond);
+                pthread_mutex_unlock(&pool->lock);
+            }
+            continue;
+        }
         /* Re-read each iteration: loom_pool_resize may realloc the deques
          * array (grow beyond the initial max), moving it in memory. */
         loom_work_deque_t *my = (pool->deques != NULL) ? &pool->deques[idx] : NULL;
         /* If resized down, exit when our index is beyond the new count.
          * Spill any deque-resident work back to the shared queue first. */
         if (idx >= pool->worker_count && !pool->shutdown) {
+            /* Terminate any coroutines still owned by this (vanishing) slot:
+             * ready FIFO first, then timer-heap entries registered to us.
+             * Resize-down is an explicit shrink; abandoning runnable
+             * coroutines is the documented contract. */
+            pthread_mutex_lock(&pool->coro_lock);
+            struct loom_coro_ready *r = NULL;
+            if (pool->coro_ready != NULL) {
+                r                     = pool->coro_ready[idx];
+                pool->coro_ready[idx] = NULL;
+            }
+            pthread_mutex_unlock(&pool->coro_lock);
+            while (r) {
+                struct loom_coro_ready *n = r->next;
+                loom_coroutine_t       *c = r->coro;
+                loom_task_t            *t = r->task;
+                loom_coro_terminate(c);
+                metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+                loom_coro_destroy(&c);
+                if (t->free_data && t->user_data) {
+                    free(t->user_data);
+                }
+                task_destroy(pool, t);
+                free(r);
+                r = n;
+            }
+            for (;;) {
+                pthread_mutex_lock(&pool->timer_lock);
+                uint64_t victim = 0;
+                bool     found  = false;
+                for (size_t i = 0; i < pool->timer_len; i++) {
+                    if (pool->timer_heap[i].worker_idx == idx) {
+                        victim = pool->timer_heap[i].task_id;
+                        found  = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    pthread_mutex_unlock(&pool->timer_lock);
+                    break;
+                }
+                loom_timer_entry_t e;
+                loom_timer_remove_by_task(pool, victim, &e);
+                pthread_mutex_unlock(&pool->timer_lock);
+                loom_coroutine_t *c = (struct loom_coroutine *)e.coro_ctx;
+                loom_coro_terminate(c);
+                metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+                loom_coro_destroy(&c);
+                loom_task_t *t = (loom_task_t *)e.task;
+                if (t && t->free_data && t->user_data) {
+                    free(t->user_data);
+                }
+                task_destroy(pool, t);
+            }
             if (my != NULL) {
                 loom_task_t *t;
                 while ((t = deque_pop(pool, my)) != NULL) {
@@ -398,15 +716,30 @@ static void *worker_entry(void *arg)
             break;
         }
         /* All workers exit once shutdown is set and nothing is pending —
-         * including cancelled ring tasks still awaiting a tombstone drain
-         * and tasks still resident in per-worker deques. */
+         * including cancelled ring tasks still awaiting a tombstone drain,
+         * tasks still resident in per-worker deques, and sleeping coroutines
+         * still registered in the timer heap (their owners may not exit
+         * until the timer thread has woken every one of them). */
         if (pool->shutdown && pool->queue_len == 0 &&
             atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0 &&
             atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0) {
-            pthread_mutex_unlock(&pool->lock);
-            /* thread_alive stays true until shutdown joins this worker. */
-            atomic_store_explicit(&pool->thread_clean_exit[idx], true, memory_order_release);
-            break;
+            pthread_mutex_lock(&pool->timer_lock);
+            bool timer_empty = (pool->timer_len == 0);
+            pthread_mutex_unlock(&pool->timer_lock);
+            pthread_mutex_lock(&pool->coro_lock);
+            bool ready_empty = (pool->coro_ready == NULL) || (pool->coro_ready[idx] == NULL);
+            pthread_mutex_unlock(&pool->coro_lock);
+            if (!timer_empty || !ready_empty) {
+                /* A sleeping coroutine still needs this worker: the timer
+                 * thread will push it into our ready FIFO and post a token.
+                 * Fall through to the wait below (may also be woken by a
+                 * new submission in the meantime — harmless). */
+            } else {
+                pthread_mutex_unlock(&pool->lock);
+                /* thread_alive stays true until shutdown joins this worker. */
+                atomic_store_explicit(&pool->thread_clean_exit[idx], true, memory_order_release);
+                break;
+            }
         }
         loom_coro_exit();
         loom_task_t *task      = NULL;
@@ -529,6 +862,74 @@ static void *worker_entry(void *arg)
             pthread_mutex_unlock(&pool->lock);
             continue;
         }
+        if (task->is_coro) {
+            /* Pool coroutine task: the worker owns the coroutine for its
+             * whole lifetime (affinity).  The task node's user_data becomes
+             * the coroutine handle so Step C0 can recycle it; free_data is
+             * always false for coroutine tasks.  queue_len was already
+             * accounted at lane dequeue — never touch it here. */
+            pthread_mutex_unlock(&pool->lock);
+            metrics_fire(pool, LOOMWORKS_METRIC_STARTED);
+            loom_coroutine_t  *coro = NULL;
+            loom_coro_result_t crc =
+                loom_coro_create(task->coro_fn, task->user_data, task->stack_size, &coro);
+            if (crc != LOOMWORKS_CORO_OK) {
+                metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
+                if (task->free_data && task->user_data) {
+                    free(task->user_data);
+                }
+                task_destroy(pool, task);
+                if (pool->queue_capacity > 0) {
+                    pthread_mutex_lock(&pool->lock);
+                    pthread_cond_signal(&pool->space_cond);
+                    pthread_mutex_unlock(&pool->lock);
+                }
+                continue;
+            }
+            coro->task_id       = task->task_id;
+            coro->sleep_reg     = coro_sleep_reg_hook;
+            coro->sleep_reg_ctx = pool;
+            coro->task_node     = task;
+            coro->worker_idx    = idx;
+            task->user_data     = coro;
+            crc                 = loom_coro_resume(coro);
+            if (crc == LOOMWORKS_CORO_OK) {
+                loom_coro_state_t st = loom_coro_state(coro);
+                if (st == LOOMWORKS_CORO_SUSPENDED) {
+                    struct loom_coro_ready *rn = (struct loom_coro_ready *)calloc(1, sizeof(*rn));
+                    if (rn != NULL) {
+                        rn->coro    = coro;
+                        rn->task_id = task->task_id;
+                        rn->task    = task;
+                        pthread_mutex_lock(&pool->coro_lock);
+                        struct loom_coro_ready **tail = &pool->coro_ready[idx];
+                        while (*tail) {
+                            tail = &(*tail)->next;
+                        }
+                        *tail = rn;
+                        pthread_mutex_unlock(&pool->coro_lock);
+                        continue;
+                    }
+                    /* calloc failed: fall through to recycle. */
+                } else if (st == LOOMWORKS_CORO_SLEEPING) {
+                    /* sleep_reg already registered the timer entry; the timer
+                     * thread will push a fresh ready node at the deadline. */
+                    continue;
+                } else if (st == LOOMWORKS_CORO_DONE) {
+                    metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
+                }
+            } else if (crc != LOOMWORKS_CORO_ERR_RUNNING) {
+                metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
+            }
+            loom_coro_destroy(&coro);
+            task_destroy(pool, task);
+            if (pool->queue_capacity > 0) {
+                pthread_mutex_lock(&pool->lock);
+                pthread_cond_signal(&pool->space_cond);
+                pthread_mutex_unlock(&pool->lock);
+            }
+            continue;
+        }
         loom_task_fn fn   = task->fn;
         void        *data = task->user_data;
         /* Return the node to the pool under the lock (the free-list is
@@ -637,11 +1038,14 @@ task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t prior
     t->user_data = data;
     t->task_id =
         (uint64_t)atomic_fetch_add_explicit(&pool->next_task_id, 1, memory_order_relaxed) + 1;
-    t->priority  = priority;
-    t->cancelled = false;
-    t->free_data = false;
-    t->is_future = (fn == future_task_wrapper);
-    t->next      = NULL;
+    t->priority   = priority;
+    t->cancelled  = false;
+    t->free_data  = false;
+    t->is_future  = (fn == future_task_wrapper);
+    t->is_coro    = false;
+    t->coro_fn    = NULL;
+    t->stack_size = 0;
+    t->next       = NULL;
     return t;
 }
 
@@ -1316,6 +1720,59 @@ loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint64_t
 }
 
 /* ================================================================
+ *  loom_pool_submit_coroutine — enqueue a stackful coroutine task.
+ *
+ *  Coroutine tasks are routed through the lane buckets (never the ring)
+ *  so the owning worker picks them up and resumes them on its own stack.
+ *  Yields and sleeps park the coroutine; the owner worker resumes it from
+ *  its per-worker ready FIFO (yield) or the timer thread pushes a ready
+ *  node once the sleep deadline expires (sleep).  The pool lazily spawns
+ *  a timer thread on the first coroutine submission.
+ *
+ *  @return  LOOMWORKS_OK on success.
+ * ================================================================ */
+loom_result_t loom_pool_submit_coroutine(
+    loom_thread_pool_t *pool, loom_coro_fn fn, void *arg, size_t stack_size, uint64_t *task_id)
+{
+    if (!pool || !fn) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    if (atomic_load_explicit(&pool->shutdown, memory_order_relaxed)) {
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
+    loom_result_t rc = ensure_timer_thread(pool);
+    if (rc != LOOMWORKS_OK) {
+        return rc;
+    }
+    pthread_mutex_lock(&pool->lock);
+    if (pool->shutdown || pool->draining) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_SHUTDOWN;
+    }
+    if (pool->queue_capacity > 0 && pool->queue_len >= pool->queue_capacity) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_INVALID;
+    }
+    loom_task_t *task = task_create(pool, (loom_task_fn)fn, arg, LOOMWORKS_PRIORITY_NORMAL);
+    if (!task) {
+        pthread_mutex_unlock(&pool->lock);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    task->is_coro    = true;
+    task->coro_fn    = fn;
+    task->stack_size = stack_size;
+    task->free_data  = false; /* user_data is reused as the coroutine handle */
+    loom_enqueue_unlocked(pool, task);
+    if (task_id) {
+        *task_id = task->task_id;
+    }
+    sem_post(&pool->work_sem);
+    pthread_mutex_unlock(&pool->lock);
+    metrics_fire(pool, LOOMWORKS_METRIC_SUBMITTED);
+    return LOOMWORKS_OK;
+}
+
+/* ================================================================
  *  loom_pool_submit_blocking — enqueue with backpressure.
  *
  *  Blocks until there is queue space or the pool shuts down.
@@ -1618,6 +2075,16 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
         sem_post(&pool->work_sem);
     }
     pthread_mutex_unlock(&pool->lock);
+
+    /* Stop the timer thread before joining workers: it may push ready
+     * nodes and sem_post work tokens for sleeping coroutines. */
+    if (pool->timer_created) {
+        atomic_store_explicit(&pool->timer_thread_alive, false, memory_order_release);
+        sem_post(&pool->timer_sem);
+        pthread_join(pool->timer_thread, NULL);
+        pool->timer_created = false;
+    }
+
     for (uint32_t i = 0; i < pool->max_worker_count; i++) {
         if (atomic_load_explicit(&pool->thread_alive[i], memory_order_acquire)) {
             int jrc = pthread_join(pool->threads[i], NULL);
@@ -1759,6 +2226,38 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
         /* Worker dequeued it concurrently: task is running (or done). */
         pthread_mutex_unlock(&pool->lock);
         return LOOMWORKS_ERR_INVALID;
+    }
+    /* Coroutine fast path: a sleeping coroutine task lives in the timer
+     * heap (removed from the lane at its worker's dequeue), so neither the
+     * cancel index nor the lane buckets can find it.  Mark it cancelled and
+     * hand a ready node to the owning worker's FIFO — Step C0 terminates it. */
+    loom_timer_entry_t te;
+    pthread_mutex_lock(&pool->timer_lock);
+    bool in_timer = loom_timer_remove_by_task(pool, task_id, &te);
+    pthread_mutex_unlock(&pool->timer_lock);
+    if (in_timer) {
+        loom_task_t *ctask = (loom_task_t *)te.task;
+        atomic_store_explicit(&ctask->cancelled, true, memory_order_release);
+        struct loom_coro_ready *rn = (struct loom_coro_ready *)calloc(1, sizeof(*rn));
+        if (rn != NULL) {
+            rn->coro    = (struct loom_coroutine *)te.coro_ctx;
+            rn->task_id = task_id;
+            rn->task    = ctask;
+            pthread_mutex_lock(&pool->coro_lock);
+            struct loom_coro_ready **tail = &pool->coro_ready[te.worker_idx];
+            while (*tail) {
+                tail = &(*tail)->next;
+            }
+            *tail = rn;
+            pthread_mutex_unlock(&pool->coro_lock);
+            sem_post(&pool->work_sem);
+        } else {
+            /* Extremely rare: leave the coroutine sleeping (no ready node);
+             * it will terminate at its deadline via the drain path instead. */
+        }
+        pthread_mutex_unlock(&pool->lock);
+        metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+        return LOOMWORKS_OK;
     }
     for (int b = 0; b < 256; b++) {
         loom_task_t *prev = NULL;
@@ -2081,7 +2580,28 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         /* Zero the newly-extended tail: fresh slots must read as not-exited. */
         memset(new_clean_exit + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
         pool->thread_clean_exit = new_clean_exit;
-        pool->max_worker_count  = count;
+        if (pool->coro_ready != NULL) {
+            /* Switch under coro_lock: the timer thread reads the array
+             * inside coro_lock to push ready nodes, so replacing the
+             * pointer without the lock could free memory it is about to
+             * dereference. */
+            pthread_mutex_lock(&pool->coro_lock);
+            struct loom_coro_ready **new_coro_ready =
+                (struct loom_coro_ready **)calloc(count, sizeof(*new_coro_ready));
+            if (!new_coro_ready) {
+                pthread_mutex_unlock(&pool->coro_lock);
+                rollback_deques_tail(pool, old_max, count);
+                pthread_mutex_unlock(&pool->lock);
+                return LOOMWORKS_ERR_ALLOC;
+            }
+            memcpy((void *)new_coro_ready,
+                   (const void *)pool->coro_ready,
+                   old_max * sizeof(*new_coro_ready));
+            free((void *)pool->coro_ready);
+            pool->coro_ready = new_coro_ready;
+            pthread_mutex_unlock(&pool->coro_lock);
+        }
+        pool->max_worker_count = count;
     }
     uint32_t old_count = pool->worker_count;
     pool->worker_count = count;

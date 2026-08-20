@@ -8,6 +8,7 @@
  * Features:
  *   - Configurable worker count
  *   - Flexible task submission (fire-and-forget, future-based)
+ *   - Stackful coroutine tasks with cooperative scheduling on workers
  *   - Graceful shutdown with task drain
  *   - Cache-line aligned internal structures to prevent false sharing
  *   - Pure C11 with POSIX threading
@@ -17,6 +18,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
+
+#include "coroutine.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -166,6 +169,25 @@ loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
                                                uint8_t             priority,
                                                loom_future_t     **future,
                                                uint64_t           *task_id);
+
+/**
+ * @brief Submit a stackful coroutine task to the pool.
+ *
+ * The coroutine runs on the worker that dequeues it.  Calls to
+ * loom_coro_yield()/loom_coro_sleep_until() inside @p fn suspend the
+ * coroutine without blocking the worker; the owner worker resumes it
+ * when it is ready again.  The pool spawns a timer thread lazily on the
+ * first coroutine submission to wake sleeping coroutines.
+ *
+ * @param pool       The pool handle.
+ * @param fn         Coroutine entry function.
+ * @param arg        Opaque argument passed to @p fn.
+ * @param stack_size Stack size for the coroutine (0 = default).
+ * @param task_id    Output pointer for the task id (may be NULL).
+ * @return           LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_pool_submit_coroutine(
+    loom_thread_pool_t *pool, loom_coro_fn fn, void *arg, size_t stack_size, uint64_t *task_id);
 
 /**
  * @brief Wait for a future's result. Blocks until the task completes.

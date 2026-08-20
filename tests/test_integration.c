@@ -3,6 +3,7 @@
 #include "loomworks/metrics.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -488,6 +489,57 @@ static void test_pipeline_discard_queued(void)
     pthread_mutex_destroy(&st.lock);
 }
 
+/* ---------- Test: coroutine tasks coexist with priority tasks ---------- */
+static _Atomic int g_multi_yield_done = 0;
+
+static void multi_yield_pool_coro(void *arg)
+{
+    (void)arg;
+    loom_coro_yield();
+    loom_coro_yield();
+    atomic_fetch_add_explicit(&g_multi_yield_done, 1, memory_order_relaxed);
+}
+
+static void prio_task(void *arg)
+{
+    int *n = (int *)arg;
+    __sync_fetch_and_add(n, 1);
+}
+
+static void test_coro_priority(void)
+{
+    const int           N     = 200;
+    int                 plain = 0;
+    loom_thread_pool_t *pool  = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 4, .queue_capacity = 0};
+
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "coro-prio: create pool");
+
+    atomic_store_explicit(&g_multi_yield_done, 0, memory_order_relaxed);
+    for (int i = 0; i < N; i++) {
+        /* Coroutine tasks (NORMAL lane by contract) and explicit-priority
+         * plain tasks must coexist without interference. */
+        ASSERT(loom_pool_submit_coroutine(pool, multi_yield_pool_coro, NULL, 0, NULL) ==
+                   LOOMWORKS_OK,
+               "coro-prio: submit coroutine");
+        ASSERT(loom_pool_submit_priority(
+                   pool, prio_task, &plain, LOOMWORKS_PRIORITY_REALTIME, NULL) == LOOMWORKS_OK,
+               "coro-prio: submit realtime task");
+        ASSERT(loom_pool_submit_priority(pool, prio_task, &plain, LOOMWORKS_PRIORITY_LOW, NULL) ==
+                   LOOMWORKS_OK,
+               "coro-prio: submit low task");
+    }
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+
+    /* Each coroutine yields twice; only a correct multi-yield resume path
+     * (SUSPENDED -> SUSPENDED -> DONE) reaches the counter. */
+    ASSERT(atomic_load_explicit(&g_multi_yield_done, memory_order_relaxed) == N,
+           "coro-prio: every double-yield coroutine completed");
+    ASSERT(plain == 2 * N, "coro-prio: every plain priority task ran");
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -511,6 +563,7 @@ int main(void)
     test_metrics_concurrent();
     test_scheduler_list_race_stress();
     test_pipeline_discard_queued();
+    test_coro_priority();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
