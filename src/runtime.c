@@ -93,6 +93,18 @@ loom_result_t loom_runtime_submit(loom_runtime_t    *rt,
     return loom_pool_submit_priority(rt->pool, fn.thread_fn, data, priority, task_id);
 }
 
+loom_result_t loom_runtime_submit_future(loom_runtime_t     *rt,
+                                         loom_task_fn_result fn,
+                                         void               *data,
+                                         loom_future_t     **future,
+                                         uint64_t           *task_id)
+{
+    if (!rt || !rt->pool || !future || !fn) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    return loom_pool_submit_future(rt->pool, fn, data, future, task_id);
+}
+
 /* ================================================================
  *  cancel / cancel_all
  * ================================================================ */
@@ -110,6 +122,25 @@ void loom_runtime_cancel_all(loom_runtime_t *rt, uint32_t *count)
         return;
     }
     loom_pool_cancel_all(rt->pool, count);
+}
+
+/* ================================================================
+ *  resize / metrics
+ * ================================================================ */
+loom_result_t loom_runtime_resize(loom_runtime_t *rt, uint32_t count)
+{
+    if (!rt || !rt->pool || count == 0) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    return loom_pool_resize(rt->pool, count);
+}
+
+void loom_runtime_set_metrics_callback(loom_runtime_t *rt, loom_metric_fn cb, void *user_data)
+{
+    if (!rt || !rt->pool) {
+        return;
+    }
+    loom_pool_set_metrics_callback(rt->pool, cb, user_data);
 }
 
 /* ================================================================

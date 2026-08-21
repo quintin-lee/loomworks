@@ -113,6 +113,27 @@ loom_result_t loom_runtime_submit(loom_runtime_t    *rt,
                                   uint64_t          *task_id);
 
 /**
+ * @brief Submit a result-producing task (thread path only).
+ *
+ * Enqueues a task whose return value can be retrieved later via
+ * loom_future_wait().  This API is only meaningful for
+ * LOOM_SUBMIT_THREAD — calling it with LOOM_SUBMIT_CORO returns
+ * LOOMWORKS_ERR_INVALID.
+ *
+ * @param rt       The runtime handle.
+ * @param fn       Task function returning a result pointer.
+ * @param data     Opaque argument passed to fn.
+ * @param future   Output pointer for the future handle (caller must free it).
+ * @param task_id  Output pointer for the assigned task ID (may be NULL).
+ * @return         LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_runtime_submit_future(loom_runtime_t     *rt,
+                                         loom_task_fn_result fn,
+                                         void               *data,
+                                         loom_future_t     **future,
+                                         uint64_t           *task_id);
+
+/**
  * @brief Cancel a pending task by its task ID.
  *
  * Only tasks that have not yet begun execution are removed.  Running tasks
@@ -140,6 +161,28 @@ loom_result_t loom_runtime_cancel(loom_runtime_t *rt, uint64_t task_id);
  * @param count  Output pointer for the number of cancelled tasks (may be NULL).
  */
 void loom_runtime_cancel_all(loom_runtime_t *rt, uint32_t *count);
+
+/**
+ * @brief Dynamically resize the runtime to @p count worker threads.
+ *
+ * Growing adds new threads; shrinking stops excess idle workers.
+ * Workers currently executing tasks are NOT interrupted.
+ * Must not be called after loom_runtime_shutdown().
+ *
+ * @param rt    The runtime handle.
+ * @param count New number of worker threads.  Must be >= 1; 0 is rejected.
+ * @return      LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_runtime_resize(loom_runtime_t *rt, uint32_t count);
+
+/**
+ * @brief Register a metrics callback on the runtime's backing pool.
+ *
+ * @param rt          The runtime handle.
+ * @param cb          Callback function (NULL to unregister).
+ * @param user_data   Opaque data passed to the callback.
+ */
+void loom_runtime_set_metrics_callback(loom_runtime_t *rt, loom_metric_fn cb, void *user_data);
 
 /**
  * @brief Get the number of worker threads.
