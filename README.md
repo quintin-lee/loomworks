@@ -62,6 +62,18 @@ Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 | Full lifecycle | `create → resume → yield/resume → terminate → destroy` |
 | 64-bit safe | asm backends (x86-64/aarch64) pass arguments in registers; ucontext fallback passes them via `uintptr_t` |
 
+### Unified Runtime (`loom_runtime_t`)
+
+A single-entry-point abstraction that routes thread and coroutine submissions through the same API.
+
+| Feature | Description |
+|---------|-------------|
+| Single submit entry | `loom_runtime_submit(rt, fn, data, flag, priority, &tid)` — flag selects THREAD or CORO path |
+| Layered priority | Thread tasks (0–7) and coroutine tasks (8–15) use separate queues; no cross-starvation |
+| M:N coroutine multiplexing | Coroutines yield/sleep without blocking workers; the worker serves the next ready coroutine |
+| Full lifecycle | `create → submit → cancel → shutdown → destroy` |
+| Thin wrapper | Zero duplication — forwards to the backing `loom_thread_pool_t` internally |
+
 ## Project Structure
 
 ```
@@ -73,7 +85,8 @@ loomworks/
 │   ├── coroutine.h            # Coroutine public API
 │   ├── pipeline.h             # Pipeline public API
 │   ├── task_group.h           # Task group public API
-│   └── metrics.h              # Metrics public API
+│   ├── metrics.h              # Metrics public API
+│   └── runtime.h              # Unified runtime (thread + coroutine) API
 ├── src/
 │   ├── thread_pool.c          # Thread pool implementation
 │   ├── thread_pool_internal.h
@@ -100,7 +113,8 @@ loomworks/
 │   ├── pipeline_demo.c        # Pipeline usage demo
 │   ├── priority_demo.c        # Priority scheduling demo
 │   ├── resize_demo.c          # Resize demo
-│   └── task_group_demo.c      # Task group usage demo
+│   ├── task_group_demo.c      # Task group usage demo
+│   └── runtime_demo.c         # Unified runtime demo
 ├── tools/
 │   └── bench_compare.py       # A/B benchmark comparator
 └── docs/
