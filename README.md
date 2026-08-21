@@ -225,6 +225,40 @@ loom_coro_terminate(coro);
 loom_coro_destroy(&coro);
 ```
 
+### Unified Runtime
+
+The `loom_runtime_t` provides a single entry point for both thread and coroutine tasks:
+
+```c
+#include "loomworks/runtime.h"
+
+loom_runtime_config_t cfg = {.worker_count = 2, .queue_capacity = 0};
+loom_runtime_t *rt = NULL;
+loom_runtime_create(&cfg, &rt);
+
+/* Submit a thread task */
+loom_fn_union_t thread_fn = {.thread_fn = simple_task};
+loom_runtime_submit(rt, thread_fn, &sum, LOOM_SUBMIT_THREAD, 5, NULL);
+
+/* Submit a coroutine task */
+loom_fn_union_t coro_fn = {.coro_fn = my_coro_fn};
+loom_runtime_submit(rt, coro_fn, arg, LOOM_SUBMIT_CORO, 0, NULL);
+
+/* Submit a future task (thread path only) */
+loom_future_t *fut = NULL;
+loom_runtime_submit_future(rt, result_fn, NULL, &fut, NULL);
+
+/* Resize dynamically */
+loom_runtime_resize(rt, 4);
+
+/* Cancel by ID */
+loom_runtime_cancel(rt, task_id);
+loom_runtime_cancel_all(rt, NULL);
+
+loom_runtime_shutdown(rt);
+loom_runtime_destroy(&rt);
+```
+
 ## API Reference
 
 ### Thread Pool Result Codes
