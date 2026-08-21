@@ -16,9 +16,10 @@
 3. [Pipeline API](#3-pipeline-api)
 4. [Task Group API](#4-task-group-api)
 5. [Metrics API](#5-metrics-api)
-6. [Result Codes Quick Reference](#6-result-codes-quick-reference)
-7. [Complete Usage Example](#7-complete-usage-example)
-8. [Thread Safety](#8-thread-safety)
+6. [Unified Runtime API](#6-unified-runtime-api)
+7. [Result Codes Quick Reference](#7-result-codes-quick-reference)
+8. [Complete Usage Example](#8-complete-usage-example)
+9. [Thread Safety](#9-thread-safety)
 
 ---
 

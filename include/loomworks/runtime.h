@@ -217,8 +217,20 @@ double loom_runtime_utilization(const loom_runtime_t *rt);
  */
 void loom_runtime_shutdown(loom_runtime_t *rt);
 
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
- * @brief Expose the backing pool for internal testing.
+ * @brief Expose the backing pool handle for advanced testing.
+ *
+ * Intended for test code only — exposes the internal
+ * loom_thread_pool_t so tests can attach metrics collectors or use
+ * other pool-level APIs directly.
  */
 loom_thread_pool_t *loom_runtime_pool(const loom_runtime_t *rt);
 
