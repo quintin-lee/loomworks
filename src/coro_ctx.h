@@ -106,9 +106,10 @@ static inline void loom_coro_ctx_make(loom_coro_ctx_t *ctx, void (*fn)(void *), 
 {
     ctx->entry_fn  = fn;
     ctx->entry_arg = arg;
-    /* Trampoline is entered with rsp % 16 == 8 so that `call entry_fn`
-     * leaves entry_fn with rsp % 16 == 0 (SysV ABI). */
-    ctx->rsp   = (ctx->rsp & ~(uint64_t)0xF) - 8u;
+    /* Trampoline is entered with rsp % 16 == 0 so that `call entry_fn`
+     * pushes the return address and entry_fn observes rsp % 16 == 8,
+     * i.e. (rsp + 8) % 16 == 0 as the SysV ABI mandates at entry. */
+    ctx->rsp   = ctx->rsp & ~(uint64_t)0xF;
     ctx->r15   = (uint64_t)ctx; /* ctx is passed to the trampoline */
     ctx->mxcsr = 0x1F80u;       /* default control word (mask all) */
     ctx->x87cw = 0x037Fu;
@@ -169,9 +170,10 @@ static inline void loom_coro_ctx_make(loom_coro_ctx_t *ctx, void (*fn)(void *), 
 {
     ctx->entry_fn  = fn;
     ctx->entry_arg = arg;
-    /* Trampoline is entered with sp % 16 == 8 so that `blr entry_fn`
-     * leaves entry_fn with sp % 16 == 0 (AAPCS64). */
-    ctx->sp      = (ctx->sp & ~(uint64_t)0xF) - 8u;
+    /* Trampoline is entered with sp % 16 == 0; `blr entry_fn` pushes
+     * nothing, so entry_fn observes the quadword-aligned sp that AAPCS64
+     * requires at every public interface. */
+    ctx->sp      = ctx->sp & ~(uint64_t)0xF;
     ctx->regs[0] = (uint64_t)ctx; /* ctx is passed to the trampoline */
     ctx->fpcr    = 0u;
     ctx->fpsr    = 0u;

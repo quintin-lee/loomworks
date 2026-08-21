@@ -2076,15 +2076,12 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
     }
     pthread_mutex_unlock(&pool->lock);
 
-    /* Stop the timer thread before joining workers: it may push ready
-     * nodes and sem_post work tokens for sleeping coroutines. */
-    if (pool->timer_created) {
-        atomic_store_explicit(&pool->timer_thread_alive, false, memory_order_release);
-        sem_post(&pool->timer_sem);
-        pthread_join(pool->timer_thread, NULL);
-        pool->timer_created = false;
-    }
-
+    /* The timer thread must outlive the workers: a coroutine that reaches
+     * sleep_until during this drain registers a heap entry from inside the
+     * task (coro_sleep_reg_hook).  Tearing the timer down first would strand
+     * that entry — no thread remains to fire it, the owning worker spins on
+     * its non-empty exit condition forever, and the joins below never
+     * return.  Only after every worker has exited can no new entry appear. */
     for (uint32_t i = 0; i < pool->max_worker_count; i++) {
         if (atomic_load_explicit(&pool->thread_alive[i], memory_order_acquire)) {
             int jrc = pthread_join(pool->threads[i], NULL);
@@ -2100,6 +2097,13 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
             }
             atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
         }
+    }
+
+    if (pool->timer_created) {
+        atomic_store_explicit(&pool->timer_thread_alive, false, memory_order_release);
+        sem_post(&pool->timer_sem);
+        pthread_join(pool->timer_thread, NULL);
+        pool->timer_created = false;
     }
     pthread_mutex_lock(&pool->lock);
     pool->draining = false;

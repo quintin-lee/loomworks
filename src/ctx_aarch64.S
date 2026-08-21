@@ -111,12 +111,12 @@ loom_coro_ctx_swap_to_link:
         .cfi_endproc
         .size   loom_coro_ctx_swap_to_link, .-loom_coro_ctx_swap_to_link
 
-/* ctx_trampoline: entered with sp % 16 == 8 (see loom_coro_ctx_make).
+/* ctx_trampoline: entered with sp % 16 == 0 (see loom_coro_ctx_make).
  * Runs entry_fn(entry_arg) with x19 == ctx.  On return: switch to
  * ctx->link if present, else exit(EXIT_SUCCESS) - glibc's __start_context
  * does the same for a NULL uc_link, verified empirically.  Never rets to
- * the arming frame.  `bl` needs sp % 16 == 0 at the interface; blr pushed
- * the return address (16 bytes), which already restores alignment. */
+ * the arming frame.  blr pushes nothing, so the quadword alignment armed
+ * by make() is preserved across entry_fn. */
         .globl  ctx_trampoline
         .hidden ctx_trampoline
         .type   ctx_trampoline, %function
@@ -132,8 +132,8 @@ ctx_trampoline:
         mov     x1, x9
         b       .Lswap_core
 .Ltramp_no_link:
-        /* post-blr sp % 16 == 0; drop 16 and call exit (sp % 16 == 0). */
-        sub     sp, sp, #16
+        /* sp % 16 == 0 here (entry had 0, bl+ret balanced); exit needs
+         * exactly this alignment at its interface. */
         mov     w0, #0          /* EXIT_SUCCESS (matches ucontext) */
         bl      exit
         .cfi_endproc

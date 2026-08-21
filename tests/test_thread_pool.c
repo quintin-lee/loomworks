@@ -158,8 +158,10 @@ static volatile uint64_t g_cancel_target_id = 0;
 static void gate_task(void *arg)
 {
     (void)arg;
-    g_gate_started = 1;
+    /* Park counter first: a main thread spinning on g_gate_started must
+     * observe parked >= 1 once started flips, never the reverse window. */
     g_gate_parked++;
+    g_gate_started = 1;
     while (!g_gate_release) {
         /* spin: occupy the only worker so later tasks stay queued */
     }

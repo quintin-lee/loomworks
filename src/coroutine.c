@@ -19,6 +19,19 @@
 #if defined(__has_include) && __has_include(<valgrind/valgrind.h>)
 #include <valgrind/valgrind.h>
 #endif
+/* AddressSanitizer fiber annotations: the coroutine backend performs raw
+ * context switches onto privately allocated stacks, which ASan's fake-stack
+ * machinery cannot see.  Wrap every switch with start/finish_switch_fiber so
+ * interceptors inside the coroutine resolve against the coroutine stack.
+ * Only compiled when the TU itself is instrumented by ASan. */
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+#include <sanitizer/common_interface_defs.h>
+#define LOOMWORKS_ASAN 1
+/* The coroutine's fake-stack pointer, saved on yield/sleep/terminate
+ * switches and restored on the next re-entry (per-thread, same as the
+ * rest of the scheduler state). */
+static _Thread_local void *g_fake_stack_save = NULL;
+#endif
 
 /* ================================================================
  *  Globals
@@ -62,6 +75,48 @@ static scheduler_stack_node_t *g_scheduler_stacks = NULL;
  * is no lock-cycle.  free_all_scheduler_stacks additionally assumes all
  * threads have been joined before process exit (pthread contract). */
 static pthread_mutex_t g_scheduler_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* ================================================================
+ *  ASan fiber annotations
+ *
+ *  The backend performs raw context switches (registers + stack pointer)
+ *  that ASan's fake-stack machinery cannot see: after switching onto a
+ *  coroutine's private stack, the fake-stack pointer still points at the
+ *  caller's frame, so any interceptor call inside the coroutine crashes.
+ *  These four macros bracket every switch, saving/restoring the
+ *  appropriate fake-stack pointer on each side.  They compile to nothing
+ *  unless the TU is built with AddressSanitizer.
+ * ================================================================ */
+#ifdef LOOMWORKS_ASAN
+/* scheduler→coroutine: save thread fake-stack into coro->fake_stack_save.
+ * bottom is the low address of the coroutine's usable stack region. */
+#define ASAN_SWITCH_TO_CORO(coro)                                                                  \
+    __sanitizer_start_switch_fiber(                                                                \
+        &(coro)->fake_stack_save,                                                                  \
+        (coro)->stack_start,                                                                       \
+        (size_t)((char *)(coro)->stack_end - (char *)(coro)->stack_start))
+/* coroutine→scheduler (return path): restore from coro->fake_stack_save */
+#define ASAN_SWITCH_BACK_TO_THREAD(coro)                                                           \
+    __sanitizer_finish_switch_fiber((coro)->fake_stack_save, NULL, NULL)
+/* coroutine→scheduler: save coroutine fake-stack into thread-local slot;
+ * bottom is the low address of the per-thread scheduler stack. */
+#define ASAN_SWITCH_TO_SCHEDULER()                                                                 \
+    __sanitizer_start_switch_fiber(&g_fake_stack_save, g_scheduler_stack, 131072)
+/* scheduler→coroutine (re-entry path): restore from thread-local slot */
+#define ASAN_SWITCH_BACK_TO_CORO() __sanitizer_finish_switch_fiber(g_fake_stack_save, NULL, NULL)
+/* coroutine entry (first arrival on this stack): finalize the inbound hop
+ * started by ASAN_SWITCH_TO_CORO() — restores the scheduling thread's
+ * fake-stack.  Without this, ASan still considers the switch in progress
+ * and rejects the coroutine's first outbound start. */
+#define ASAN_FINISH_CORO_ENTRY(coro)                                                               \
+    __sanitizer_finish_switch_fiber((coro)->fake_stack_save, NULL, NULL)
+#else
+#define ASAN_SWITCH_TO_CORO(coro) ((void)0)
+#define ASAN_SWITCH_BACK_TO_THREAD(coro) ((void)0)
+#define ASAN_SWITCH_TO_SCHEDULER() ((void)0)
+#define ASAN_SWITCH_BACK_TO_CORO() ((void)0)
+#define ASAN_FINISH_CORO_ENTRY(coro) ((void)0)
+#endif
 
 /* ================================================================
  *  Stack pool — reuse mmap'd coroutine stacks across create/destroy
@@ -334,14 +389,21 @@ static bool ensure_scheduler(void)
 static void coro_entry(void *arg)
 {
     loom_coroutine_t *c = (loom_coroutine_t *)arg;
-    g_current           = c;
-    c->state            = LOOMWORKS_CORO_RUNNING;
+#ifdef LOOMWORKS_ASAN
+    /* First arrival on the coroutine stack: complete the switch that
+     * loom_coro_resume() started before swapping to us. */
+    ASAN_FINISH_CORO_ENTRY(c);
+#endif
+    g_current = c;
+    c->state  = LOOMWORKS_CORO_RUNNING;
     c->entry_fn(c->user_data);
     /* entry_fn returned normally (no yield) → mark done and return to scheduler */
     c->state  = LOOMWORKS_CORO_DONE;
     g_current = NULL;
     if (loom_coro_ctx_has_link(&c->ctx)) {
+        ASAN_SWITCH_TO_SCHEDULER();
         loom_coro_ctx_swap_to_link(&c->ctx);
+        ASAN_SWITCH_BACK_TO_CORO();
     }
 }
 
@@ -450,10 +512,13 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
      * The coroutine's own yield() requires state == RUNNING. */
     coro->state = LOOMWORKS_CORO_RUNNING;
 
+    ASAN_SWITCH_TO_CORO(coro);
     if (loom_coro_ctx_swap(&g_scheduler, &coro->ctx) != 0) {
+        ASAN_SWITCH_BACK_TO_THREAD(coro);
         coro->state = LOOMWORKS_CORO_ERROR;
         return LOOMWORKS_CORO_ERR_CONTEXT;
     }
+    ASAN_SWITCH_BACK_TO_THREAD(coro);
     return LOOMWORKS_CORO_OK;
 }
 
@@ -467,9 +532,11 @@ void loom_coro_yield(void)
     /* Pause here: save our context, switch to the scheduler, and
      * resume when the caller next invokes loom_coro_resume(). */
     cur->state = LOOMWORKS_CORO_SUSPENDED;
+    ASAN_SWITCH_TO_SCHEDULER();
     if (loom_coro_ctx_swap(&cur->ctx, &g_scheduler) != 0) {
         cur->state = LOOMWORKS_CORO_ERROR;
     }
+    ASAN_SWITCH_BACK_TO_CORO();
 }
 
 void loom_coro_suspend(void)
@@ -492,10 +559,12 @@ loom_coro_result_t loom_coro_sleep_until(int64_t deadline_ns)
     }
     /* Return control to the scheduler. The resume() that eventually runs
      * us again validates the deadline (SLEEPING branch above). */
+    ASAN_SWITCH_TO_SCHEDULER();
     if (loom_coro_ctx_swap(&cur->ctx, &g_scheduler) != 0) {
         cur->state = LOOMWORKS_CORO_ERROR;
         return LOOMWORKS_CORO_ERR_CONTEXT;
     }
+    ASAN_SWITCH_BACK_TO_CORO();
     return LOOMWORKS_CORO_OK;
 }
 
@@ -532,9 +601,11 @@ loom_coro_result_t loom_coro_terminate(loom_coroutine_t *coro)
     coro->state = LOOMWORKS_CORO_DONE;
     if (self) {
         g_current = NULL;
+        ASAN_SWITCH_TO_SCHEDULER();
         if (loom_coro_ctx_swap(&coro->ctx, &g_scheduler) != 0) {
             return LOOMWORKS_CORO_ERR_CONTEXT;
         }
+        ASAN_SWITCH_BACK_TO_CORO();
     }
     return LOOMWORKS_CORO_OK;
 }
