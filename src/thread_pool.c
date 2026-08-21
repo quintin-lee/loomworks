@@ -86,8 +86,16 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
     if (!pool) {
         return;
     }
+    /* Path 1: metrics collector attached — update counters and fire cb. */
     if (pool->metrics) {
         loom_metrics_fire((loom_metrics_t *)pool->metrics, event);
+    }
+    /* Path 2: standalone callback (no collector) — fire cb directly.
+     * This lets callers register a callback via
+     * loom_pool_set_metrics_callback() without also creating a
+     * loom_metrics_t collector. */
+    if (pool->metric_cb) {
+        pool->metric_cb(event, pool, pool->metric_user_data);
     }
 }
 
