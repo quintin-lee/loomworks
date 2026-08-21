@@ -18,7 +18,7 @@ find_package(Threads REQUIRED)
 set(LOOMWORKS_CTX_BACKEND "asm" CACHE STRING "Context backend: asm|ucontext")
 set_property(CACHE LOOMWORKS_CTX_BACKEND PROPERTY STRINGS asm ucontext)
 
-set(LOOMWORKS_SOURCES src/thread_pool.c src/coroutine.c src/task_group.c src/metrics.c src/pipeline.c src/timer.c)
+set(LOOMWORKS_SOURCES src/thread_pool.c src/coroutine.c src/task_group.c src/metrics.c src/pipeline.c src/timer.c src/runtime.c)
 set(LOOMWORKS_CTX_DEFINES "")
 if(LOOMWORKS_CTX_BACKEND STREQUAL "asm" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     list(APPEND LOOMWORKS_SOURCES src/ctx_x86_64.S)
@@ -126,7 +126,13 @@ target_include_directories(test_ctx_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(test_ctx_smoke PRIVATE loomworks_static m)
 add_test(NAME test_ctx_smoke COMMAND test_ctx_smoke TIMEOUT 900)
 
+add_executable(test_runtime tests/test_runtime.c)
+target_link_libraries(test_runtime PRIVATE loomworks_static)
+add_test(NAME RuntimeTests COMMAND test_runtime)
+set_tests_properties(RuntimeTests PROPERTIES TIMEOUT 120)
+
 add_executable(example_pipeline examples/pipeline_demo.c)
+target_link_libraries(example_pipeline PRIVATE loomworks_static)
 target_link_libraries(example_pipeline PRIVATE loomworks_static)
 
 add_subdirectory(examples)

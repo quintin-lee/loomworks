@@ -8,6 +8,7 @@
 
 #include "loomworks/coroutine.h"
 #include "loomworks/pipeline.h"
+#include "loomworks/runtime.h"
 #include "loomworks/task_group.h"
 #include "loomworks/thread_pool.h"
 

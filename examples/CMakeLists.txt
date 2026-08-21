@@ -28,3 +28,6 @@ target_link_libraries(example_backpressure PRIVATE loomworks_static)
 
 add_executable(example_resize resize_demo.c)
 target_link_libraries(example_resize PRIVATE loomworks_static)
+
+add_executable(example_runtime runtime_demo.c)
+target_link_libraries(example_runtime PRIVATE loomworks_static)
