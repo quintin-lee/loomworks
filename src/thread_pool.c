@@ -95,7 +95,12 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
      * loom_pool_set_metrics_callback() without also creating a
      * loom_metrics_t collector. */
     if (pool->metric_cb) {
-        pool->metric_cb(event, pool, pool->metric_user_data);
+        union {
+            loom_metric_fn f;
+            void (*p)(void *, void *, void *);
+        } u;
+        u.p = pool->metric_cb;
+        u.f(event, pool, pool->metric_user_data);
     }
 }
 

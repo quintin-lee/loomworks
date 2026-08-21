@@ -144,10 +144,37 @@ static void test_mixed_submit(void)
            "all coroutine tasks executed");
 }
 
+/* ------------------------------------------------------------------ */
+
+static void gate_blocker(void *arg)
+{
+    (void)arg;
+    atomic_fetch_add_explicit(&g_gate_parked, 1, memory_order_relaxed);
+    g_gate_started = 1;
+    while (!g_gate_release) {
+        /* spin: hold the worker so later submissions stay queued */
+    }
+}
+
 static void test_cancel_pending(void)
 {
-    loom_runtime_t *rt = NULL;
-    ASSERT(loom_runtime_create(NULL, &rt) == LOOMWORKS_OK, "create runtime");
+    /* Single-worker runtime guarantees the task stays queued until
+     * we cancel it — no race with the worker picking it up first. */
+    loom_runtime_config_t cfg = {.worker_count = 1};
+    loom_runtime_t       *rt  = NULL;
+    ASSERT(loom_runtime_create(&cfg, &rt) == LOOMWORKS_OK, "create runtime (1 worker)");
+
+    /* Block the worker so our task stays queued. */
+    g_gate_started          = 0;
+    g_gate_release          = 0;
+    g_gate_parked           = 0;
+    loom_fn_union_t blocker = {.thread_fn = gate_blocker};
+    ASSERT(loom_runtime_submit(rt, blocker, NULL, LOOM_SUBMIT_THREAD, 5, NULL) == LOOMWORKS_OK,
+           "submit blocker");
+    while (g_gate_parked == 0) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000000L};
+        nanosleep(&ts, NULL);
+    }
 
     int             counter = 0;
     uint64_t        tid     = 0;
@@ -158,20 +185,11 @@ static void test_cancel_pending(void)
     /* Cancel before the worker picks it up. */
     ASSERT(loom_runtime_cancel(rt, tid) == LOOMWORKS_OK, "cancel pending task");
 
+    g_gate_release = 1;
     loom_runtime_shutdown(rt);
     loom_runtime_destroy(&rt);
 
     ASSERT(counter == 0, "cancelled task did not execute");
-}
-
-static void gate_blocker(void *arg)
-{
-    (void)arg;
-    atomic_fetch_add_explicit(&g_gate_parked, 1, memory_order_relaxed);
-    g_gate_started = 1;
-    while (!g_gate_release) {
-        /* spin: hold the worker so later submissions stay queued */
-    }
 }
 
 static void test_cancel_all(void)
@@ -290,6 +308,41 @@ static void test_submit_future_cancel(void)
     loom_runtime_destroy(&rt);
 }
 
+static void test_coro_cancel_pending(void)
+{
+    /* Submit a coroutine task and cancel it before it starts. */
+    loom_runtime_config_t cfg = {.worker_count = 1};
+    loom_runtime_t       *rt  = NULL;
+    ASSERT(loom_runtime_create(&cfg, &rt) == LOOMWORKS_OK, "create runtime (1 worker)");
+
+    /* Block the worker so the coroutine stays queued. */
+    g_gate_started          = 0;
+    g_gate_release          = 0;
+    g_gate_parked           = 0;
+    loom_fn_union_t blocker = {.thread_fn = gate_blocker};
+    ASSERT(loom_runtime_submit(rt, blocker, NULL, LOOM_SUBMIT_THREAD, 5, NULL) == LOOMWORKS_OK,
+           "submit blocker");
+    while (g_gate_parked == 0) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000000L};
+        nanosleep(&ts, NULL);
+    }
+
+    int             counter = 0;
+    uint64_t        tid     = 0;
+    loom_fn_union_t fn      = {.coro_fn = simple_coro_task};
+    ASSERT(loom_runtime_submit(rt, fn, &counter, LOOM_SUBMIT_CORO, 0, &tid) == LOOMWORKS_OK,
+           "submit coroutine task");
+
+    /* Cancel before the worker picks it up. */
+    ASSERT(loom_runtime_cancel(rt, tid) == LOOMWORKS_OK, "cancel pending coroutine task");
+
+    g_gate_release = 1;
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+
+    ASSERT(counter == 0, "cancelled coroutine task did not execute");
+}
+
 static void test_resize(void)
 {
     loom_runtime_t       *rt  = NULL;
@@ -340,7 +393,8 @@ static void test_metrics_callback(void)
      * (loom_runtime_set_metrics_callback only stores metric_cb which is not
      * used by metrics_fire — we attach a collector directly instead.) */
     loom_metrics_t *metrics = NULL;
-    ASSERT(loom_metrics_create(loom_runtime_pool(rt), metric_submitted_cb, NULL, &metrics) == LOOMWORKS_OK,
+    ASSERT(loom_metrics_create(loom_runtime_pool(rt), metric_submitted_cb, NULL, &metrics) ==
+               LOOMWORKS_OK,
            "create metrics collector");
 
     loom_fn_union_t fn = {.thread_fn = simple_thread_task};
@@ -433,6 +487,7 @@ int main(void)
     test_cancel_all();
     test_submit_future();
     test_submit_future_cancel();
+    test_coro_cancel_pending();
     test_resize();
     test_metrics_callback();
     test_queries();
