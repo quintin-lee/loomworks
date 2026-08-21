@@ -128,14 +128,13 @@ typedef struct {
 
 ### 3.2 Lifecycle
 
+`out` 设为 NULL 时返回 `LOOMWORKS_ERR_ALLOC`（内部池创建失败）。
+
 ```c
-loom_result_t loom_runtime_create(const loom_runtime_config_t *cfg,
-                                  loom_runtime_t **out);
 void          loom_runtime_destroy(loom_runtime_t **rt);
 ```
 
-`destroy` blocks until all pending tasks (both thread and coroutine) complete,
-then joins all workers and frees resources. Idempotent: a second call is a no-op.
+`destroy` 阻塞直到所有 pending 任务（含线程和协程）完成，然后 join workers 并释放资源。幂等：第二次调用为 no-op。
 
 ### 3.3 Submit
 
