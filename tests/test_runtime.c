@@ -412,6 +412,31 @@ static void test_metrics_callback(void)
     loom_metrics_destroy(&metrics);
 }
 
+static void test_metrics_standalone_callback(void)
+{
+    /* Test that loom_runtime_set_metrics_callback works without a collector.
+     * This exercises the standalone callback path in metrics_fire(). */
+    loom_runtime_t *rt = NULL;
+    ASSERT(loom_runtime_create(NULL, &rt) == LOOMWORKS_OK, "create runtime");
+
+    atomic_store_explicit(&g_metric_submitted, 0, memory_order_relaxed);
+
+    /* Register only a callback — no collector. */
+    loom_runtime_set_metrics_callback(rt, metric_submitted_cb, NULL);
+
+    loom_fn_union_t fn = {.thread_fn = simple_thread_task};
+    ASSERT(loom_runtime_submit(rt, fn, NULL, LOOM_SUBMIT_THREAD, 5, NULL) == LOOMWORKS_OK,
+           "submit thread task");
+
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 10000000L};
+    nanosleep(&ts, NULL);
+
+    ASSERT(g_metric_submitted >= 1, "standalone metrics callback fired");
+
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+}
+
 static void test_queries(void)
 {
     loom_runtime_t *rt = NULL;
@@ -490,6 +515,7 @@ int main(void)
     test_coro_cancel_pending();
     test_resize();
     test_metrics_callback();
+    test_metrics_standalone_callback();
     test_queries();
     test_invalid_runtime();
     test_stress_mixed();
