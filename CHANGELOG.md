@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Unified runtime (`loom_runtime_t`)**: single-entry-point abstraction that
+  routes thread and coroutine submissions through one API. `loom_runtime_submit()`
+  takes a `loom_submit_flag_t` (THREAD / CORO) and a `loom_fn_union_t` to avoid
+  object-to-function pointer casts; the backing pool handles M:N coroutine
+  multiplexing via the per-worker ready FIFO.
+- **Runtime convenience APIs**: `loom_runtime_submit_future()`,
+  `loom_runtime_resize()`, `loom_runtime_set_metrics_callback()`,
+  `loom_runtime_pool()` (test accessor). Full lifecycle:
+  `create → submit → cancel → shutdown → destroy`.
+- **Standalone metrics callback path**: `loom_pool_set_metrics_callback()` now
+  actually fires callbacks when no collector is attached, in addition to the
+  existing collector path via `loom_metrics_create()`.
 - **Pluggable context-switching backend**: new `src/coro_ctx.h` abstracts
   `getcontext`/`makecontext`/`swapcontext` (default: POSIX ucontext), so an
   alternative backend can be dropped in without touching `src/coroutine.c`.
