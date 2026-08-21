@@ -172,3 +172,8 @@ void loom_runtime_shutdown(loom_runtime_t *rt)
         loom_pool_shutdown(rt->pool);
     }
 }
+
+loom_thread_pool_t *loom_runtime_pool(const loom_runtime_t *rt)
+{
+    return rt ? rt->pool : NULL;
+}

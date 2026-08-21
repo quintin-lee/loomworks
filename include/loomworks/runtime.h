@@ -23,6 +23,7 @@
 #include <stdint.h>
 
 #include "loomworks/coroutine.h"
+#include "loomworks/metrics.h"
 #include "loomworks/thread_pool.h"
 
 #ifdef __cplusplus
@@ -215,6 +216,11 @@ double loom_runtime_utilization(const loom_runtime_t *rt);
  * No new submissions are accepted after this call.
  */
 void loom_runtime_shutdown(loom_runtime_t *rt);
+
+/**
+ * @brief Expose the backing pool for internal testing.
+ */
+loom_thread_pool_t *loom_runtime_pool(const loom_runtime_t *rt);
 
 #ifdef __cplusplus
 }
