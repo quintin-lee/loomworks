@@ -344,6 +344,89 @@ static void test_coro_cancel_pending(void)
     ASSERT(counter == 0, "cancelled coroutine task did not execute");
 }
 
+static void test_submit_blocking(void)
+{
+    /* Verify blocking submit works with an unbounded queue. */
+    loom_runtime_config_t cfg = {.worker_count = 2};
+    loom_runtime_t       *rt  = NULL;
+    ASSERT(loom_runtime_create(&cfg, &rt) == LOOMWORKS_OK, "create runtime");
+
+    int             counter = 0;
+    loom_fn_union_t fn      = {.thread_fn = simple_thread_task};
+    for (int i = 0; i < 20; i++) {
+        ASSERT(loom_runtime_submit_blocking(rt, fn, &counter, LOOM_SUBMIT_THREAD, 5, NULL) ==
+                   LOOMWORKS_OK,
+               "blocking submit");
+    }
+
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+
+    ASSERT(counter == 20, "all blocking-submitted tasks executed");
+}
+
+static void test_submit_blocking_rejects_coro(void)
+{
+    /* Submitting a coroutine via blocking path must be rejected. */
+    loom_runtime_t *rt = NULL;
+    ASSERT(loom_runtime_create(NULL, &rt) == LOOMWORKS_OK, "create runtime");
+
+    loom_fn_union_t fn = {.coro_fn = simple_coro_task};
+    ASSERT(loom_runtime_submit_blocking(rt, fn, NULL, LOOM_SUBMIT_CORO, 0, NULL) ==
+               LOOMWORKS_ERR_INVALID,
+           "blocking submit rejects coro");
+
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+}
+
+static void test_metrics_snapshot(void)
+{
+    /* Verify that loom_runtime_metrics_snapshot returns valid data
+     * when the runtime has a shm region attached. */
+    loom_runtime_config_t cfg = {.worker_count = 1, .shm_name = "snap_test"};
+    loom_runtime_t       *rt  = NULL;
+    ASSERT(loom_runtime_create(&cfg, &rt) == LOOMWORKS_OK, "create runtime with shm");
+
+    /* Snapshot before any tasks — all counters zero. */
+    loom_metrics_shm_t snap = {0};
+    ASSERT(loom_runtime_metrics_snapshot(rt, &snap) == LOOMWORKS_OK, "snapshot before submit");
+    ASSERT(snap.submitted == 0, "submitted is 0 before submit");
+
+    /* Submit a task and snapshot again. */
+    loom_fn_union_t fn      = {.thread_fn = simple_thread_task};
+    int             counter = 0;
+    ASSERT(loom_runtime_submit(rt, fn, &counter, LOOM_SUBMIT_THREAD, 5, NULL) == LOOMWORKS_OK,
+           "submit thread task");
+
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 20000000L};
+    nanosleep(&ts, NULL);
+
+    ASSERT(loom_runtime_metrics_snapshot(rt, &snap) == LOOMWORKS_OK, "snapshot after submit");
+    ASSERT(snap.submitted >= 1, "submitted >= 1 after submit");
+    ASSERT(snap.completed >= 1, "completed >= 1 after task finished");
+
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+}
+
+static void test_metrics_snapshot_null_safety(void)
+{
+    /* Snapshot on a runtime without shm should return ERR_INVALID. */
+    loom_runtime_t *rt = NULL;
+    ASSERT(loom_runtime_create(NULL, &rt) == LOOMWORKS_OK, "create runtime without shm");
+
+    loom_metrics_shm_t snap = {0};
+    ASSERT(loom_runtime_metrics_snapshot(rt, &snap) == LOOMWORKS_ERR_INVALID,
+           "snapshot rejected when no shm attached");
+    ASSERT(loom_runtime_metrics_snapshot(NULL, &snap) == LOOMWORKS_ERR_INVALID,
+           "NULL runtime rejected");
+    ASSERT(loom_runtime_metrics_snapshot(rt, NULL) == LOOMWORKS_ERR_INVALID, "NULL out rejected");
+
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+}
+
 static void test_resize(void)
 {
     loom_runtime_t       *rt  = NULL;
@@ -557,6 +640,10 @@ int main(void)
     test_submit_future_cancel();
     test_coro_cancel_pending();
     test_resize();
+    test_submit_blocking();
+    test_submit_blocking_rejects_coro();
+    test_metrics_snapshot();
+    test_metrics_snapshot_null_safety();
     test_metrics_callback();
     test_metrics_standalone_callback();
     test_queries();

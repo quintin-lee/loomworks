@@ -135,6 +135,23 @@ loom_result_t loom_runtime_submit_future(loom_runtime_t     *rt,
     return loom_pool_submit_future(rt->pool, fn, data, future, task_id);
 }
 
+loom_result_t loom_runtime_submit_blocking(loom_runtime_t    *rt,
+                                           loom_fn_union_t    fn,
+                                           void              *data,
+                                           loom_submit_flag_t flag,
+                                           uint8_t            priority,
+                                           uint64_t          *task_id)
+{
+    if (!rt || !rt->pool) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    if (flag != LOOM_SUBMIT_THREAD) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    (void)priority; /* Blocking submit always uses NORMAL priority. */
+    return loom_pool_submit_blocking(rt->pool, fn.thread_fn, data, task_id);
+}
+
 /* ================================================================
  *  cancel / cancel_all
  * ================================================================ */
@@ -171,6 +188,18 @@ void loom_runtime_set_metrics_callback(loom_runtime_t *rt, loom_metric_fn cb, vo
         return;
     }
     loom_pool_set_metrics_callback(rt->pool, cb, user_data);
+}
+
+loom_result_t loom_runtime_metrics_snapshot(const loom_runtime_t *rt, loom_metrics_shm_t *out)
+{
+    if (!rt || !rt->shm || !out) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    /* memcpy gives an eventually-consistent snapshot — each field is a
+     * valid value but they may come from different points in time.
+     * This is the documented trade-off and sufficient for monitoring. */
+    memcpy(out, rt->shm, sizeof(*out));
+    return LOOMWORKS_OK;
 }
 
 /* ================================================================

@@ -144,6 +144,30 @@ loom_result_t loom_runtime_submit_future(loom_runtime_t     *rt,
                                          uint64_t           *task_id);
 
 /**
+ * @brief Submit a thread task, blocking until there is queue space.
+ *
+ * Same as loom_runtime_submit() but blocks (with timeout) when the queue
+ * is at capacity instead of returning LOOMWORKS_ERR_INVALID.  Times out
+ * after 60 seconds, returning LOOMWORKS_ERR_TIMEOUT.
+ *
+ * Only valid for LOOM_SUBMIT_THREAD — calling with LOOM_SUBMIT_CORO
+ * returns LOOMWORKS_ERR_INVALID.
+ *
+ * @param rt       The runtime handle.
+ * @param fn       Task entry function.
+ * @param data     Opaque argument passed to fn.
+ * @param priority Task priority (0–255).
+ * @param task_id  Output pointer for the assigned task ID (may be NULL).
+ * @return         LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_runtime_submit_blocking(loom_runtime_t    *rt,
+                                           loom_fn_union_t    fn,
+                                           void              *data,
+                                           loom_submit_flag_t flag,
+                                           uint8_t            priority,
+                                           uint64_t          *task_id);
+
+/**
  * @brief Cancel a pending task by its task ID.
  *
  * Only tasks that have not yet begun execution are removed.  Running tasks
@@ -193,6 +217,20 @@ loom_result_t loom_runtime_resize(loom_runtime_t *rt, uint32_t count);
  * @param user_data   Opaque data passed to the callback.
  */
 void loom_runtime_set_metrics_callback(loom_runtime_t *rt, loom_metric_fn cb, void *user_data);
+
+/**
+ * @brief Read a snapshot of the shared-memory metrics counters.
+ *
+ * Returns a consistent copy of all counters from the runtime's shared-
+ * memory region.  Safe to call from any thread at any time.
+ * Returns LOOMWORKS_ERR_INVALID when the runtime has no shm region
+ * attached (shm_name was NULL at create time).
+ *
+ * @param rt   The runtime handle.
+ * @param out  Output snapshot (caller-allocated, must be >= sizeof(loom_metrics_shm_t)).
+ * @return     LOOMWORKS_OK on success, LOOMWORKS_ERR_INVALID if no shm attached.
+ */
+loom_result_t loom_runtime_metrics_snapshot(const loom_runtime_t *rt, loom_metrics_shm_t *out);
 
 /**
  * @brief Get the number of worker threads.
