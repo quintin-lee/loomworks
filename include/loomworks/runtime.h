@@ -118,6 +118,14 @@ loom_result_t loom_runtime_submit(loom_runtime_t    *rt,
  * Only tasks that have not yet begun execution are removed.  Running tasks
  * are left to complete normally.
  *
+ * Cancel is **semantic**, not physical: tasks in the lock-free ring or in
+ * per-worker deques are not copied out of those structures.  Instead they
+ * are flagged and skipped when a worker eventually dequeues them.  The
+ * actual node is freed on that dequeue, so there is a bounded delay between
+ * a successful cancel() and memory reclamation.  Tasks already dequeued by
+ * a worker but not yet started (residing in the worker's private deque) are
+ * found via the cancel index and marked for skip.
+ *
  * @param rt       The runtime handle.
  * @param task_id  The task ID returned by loom_runtime_submit().
  * @return         LOOMWORKS_OK if the task was cancelled,

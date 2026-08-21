@@ -875,10 +875,15 @@ static void *worker_entry(void *arg)
                 loom_coro_create(task->coro_fn, task->user_data, task->stack_size, &coro);
             if (crc != LOOMWORKS_CORO_OK) {
                 metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
-                if (task->free_data && task->user_data) {
-                    free(task->user_data);
-                }
+                /* task->user_data still holds the original caller pointer
+                 * (task->free_data == false for pool-coroutine tasks).
+                 * Save it here before we overwrite task->user_data below,
+                 * so we can free it on this failure path. */
+                void *saved_ud = task->user_data;
                 task_destroy(pool, task);
+                if (saved_ud) {
+                    free(saved_ud);
+                }
                 if (pool->queue_capacity > 0) {
                     pthread_mutex_lock(&pool->lock);
                     pthread_cond_signal(&pool->space_cond);
