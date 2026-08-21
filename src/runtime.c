@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/runtime.h"
+#include "loomworks/metrics_shm.h"
+#include "thread_pool_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -7,13 +9,14 @@
 /* ================================================================
  *  Internal layout
  *
- *  loom_runtime_t holds a single backing loom_thread_pool_t.
- *  coro_stack_size is stored here so submit_coro can pass it through
- *  without needing an extra config query path.
+ *  loom_runtime_t holds a single backing loom_thread_pool_t and an
+ *  optional shared-memory metrics region.
  * ================================================================ */
 struct loom_runtime {
     loom_thread_pool_t *pool;
     size_t              coro_stack_size; /* 0 = use coroutine default */
+    loom_metrics_shm_t *shm;             /* NULL when shm_name was not set */
+    char                shm_name[128];   /* copy of user-provided name      */
 };
 
 /* ================================================================
@@ -42,11 +45,35 @@ loom_result_t loom_runtime_create(const loom_runtime_config_t *cfg, loom_runtime
         rt->coro_stack_size = 0;
     }
 
+    /* Copy shm_name with bounds checking. */
+    if (cfg && cfg->shm_name) {
+        size_t len = strlen(cfg->shm_name);
+        if (len >= sizeof(rt->shm_name)) {
+            len = sizeof(rt->shm_name) - 1;
+        }
+        memcpy(rt->shm_name, cfg->shm_name, len + 1);
+    } else {
+        rt->shm_name[0] = '\0';
+    }
+
     loom_result_t rc = loom_pool_create(&pcfg, &rt->pool);
     if (rc != LOOMWORKS_OK) {
         free(rt);
         *out = NULL;
         return rc;
+    }
+
+    /* Attach shared-memory metrics region if a name was provided. */
+    if (rt->shm_name[0] != '\0') {
+        rc = (loom_result_t)loom_metrics_shm_create(rt->shm_name, &rt->shm);
+        if (rc != LOOMWORKS_OK) {
+            loom_pool_destroy(&rt->pool);
+            free(rt);
+            *out = NULL;
+            return rc;
+        }
+        loom_pool_attach_metrics_shm(
+            rt->pool, rt->shm, (void (*)(loom_metric_event_t, void *))loom_metrics_shm_write);
     }
 
     *out = rt;
@@ -64,6 +91,9 @@ void loom_runtime_destroy(loom_runtime_t **rt)
     }
     loom_pool_shutdown(r->pool);
     loom_pool_destroy(&r->pool);
+    if (r->shm) {
+        loom_metrics_shm_destroy(r->shm_name, r->shm);
+    }
     free(r);
     *rt = NULL;
 }
@@ -176,4 +206,9 @@ void loom_runtime_shutdown(loom_runtime_t *rt)
 loom_thread_pool_t *loom_runtime_pool(const loom_runtime_t *rt)
 {
     return rt ? rt->pool : NULL;
+}
+
+loom_metrics_shm_t *loom_runtime_shm(const loom_runtime_t *rt)
+{
+    return rt ? rt->shm : NULL;
 }

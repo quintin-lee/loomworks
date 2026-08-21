@@ -23,6 +23,7 @@
 #include "coroutine_internal.h"
 #include "loomworks/coroutine.h"
 #include "loomworks/metrics.h"
+#include "loomworks/metrics_shm.h"
 #include "thread_pool_internal.h"
 
 #include <errno.h>
@@ -92,6 +93,10 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
      * avoid firing the callback twice. */
     if (pool->metrics) {
         loom_metrics_fire((loom_metrics_t *)pool->metrics, event);
+        /* Also write to the shared-memory region if one is attached. */
+        if (pool->shm && pool->shm_update) {
+            pool->shm_update(event, pool->shm);
+        }
         return;
     }
     /* Path 2: standalone callback (no collector) — fire cb directly.
@@ -105,6 +110,10 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
         } u;
         u.p = pool->metric_cb;
         u.f(event, pool, pool->metric_user_data);
+    }
+    /* Always write to shm when available, even without a collector. */
+    if (pool->shm && pool->shm_update) {
+        pool->shm_update(event, pool->shm);
     }
 }
 
@@ -2424,6 +2433,25 @@ void loom_pool_set_metrics(loom_thread_pool_t *pool, loom_metrics_t *metrics)
         return;
     }
     pool->metrics = metrics;
+}
+
+/* ================================================================
+ *  loom_pool_attach_metrics_shm — attach a POSIX shared-memory region
+ *  so every metrics event is mirrored into it in addition to the
+ *  internal collector.
+ *
+ *  The update callback must be thread-safe (loom_metrics_shm_write()
+ *  uses lock-free atomics and is safe to call from any worker thread).
+ * ================================================================ */
+void loom_pool_attach_metrics_shm(loom_thread_pool_t *pool,
+                                  loom_metrics_shm_t *shm,
+                                  void (*shm_update)(loom_metric_event_t, void *))
+{
+    if (!pool) {
+        return;
+    }
+    pool->shm        = shm;
+    pool->shm_update = shm_update;
 }
 
 /* ================================================================

@@ -1,7 +1,9 @@
 #ifndef LOOMWORKS_THREAD_POOL_INTERNAL_H
 #define LOOMWORKS_THREAD_POOL_INTERNAL_H
 
-#include "loomworks/coroutine.h" /* loom_coro_fn for coroutine tasks */
+#include "loomworks/coroutine.h"   /* loom_coro_fn for coroutine tasks */
+#include "loomworks/metrics.h"     /* loom_metric_event_t for shm_write_fn */
+#include "loomworks/metrics_shm.h" /* loom_metrics_shm_t for shm attach */
 #include "loomworks/thread_pool.h"
 #include <pthread.h>
 #include <semaphore.h>
@@ -218,6 +220,12 @@ struct loom_thread_pool {
     /* Inline metrics callback fields to avoid circular dependency */
     void (*metric_cb)(void *, void *, void *);
     void *metric_user_data;
+    /* Shared-memory metrics region (NULL unless a name was configured).
+     * Updated synchronously on every metrics_fire() call from the worker
+     * thread that fired the event — no lock needed, the counters are
+     * atomic. */
+    void *shm;
+    void (*shm_update)(loom_metric_event_t event, void *ctx);
 };
 
 /**
@@ -282,5 +290,13 @@ void loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e);
 bool loom_timer_peek(const loom_thread_pool_t *pool, int64_t *deadline_ns);
 bool loom_timer_pop_due(loom_thread_pool_t *pool, loom_timer_entry_t *out);
 bool loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id, loom_timer_entry_t *out);
+
+/* ================================================================
+ *  Metrics shared-memory attach (src/thread_pool.c).
+ *  Wired up by loom_runtime_create() when cfg->shm_name is non-NULL.
+ * ================================================================ */
+void loom_pool_attach_metrics_shm(loom_thread_pool_t *pool,
+                                  loom_metrics_shm_t *shm,
+                                  void (*shm_update)(loom_metric_event_t event, void *ctx));
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */

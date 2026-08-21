@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/runtime.h"
 
+#include "loomworks/metrics_shm.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -458,6 +459,48 @@ static void test_queries(void)
     ASSERT(loom_runtime_utilization(NULL) == 0.0, "NULL utilization is 0.0");
 }
 
+static void test_shared_memory_metrics(void)
+{
+    /* Verify that a runtime with shm_name creates /dev/shm/loomworks_<name>
+     * and mirrors metric events into the shared region. */
+    loom_runtime_config_t cfg = {.worker_count = 1, .shm_name = "shm_test"};
+    loom_runtime_t       *rt  = NULL;
+    ASSERT(loom_runtime_create(&cfg, &rt) == LOOMWORKS_OK, "create runtime with shm");
+
+    /* Verify the shm segment exists by checking the file. */
+    FILE *f = fopen("/dev/shm/loomworks_shm_test", "r");
+    ASSERT(f != NULL, "shm segment created in /dev/shm");
+    if (f) {
+        fclose(f);
+    }
+
+    /* Submit a task and verify the submitted counter increments in shm. */
+    loom_fn_union_t fn = {.thread_fn = simple_thread_task};
+    ASSERT(loom_runtime_submit(rt, fn, NULL, LOOM_SUBMIT_THREAD, 5, NULL) == LOOMWORKS_OK,
+           "submit thread task");
+
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 20000000L};
+    nanosleep(&ts, NULL);
+
+    /* Read the shm region directly via the runtime accessor while runtime
+     * is still alive — after destroy the shm segment is unlinked and
+     * reopened would show a fresh zeroed region. */
+    loom_metrics_shm_t *shm = loom_runtime_shm(rt);
+    ASSERT(shm != NULL, "shm region attached to runtime");
+    ASSERT(atomic_load_explicit(&shm->submitted, memory_order_relaxed) >= 1,
+           "shm submitted counter incremented");
+
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+
+    /* Verify the shm file is cleaned up after destroy. */
+    f = fopen("/dev/shm/loomworks_shm_test", "r");
+    ASSERT(f == NULL, "shm segment removed after destroy");
+    if (f) {
+        fclose(f);
+    }
+}
+
 static void test_invalid_runtime(void)
 {
     loom_fn_union_t fn = {.thread_fn = simple_thread_task};
@@ -517,6 +560,7 @@ int main(void)
     test_metrics_callback();
     test_metrics_standalone_callback();
     test_queries();
+    test_shared_memory_metrics();
     test_invalid_runtime();
     test_stress_mixed();
 

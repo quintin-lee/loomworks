@@ -24,6 +24,7 @@
 
 #include "loomworks/coroutine.h"
 #include "loomworks/metrics.h"
+#include "loomworks/metrics_shm.h"
 #include "loomworks/thread_pool.h"
 
 #ifdef __cplusplus
@@ -58,12 +59,20 @@ typedef union {
  * Fields documented against loom_pool_config_t in thread_pool.h.
  * coro_stack_size is passed verbatim to each loom_coro_create() call
  * submitted via LOOM_SUBMIT_CORO; 0 selects the coroutine default (64 KiB).
+ *
+ * shm_name: if non-NULL, a POSIX shared-memory region is created at
+ *   /dev/shm/loomworks_<shm_name> (or /loomworks_<shm_name> on platforms
+ *   without /dev/shm).  The region contains lock-free uint64 counters
+ *   mirroring the pool's metrics; an external analysis tool can mmap
+ *   the same pathname and read counters directly without linking the
+ *   library.
  */
 typedef struct {
-    uint32_t worker_count;    /**< 0 = auto-detect (same formula as pool).           */
-    size_t   stack_size;      /**< Per-worker stack size in bytes (0 = default).     */
-    uint32_t queue_capacity;  /**< Max pending tasks before blocking submit (0 = unbounded). */
-    uint32_t coro_stack_size; /**< Per-coroutine stack size (0 = default 64 KiB).    */
+    uint32_t    worker_count;    /**< 0 = auto-detect (same formula as pool).           */
+    size_t      stack_size;      /**< Per-worker stack size in bytes (0 = default).     */
+    uint32_t    queue_capacity;  /**< Max pending tasks before blocking submit (0 = unbounded). */
+    uint32_t    coro_stack_size; /**< Per-coroutine stack size (0 = default 64 KiB).    */
+    const char *shm_name;        /**< Shared-memory name for external monitoring (NULL = off). */
 } loom_runtime_config_t;
 
 /**
@@ -233,6 +242,11 @@ extern "C" {
  * other pool-level APIs directly.
  */
 loom_thread_pool_t *loom_runtime_pool(const loom_runtime_t *rt);
+
+/**
+ * @brief Get the shared-memory metrics region pointer (for testing).
+ */
+loom_metrics_shm_t *loom_runtime_shm(const loom_runtime_t *rt);
 
 #ifdef __cplusplus
 }
