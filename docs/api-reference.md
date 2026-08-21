@@ -559,3 +559,109 @@ Build: `cc -std=c11 -Iinclude example.c -Lbuild -lloomworks -lpthread` (or `-llo
 - Calling `resume()` / `yield()` / `terminate()` on the same coroutine from different threads (ucontext is not thread-safe; confine the whole lifecycle to one thread).
 - Calling `destroy()` on a coroutine that is not in NEW/DONE/ERROR state.
 - Calling `loom_task_group_wait()` / `loom_task_group_destroy()` from a worker of the group's own pool — the call would block forever waiting on work only that worker could run; both reject it with `ERR_INVALID` (self-wait guard).
+---
+
+## 6. Unified Runtime API
+
+The unified runtime (`loom_runtime_t`) provides a single entry point for
+submitting both thread tasks and coroutine tasks through the same API.
+It wraps an internal `loom_thread_pool_t` and routes submissions based on
+a `loom_submit_flag_t` flag.
+
+### 6.1 Create and Destroy
+
+```c
+typedef struct {
+    uint32_t worker_count;    /**< 0 = auto-detect */
+    size_t   stack_size;      /**< Per-worker stack size (0 = default) */
+    uint32_t queue_capacity;  /**< 0 = unbounded */
+    uint32_t coro_stack_size; /**< 0 = default 64 KiB */
+} loom_runtime_config_t;
+
+loom_result_t loom_runtime_create(const loom_runtime_config_t *cfg,
+                                  loom_runtime_t **out);
+void          loom_runtime_destroy(loom_runtime_t **rt);
+```
+
+`destroy` calls `shutdown()` internally then frees resources. Idempotent.
+
+### 6.2 Submit
+
+```c
+typedef enum {
+    LOOM_SUBMIT_THREAD = 0, /**< Route to thread-pool worker */
+    LOOM_SUBMIT_CORO   = 1, /**< Route to per-worker coroutine scheduler */
+} loom_submit_flag_t;
+
+typedef union {
+    loom_task_fn thread_fn;
+    loom_coro_fn coro_fn;
+    void        *ptr;
+} loom_fn_union_t;
+
+loom_result_t loom_runtime_submit(loom_runtime_t    *rt,
+                                  loom_fn_union_t    fn,
+                                  void              *data,
+                                  loom_submit_flag_t flag,
+                                  uint8_t            priority,
+                                  uint64_t          *task_id);
+
+loom_result_t loom_runtime_submit_future(loom_runtime_t       *rt,
+                                         loom_task_fn_result   fn,
+                                         void                 *data,
+                                         loom_future_t       **future,
+                                         uint64_t             *task_id);
+```
+
+`LOOM_SUBMIT_CORO` routes to the per-worker coroutine scheduler where
+workers multiplex coroutines via a ready FIFO (M:N scheduling).
+`LOOM_SUBMIT_THREAD` routes to the standard thread pool with priority.
+`submit_future` is only valid for `LOOM_SUBMIT_THREAD`.
+
+### 6.3 Cancellation
+
+```c
+loom_result_t loom_runtime_cancel(loom_runtime_t *rt, uint64_t task_id);
+void          loom_runtime_cancel_all(loom_runtime_t *rt, uint32_t *count);
+```
+
+Semantic cancel — pending tasks are flagged and skipped on dequeue.
+Running tasks are not interrupted.
+
+### 6.4 Resize and Metrics
+
+```c
+loom_result_t loom_runtime_resize(loom_runtime_t *rt, uint32_t count);
+void          loom_runtime_set_metrics_callback(loom_runtime_t *rt,
+                                              loom_metric_fn cb,
+                                              void *user_data);
+```
+
+`resize` is forwarded to the backing pool. `set_metrics_callback`
+registers a callback that fires synchronously on worker threads.
+
+### 6.5 Queries
+
+```c
+uint32_t loom_runtime_worker_count (const loom_runtime_t *rt);
+uint32_t loom_runtime_pending_count(const loom_runtime_t *rt);
+uint32_t loom_runtime_active_count (const loom_runtime_t *rt);
+uint32_t loom_runtime_idle_count   (const loom_runtime_t *rt);
+double   loom_runtime_utilization  (const loom_runtime_t *rt);
+void     loom_runtime_shutdown(loom_runtime_t *rt);
+```
+
+All queries delegate to the backing pool.
+
+### 6.6 Key Design Decisions
+
+- **Thin wrapper**: zero duplicated logic; all work is delegated to the
+  backing `loom_thread_pool_t`.
+- **Layered priority**: thread tasks use priorities 0–7; coroutine tasks
+  run in their own per-worker FIFO (no priority sub-classification).
+- **Cancellation is semantic**: tasks in the lock-free ring or per-worker
+  deques are flagged, not physically removed; memory is reclaimed when
+  the worker eventually dequeues them.
+- **M:N coroutine multiplexing**: when a coroutine yields or sleeps, the
+  owner worker immediately resumes the next coroutine in its ready FIFO.
+
