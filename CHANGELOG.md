@@ -47,6 +47,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The triage this enforced surfaced two real defects — a resize
   rollback leak on allocation failure and misaligned 64-byte-aligned
   deques arrays — both fixed with regression coverage.
+- **Coroutine multi-yield semantics**: a coroutine may now call
+  `loom_coro_yield()` any number of times; each `loom_coro_resume()`
+  continues from the last yield point (`SUSPENDED` → `RUNNING`), so
+  generator-style coroutines work. Previously the second resume entered
+  undefined territory (the entry trampoline was re-run).
+- **Coroutine sleeping**: new `loom_coro_sleep_until(deadline_ns)`
+  (absolute `CLOCK_MONOTONIC`) and `loom_coro_sleep(duration_ns)` park the
+  calling coroutine in a `SLEEPING` state until its deadline passes.
+  Early resumes are rejected with `LOOMWORKS_CORO_ERR_RUNNING` instead of
+  corrupting the schedule. Inside pool coroutine tasks, deadlines are
+  registered with a per-pool timer thread (lazily started, min-heap under
+  `timer_lock`) that moves expired entries to the owner worker's ready FIFO
+  and posts a wake token — it never resumes a coroutine itself, preserving
+  the one-thread-per-coroutine affinity rule. Standalone coroutines must be
+  resumed by their owner after the deadline.
+- **Pool coroutine tasks**: new `loom_pool_submit_coroutine(pool, fn, arg,
+  stack_size, &task_id)` runs a coroutine as a fire-and-forget pool task: a
+  worker resumes it, re-queues it on every yield, parks it via the timer heap
+  on sleep, and destroys it on completion. Failures surface through the
+  existing `LOOMWORKS_METRIC_FAILED` metric; the returned `task_id` supports
+  the usual cancellation path.
 
 ### Changed
 - **`group_wait()` no longer shuts down the backing pool**: it now waits only

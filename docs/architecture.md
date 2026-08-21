@@ -199,6 +199,7 @@ shutdown()
   ├─ sem_post(work_sem) × worker_count    // wake every idle worker
   ├─ unlock
   ├─ pthread_join over threads[0 .. max_worker_count)
+  ├─ stop timer thread (if armed)         // strictly AFTER workers exit
   └─ draining = false; joined = true; broadcast(drain_cond)
 
 pool_destroy()
@@ -215,6 +216,14 @@ is posted exactly once per worker, and a worker that slept again could consume
 a token meant for a still-sleeping peer, exhausting the supply and deadlocking
 the join. Instead, workers that find no work post-shutdown `sched_yield()` and
 loop until the drain check fires.
+
+If the pool's timer thread is armed (a coroutine sleep was ever registered),
+it is stopped **after** the worker join loop. A coroutine that reaches
+`sleep_until` during the drain registers a fresh timer-heap entry; the timer
+must stay alive until every worker has exited and no new entry can appear.
+Stopping it earlier strands heap entries that will never fire, so workers
+spin in the drain forever and the join hangs (this ordering is load-bearing,
+not cosmetic).
 
 ### 2.9 Resize
 
@@ -366,7 +375,10 @@ is installed idempotently (`_Atomic g_guard_installed`).
 
 ### 3.7 Lifecycle Rules
 
-- `NEW → resume → (yield/resume)* → terminate → destroy`
+- `NEW → resume → (yield / sleep / resume)* → terminate → destroy`
+- States: `NEW` (never run), `RUNNING` (on this thread's stack), `SUSPENDED`
+  (parked at a `yield`, waiting for the next `resume`), `SLEEPING` (parked at
+  `sleep_until`, waiting for its deadline), then terminal `DONE`/`ERROR`.
 - The **entire lifecycle must stay on one thread** (the scheduler state
   `g_scheduler` is `_Thread_local`; resuming on another thread would switch
   onto the wrong scheduler stack). Running a coroutine inside a pool worker is
@@ -413,6 +425,47 @@ exhibits for a `makecontext` function that returns. A coroutine function
 must never `return` to the scheduler frame - returning is the terminal
 transition, and the trampoline always switches away or exits rather than
 returning into a frame that may no longer be on the stack.
+
+### 3.9 Sleeping & the Pool Timer Thread
+
+`loom_coro_sleep_until(deadline_ns)` (CLOCK_MONOTONIC absolute) parks the
+calling coroutine in state `SLEEPING` and switches back to its scheduler;
+`loom_coro_sleep(duration_ns)` is a relative convenience wrapper. Unlike
+`yield`, a sleeping coroutine is **not** resumable early: `resume()` before
+the deadline keeps `SLEEPING` and returns `LOOMWORKS_CORO_ERR_RUNNING`
+(an early resume is a scheduling miss, not an error path). After the
+deadline, `resume()` clears the deadline and re-enters as `RUNNING`. A
+coroutine may sleep repeatedly, interleaved with yields.
+
+Two wake-up paths exist, depending on who owns the coroutine:
+
+- **Pool coroutine tasks** (`loom_pool_submit_coroutine`): the coroutine
+  carries a registration hook into its owning pool. The hook pushes
+  `(deadline, task_id, coro, worker_idx)` into the pool's min-heap under
+  `timer_lock` and lazily starts the pool's single timer thread on first
+  use (`ensure_timer_thread`). At expiry the timer thread pops the entry,
+  allocates a ready node, appends it to the **owner worker's** ready FIFO
+  (under `timer_lock` + `coro_lock`, one critical section), and posts one
+  `work_sem` token. The owner worker then resumes it exactly like any other
+  ready coroutine — the timer thread never touches coroutine stacks itself,
+  preserving the one-thread-per-coroutine affinity invariant of §3.7.
+- **Standalone coroutines**: no hook is installed; nobody will resume them
+  automatically. The caller must wait out the deadline and call `resume()`
+  itself after it passes.
+
+Worker-loop handling per resume result: `SUSPENDED` re-queues the ready
+node for the next drain pass (multi-yield); `SLEEPING` frees the node —
+the hook has already re-armed the heap for the new deadline; anything else
+(`DONE`/error) fires metrics, destroys the coroutine and releases the task.
+On resize-down, a vanishing worker terminates every coroutine still in its
+ready FIFO or registered in the timer heap against its slot — abandoning
+runnable/sleeping coroutines is the documented shrink contract.
+
+Shutdown ordering (see §2.8): the timer thread drains-until-empty — after
+`timer_thread_alive` drops it keeps waking entries so sleeping coroutines
+resume, finish, and let their workers exit — but it is only *joined/stopped*
+after all workers have exited, because a drain-time `sleep_until` can still
+register new heap entries while workers are running.
 
 ---
 

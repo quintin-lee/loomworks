@@ -24,12 +24,18 @@ Values: `bench --iterations 10 --tasks 2000`.
 |---|---|
 | `fairness_resp_ns` avg / p50 / p99 | 102666 / 61526 / 156420 ns |
 | `tail_latency_ns` p50 / p99 / p999 | 3005971 / 4049389 / 4252102 ns |
-| `coro_switch_ns` | 22.7 ns (Debug); 19.5 ns (warm, 5000 resumes) |
+| `coro_switch_ns` | 307.8 ns (Debug; real round-trip since multi-yield) |
 
 > Values above are from a Debug build (unoptimized) and a loaded machine —
 > indicative only.  Rerun `bench --json --iterations 100 --tasks 10000` on a
 > quiet runner to refresh.  The 2.0x p99 limits are intentionally loose until
 > real gate runs exist; the fairness `p99 < 10ms` sanity is the hard floor.
+>
+> The `coro_switch_ns` jump from ~22.7 ns to ~307.8 ns (2026-08-21) is a
+> semantic change, not a regression: earlier builds timed a loop that the
+> optimizer could collapse (single-yield coroutines could not re-resume),
+> while the current number measures a genuine resume→yield→resume round-trip
+> of a multi-yield coroutine — full stack switch plus scheduler bookkeeping.
 
 ## CLI reference
 
