@@ -314,7 +314,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
      * that function only tears down the coro/timer locks when coro_ready
      * is non-NULL, which here means every lock below was initialised. */
     pool->coro_ready =
-        (struct loom_coro_ready **)calloc(pool->max_worker_count, sizeof(*pool->coro_ready));
+        (struct loom_coro_ready **)calloc(pool->max_worker_count, sizeof(struct loom_coro_ready *));
     if (!pool->coro_ready) {
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
@@ -2641,7 +2641,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
              * dereference. */
             pthread_mutex_lock(&pool->coro_lock);
             struct loom_coro_ready **new_coro_ready =
-                (struct loom_coro_ready **)calloc(count, sizeof(*new_coro_ready));
+                (struct loom_coro_ready **)calloc(count, sizeof(struct loom_coro_ready *));
             if (!new_coro_ready) {
                 pthread_mutex_unlock(&pool->coro_lock);
                 rollback_deques_tail(pool, old_max, count);
@@ -2650,7 +2650,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
             }
             memcpy((void *)new_coro_ready,
                    (const void *)pool->coro_ready,
-                   old_max * sizeof(*new_coro_ready));
+                   old_max * sizeof(struct loom_coro_ready *));
             free((void *)pool->coro_ready);
             pool->coro_ready = new_coro_ready;
             pthread_mutex_unlock(&pool->coro_lock);
