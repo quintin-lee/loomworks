@@ -97,7 +97,21 @@ jobs:
           valgrind --leak-check=full --error-exitcode=1
           --suppressions=${{ github.workspace }}/.github/valgrind.supp
           ./test_integration
-        timeout-minutes: 30
+        timeout-minutes: 10
+      - name: Re-run flaky valgrind tests on failure
+        if: failure()
+        run: >
+          cd build &&
+          valgrind --leak-check=full --error-exitcode=1
+          --suppressions=${{ github.workspace }}/.github/valgrind.supp
+          ./test_thread_pool &&
+          valgrind --leak-check=full --error-exitcode=1
+          --suppressions=${{ github.workspace }}/.github/valgrind.supp
+          ./test_coroutine &&
+          valgrind --leak-check=full --error-exitcode=1
+          --suppressions=${{ github.workspace }}/.github/valgrind.supp
+          ./test_integration
+        timeout-minutes: 10
 
   aarch64-cross:
     runs-on: ubuntu-latest
