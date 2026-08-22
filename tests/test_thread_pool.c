@@ -14,6 +14,14 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Scale down loop iterations under valgrind to keep total runtime within
+ * the 20-minute CI timeout (valgrind slows execution ~100×). */
+#ifdef __VALGRIND__
+#define VGI(n) ((n) / 4)
+#else
+#define VGI(n) (n)
+#endif
+
 /* Spin-wait with a monotonic clock timeout (avoids valgrind/slow-env spin-out). */
 #define WAIT_UNTIL(_sec, _cond)                                                    \
     for (struct timespec _wt_deadline;                                             \
@@ -505,7 +513,7 @@ static void test_no_data_task(void)
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(NULL, &pool) == LOOMWORKS_OK, "create pool");
 
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < VGI(100); i++) {
         ASSERT(loom_pool_submit(pool, no_data_task, NULL, NULL) == LOOMWORKS_OK,
                "submit no-data task");
     }
@@ -1230,7 +1238,7 @@ static void test_ring_basic(void)
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "basic create");
 
     atomic_store_explicit(&g_ring_run_count, 0, memory_order_relaxed);
-    for (uint32_t i = 0; i < 1000; i++) {
+    for (uint32_t i = 0; i < VGI(1000); i++) {
         ASSERT(loom_pool_submit(pool, ring_inc_task, NULL, NULL) == LOOMWORKS_OK, "basic submit");
     }
 
@@ -1732,7 +1740,7 @@ static void test_pool_health(void)
     ASSERT(loom_pool_utilization(pool) == 0.0, "util 0 initially");
 
     int counter = 0;
-    for (int i = 0; i < 200; i++) {
+    for (int i = 0; i < VGI(200); i++) {
         ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit");
         uint32_t active = loom_pool_active_count(pool);
         uint32_t idle   = loom_pool_idle_count(pool);
@@ -1758,7 +1766,7 @@ static void test_metrics_monitoring(void)
     ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
 
     int counter = 0;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < VGI(100); i++) {
         ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "submit");
     }
     loom_pool_shutdown(pool);
@@ -2241,7 +2249,7 @@ static void test_metrics_latency_concurrent(void)
     loom_metrics_t *metrics = NULL;
     ASSERT(loom_metrics_create(pool, NULL, NULL, &metrics) == LOOMWORKS_OK, "create metrics");
 
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < VGI(100); i++) {
         loom_pool_submit(pool, increment_task, &g_passes, NULL);
     }
 
@@ -2316,7 +2324,7 @@ static void test_submit_blocking_unbounded(void)
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create unbounded pool");
 
     int counter = 0;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < VGI(100); i++) {
         ASSERT(loom_pool_submit_blocking(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
                "submit_blocking unbounded");
     }
@@ -2388,7 +2396,7 @@ static void test_resize_grow(void)
 
     /* Verify new workers are functional */
     int counter = 0;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < VGI(100); i++) {
         ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK,
                "submit task");
     }
@@ -3767,7 +3775,7 @@ static void test_shutdown_drains_deque(void)
 
     /* The worker bulk-dequeues these into its local deque after release. */
     int counter = 0;
-    for (int i = 0; i < 300; i++) {
+    for (int i = 0; i < VGI(300); i++) {
         ASSERT(loom_pool_submit(pool, slow_count_task, &counter, NULL) == LOOMWORKS_OK,
                "shutdown-drain: submit task");
     }
@@ -3812,7 +3820,7 @@ static void test_resize_down_spills_deque(void)
     ASSERT(g_gate_parked >= 2, "resize-spill: both workers parked");
 
     int counter = 0;
-    for (int i = 0; i < 300; i++) {
+    for (int i = 0; i < VGI(300); i++) {
         ASSERT(loom_pool_submit(pool, slow_count_task, &counter, NULL) == LOOMWORKS_OK,
                "resize-spill: submit task");
     }

@@ -97,7 +97,7 @@ jobs:
           valgrind --leak-check=full --error-exitcode=1
           --suppressions=${{ github.workspace }}/.github/valgrind.supp
           ./test_integration
-        timeout-minutes: 10
+        timeout-minutes: 20
 
   aarch64-cross:
     runs-on: ubuntu-latest
