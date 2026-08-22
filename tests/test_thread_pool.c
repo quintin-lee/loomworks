@@ -22,13 +22,12 @@
 #define VGI(n) (n)
 #endif
 
-/* Spin-wait with high limit + clock-based safety valve.
- * Fast path: spin up to 32B iterations (covers valgrind's ~100× slowdown).
- * Safety valve: fall back to clock timeout if condition is never met.
- * Total timeout = _sec passed as arg + 60s fallback buffer. */
+/* Spin-wait with moderate limit + clock-based safety valve.
+ * Moderate spin limit avoids consuming CI time before the clock timeout kicks in.
+ * Under valgrind, 100M spins takes ~1-2 min; clock fallback gives 60s more. */
 #define WAIT_UNTIL(_sec, _cond)                                                    \
     for (uint64_t _wt_spins = 0;                                                   \
-         !(_cond) && _wt_spins < 32000000000ULL;                                   \
+         !(_cond) && _wt_spins < 100000000ULL;                                     \
          ++_wt_spins)                                                              \
         ;                                                                           \
     if (!(_cond)) {                                                                \
