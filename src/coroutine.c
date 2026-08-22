@@ -24,13 +24,19 @@
  * machinery cannot see.  Wrap every switch with start/finish_switch_fiber so
  * interceptors inside the coroutine resolve against the coroutine stack.
  * Only compiled when the TU itself is instrumented by ASan. */
-#if defined(__SANITIZE_ADDRESS__) || (defined(__clang__) && __has_feature(address_sanitizer))
+#if defined(__SANITIZE_ADDRESS__)
 #include <sanitizer/common_interface_defs.h>
 #define LOOMWORKS_ASAN 1
 /* The coroutine's fake-stack pointer, saved on yield/sleep/terminate
  * switches and restored on the next re-entry (per-thread, same as the
  * rest of the scheduler state). */
 static _Thread_local void *g_fake_stack_save = NULL;
+#elif defined(__clang__)
+#if __has_feature(address_sanitizer)
+#include <sanitizer/common_interface_defs.h>
+#define LOOMWORKS_ASAN 1
+static _Thread_local void *g_fake_stack_save = NULL;
+#endif
 #endif
 
 /* ================================================================
