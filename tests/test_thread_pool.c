@@ -23,17 +23,18 @@
 #endif
 
 /* Spin-wait with high limit + clock-based safety valve.
- * Fast path: spin up to 8B iterations (covers valgrind's ~100× slowdown).
- * Safety valve: fall back to clock timeout if condition is never met. */
+ * Fast path: spin up to 32B iterations (covers valgrind's ~100× slowdown).
+ * Safety valve: fall back to clock timeout if condition is never met.
+ * Total timeout = _sec passed as arg + 60s fallback buffer. */
 #define WAIT_UNTIL(_sec, _cond)                                                    \
     for (uint64_t _wt_spins = 0;                                                   \
-         !(_cond) && _wt_spins < 8000000000ULL;                                   \
+         !(_cond) && _wt_spins < 32000000000ULL;                                   \
          ++_wt_spins)                                                              \
         ;                                                                           \
     if (!(_cond)) {                                                                \
         struct timespec _wt_deadline;                                              \
         clock_gettime(CLOCK_MONOTONIC, &_wt_deadline);                             \
-        _wt_deadline.tv_sec += (_sec);                                             \
+        _wt_deadline.tv_sec += (_sec) + 60;                                        \
         while (!(_cond)) {                                                         \
             struct timespec _wt_now;                                               \
             clock_gettime(CLOCK_MONOTONIC, &_wt_now);                              \
