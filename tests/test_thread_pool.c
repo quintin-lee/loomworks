@@ -22,15 +22,28 @@
 #define VGI(n) (n)
 #endif
 
-/* Spin-wait with a monotonic clock timeout (avoids valgrind/slow-env spin-out).
- * Uses a short timeout so tests fail fast rather than hanging under valgrind. */
+/* Spin-wait with high limit + clock-based safety valve.
+ * Fast path: spin up to 8B iterations (covers valgrind's ~100× slowdown).
+ * Safety valve: fall back to clock timeout if condition is never met. */
 #define WAIT_UNTIL(_sec, _cond)                                                    \
-    for (struct timespec _wt_deadline;                                             \
-         clock_gettime(CLOCK_MONOTONIC, &_wt_deadline) == 0 &&                    \
-               (_wt_deadline.tv_sec += (_sec), true) &&                          \
-         !(_cond);                                                                \
-         sched_yield())                                                           \
-        ;
+    for (uint64_t _wt_spins = 0;                                                   \
+         !(_cond) && _wt_spins < 8000000000ULL;                                   \
+         ++_wt_spins)                                                              \
+        ;                                                                           \
+    if (!(_cond)) {                                                                \
+        struct timespec _wt_deadline;                                              \
+        clock_gettime(CLOCK_MONOTONIC, &_wt_deadline);                             \
+        _wt_deadline.tv_sec += (_sec);                                             \
+        while (!(_cond)) {                                                         \
+            struct timespec _wt_now;                                               \
+            clock_gettime(CLOCK_MONOTONIC, &_wt_now);                              \
+            if (_wt_now.tv_sec > _wt_deadline.tv_sec ||                           \
+                (_wt_now.tv_sec == _wt_deadline.tv_sec &&                         \
+                 _wt_now.tv_nsec >= _wt_deadline.tv_nsec))                        \
+                break;                                                             \
+            sched_yield();                                                         \
+        }                                                                          \
+    }
 
 static int g_passes   = 0;
 static int g_failures = 0;
