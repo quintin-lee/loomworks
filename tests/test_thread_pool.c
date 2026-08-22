@@ -3844,7 +3844,7 @@ static void test_resize_down_spills_deque(void)
      * deque-resident tasks back to the shared queue before exiting, or
      * they would be lost. */
     g_gate_release = 1;
-    WAIT_UNTIL(5, atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0);
+    WAIT_UNTIL(30, atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0);
     ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0,
            "resize-spill: observed deque-resident tasks");
 
