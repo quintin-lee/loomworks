@@ -14,6 +14,15 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Spin-wait with a monotonic clock timeout (avoids valgrind/slow-env spin-out). */
+#define WAIT_UNTIL(_sec, _cond)                                                    \
+    for (struct timespec _wt_deadline;                                             \
+         clock_gettime(CLOCK_MONOTONIC, &_wt_deadline) == 0 &&                    \
+               (_wt_deadline.tv_sec += (_sec), true) &&                          \
+         !(_cond);                                                                \
+         sched_yield())                                                           \
+        ;
+
 static int g_passes   = 0;
 static int g_failures = 0;
 
@@ -3768,13 +3777,9 @@ static void test_shutdown_drains_deque(void)
      * is then called with deque-resident work that MUST be drained (the
      * old exit check only knew queue_len/ring_count and would hang or
      * drop them). */
-    uint64_t spins = 0;
-    while (atomic_load_explicit(&pool->deques[0].len, memory_order_relaxed) == 0) {
-        if (++spins > 2000000000ULL) {
-            break; /* safety valve — never spin forever */
-        }
-    }
-    ASSERT(spins < 2000000000ULL, "shutdown-drain: observed deque-resident tasks");
+    WAIT_UNTIL(30, atomic_load_explicit(&pool->deques[0].len, memory_order_relaxed) > 0);
+    ASSERT(atomic_load_explicit(&pool->deques[0].len, memory_order_relaxed) > 0,
+           "shutdown-drain: observed deque-resident tasks");
 
     loom_pool_shutdown(pool); /* must drain deque then exit, not hang */
 
@@ -3803,13 +3808,8 @@ static void test_resize_down_spills_deque(void)
         ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK,
                "resize-spill: submit gate");
     }
-    uint64_t spins = 0;
-    while (g_gate_parked < 2) {
-        if (++spins > 2000000000ULL) {
-            break; /* safety valve — never spin forever */
-        }
-    }
-    ASSERT(spins < 2000000000ULL, "resize-spill: both workers parked");
+    WAIT_UNTIL(30, g_gate_parked >= 2);
+    ASSERT(g_gate_parked >= 2, "resize-spill: both workers parked");
 
     int counter = 0;
     for (int i = 0; i < 300; i++) {
@@ -3822,13 +3822,9 @@ static void test_resize_down_spills_deque(void)
      * deque-resident tasks back to the shared queue before exiting, or
      * they would be lost. */
     g_gate_release = 1;
-    spins          = 0;
-    while (atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0) {
-        if (++spins > 2000000000ULL) {
-            break; /* safety valve — never spin forever */
-        }
-    }
-    ASSERT(spins < 2000000000ULL, "resize-spill: observed deque-resident tasks");
+    WAIT_UNTIL(30, atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0);
+    ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0,
+           "resize-spill: observed deque-resident tasks");
 
     ASSERT(loom_pool_resize(pool, 1) == LOOMWORKS_OK, "resize-spill: resize to 1");
     loom_pool_shutdown(pool);
@@ -3862,13 +3858,8 @@ static void test_steal_trigger(void)
      * ring below fills completely and nothing drains. */
     ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "steal: park worker 1");
     ASSERT(loom_pool_submit(pool, gate_task2, NULL, NULL) == LOOMWORKS_OK, "steal: park worker 2");
-    uint64_t spins = 0;
-    while (g_gate_parked < 1 || g_gate_parked2 < 1) {
-        if (++spins > 2000000000ULL) {
-            break;
-        }
-    }
-    ASSERT(spins < 2000000000ULL, "steal: both workers parked");
+    WAIT_UNTIL(30, g_gate_parked >= 1 && g_gate_parked2 >= 1);
+    ASSERT(g_gate_parked >= 1 && g_gate_parked2 >= 1, "steal: both workers parked");
 
     /* Flood the ring while both workers are frozen. */
     for (int i = 0; i < STEAL_MAX_TASKS; i++) {
