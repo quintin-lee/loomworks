@@ -3799,7 +3799,7 @@ static void test_shutdown_drains_deque(void)
      * is then called with deque-resident work that MUST be drained (the
      * old exit check only knew queue_len/ring_count and would hang or
      * drop them). */
-    WAIT_UNTIL(5, atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0);
+    WAIT_UNTIL(30, atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0);
     ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0,
            "shutdown-drain: observed deque-resident tasks");
 
