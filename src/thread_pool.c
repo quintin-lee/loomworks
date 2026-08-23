@@ -2855,12 +2855,29 @@ double loom_pool_utilization(const loom_thread_pool_t *pool)
  *  loom_pool_broadcast — wake all workers blocked on the pool wait.
  *
  *  Safe to call from any thread; acquires the lock briefly.
+ *  Rate-limited to 1 MHz to prevent excessive sem_post storms from
+ *  tight caller loops (DoS defense-in-depth).
  * ================================================================ */
 void loom_pool_broadcast(loom_thread_pool_t *pool)
 {
     if (!pool) {
         return;
     }
+    static struct timespec s_last_broadcast = {0, 0};
+    static pthread_mutex_t s_bcast_lock     = PTHREAD_MUTEX_INITIALIZER;
+    struct timespec         now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    pthread_mutex_lock(&s_bcast_lock);
+    if (now.tv_sec == s_last_broadcast.tv_sec && now.tv_nsec < s_last_broadcast.tv_nsec + 1000) {
+        pthread_mutex_unlock(&s_bcast_lock);
+        return;
+    }
+    if (now.tv_sec > s_last_broadcast.tv_sec) {
+        s_last_broadcast = now;
+    } else {
+        s_last_broadcast.tv_nsec = now.tv_nsec;
+    }
+    pthread_mutex_unlock(&s_bcast_lock);
     pthread_mutex_lock(&pool->lock);
     for (uint32_t i = 0; i < pool->worker_count; i++) {
         sem_post(&pool->work_sem);
