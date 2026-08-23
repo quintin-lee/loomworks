@@ -60,7 +60,6 @@ static sigjmp_buf                      g_guard_jmp; /* longjmp target for guard 
  * handler was ever installed. */
 static struct sigaction g_prev_segv;
 /* Recursion guard: prevents nested signal handler invocation. */
-static _Thread_local bool g_in_handler = false;
 static struct sigaction   g_prev_bus;
 /* Linked list of all scheduler stacks for atexit cleanup. */
 typedef struct scheduler_stack_node {
@@ -190,9 +189,6 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
      *      (malloc, printf, etc.).
      * _exit() is async-signal-safe and terminates without re-entering
      * user code. The exit code 128+sig follows shell convention. */
-    if (g_in_handler) {
-        _exit(128 + sig);
-    }
     _exit(128 + sig);
 }
 
