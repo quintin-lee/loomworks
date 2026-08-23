@@ -2184,6 +2184,23 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
             }
         }
     }
+    /* Coroutine fast path: a sleeping pool coroutine task lives in the
+     * timer heap (removed from the lane at its worker's dequeue), so
+     * neither the cancel index nor the lane buckets can find it.  Mark
+     * it cancelled here; the timer thread will push a ready node at its
+     * deadline and Step C0 will terminate it. */
+    pthread_mutex_lock(&pool->timer_lock);
+    for (size_t ti = 0; ti < pool->timer_len; ti++) {
+        loom_task_t *task = (loom_task_t *)pool->timer_heap[ti].task;
+        if (task != NULL && task->user_data == data) {
+            atomic_store_explicit(&task->cancelled, true, memory_order_release);
+            pthread_mutex_unlock(&pool->timer_lock);
+            pthread_mutex_unlock(&pool->lock);
+            metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+            return LOOMWORKS_OK;
+        }
+    }
+    pthread_mutex_unlock(&pool->timer_lock);
     /* Walk every bucket; the match set is expected to be tiny. */
     for (int b = 0; b < 256; b++) {
         loom_task_t *prev = NULL;
