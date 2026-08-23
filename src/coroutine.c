@@ -54,6 +54,11 @@ static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
 static sigjmp_buf                      g_guard_jmp; /* longjmp target for guard violations */
+/* Guards install/uninstall against concurrent sigaction calls from
+ * different threads.  The relaxed fast-path read on g_guard_installed
+ * avoids the mutex on every resume(); the mutex only serializes the
+ * actual sigaction system call. */
+static pthread_mutex_t                 g_handler_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Prior SIGSEGV/SIGBUS dispositions, saved on first install so they can be
  * chained to: uninstall restores them and a fault that is not on a coroutine
  * guard page is re-raised through them.  Zero-init means "SIG_DFL" if no
@@ -194,8 +199,15 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
 
 void loom_coro_install_guard_handler(void)
 {
-    /* Idempotent, process-global: installing once covers every thread. */
+    /* Fast path: already installed, no lock needed. */
     if (atomic_load_explicit(&g_guard_installed, memory_order_relaxed)) {
+        return;
+    }
+    /* Serialize the sigaction call so concurrent install/uninstall from
+     * different threads cannot race and corrupt the handler state. */
+    pthread_mutex_lock(&g_handler_lock);
+    if (atomic_load_explicit(&g_guard_installed, memory_order_relaxed)) {
+        pthread_mutex_unlock(&g_handler_lock);
         return;
     }
     struct sigaction sa;
@@ -204,21 +216,27 @@ void loom_coro_install_guard_handler(void)
     sa.sa_flags = SA_SIGINFO;
     if (sigaction(SIGSEGV, &sa, &g_prev_segv) != 0 || sigaction(SIGBUS, &sa, &g_prev_bus) != 0) {
         fprintf(stderr, "loomworks: sigaction failed: %s\n", strerror(errno));
+        pthread_mutex_unlock(&g_handler_lock);
         return;
     }
-    atomic_store_explicit(&g_guard_installed, true, memory_order_relaxed);
+    atomic_store_explicit(&g_guard_installed, true, memory_order_release);
+    pthread_mutex_unlock(&g_handler_lock);
 }
 
 void loom_coro_uninstall_guard_handler(void)
 {
-    /* Restore the handlers that were installed before us, so embedding
-     * applications keep their own SIGSEGV/SIGBUS handling. */
     if (!atomic_load_explicit(&g_guard_installed, memory_order_relaxed)) {
+        return;
+    }
+    pthread_mutex_lock(&g_handler_lock);
+    if (!atomic_load_explicit(&g_guard_installed, memory_order_relaxed)) {
+        pthread_mutex_unlock(&g_handler_lock);
         return;
     }
     sigaction(SIGSEGV, &g_prev_segv, NULL);
     sigaction(SIGBUS, &g_prev_bus, NULL);
-    atomic_store_explicit(&g_guard_installed, false, memory_order_relaxed);
+    atomic_store_explicit(&g_guard_installed, false, memory_order_release);
+    pthread_mutex_unlock(&g_handler_lock);
 }
 
 /* ================================================================
