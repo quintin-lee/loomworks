@@ -104,7 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pipeline/sequence-number guidance for callers needing strict ordering;
   the public headers make no FIFO/order promise.
 - **Assertion counts synchronized (R10)**: README and CHANGELOG now reflect
-  the current suite — ~20771 pool + ~5616 coroutine + ~78759 integration +
+  the current suite — ~21874 pool + ~5627 coroutine + ~79288 integration +
   ~200014 ctx_smoke.
 
 ### Fixed
@@ -193,7 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SIGSEGV/SIGBUS signal handler for safe stack overflow recovery
 - Per-thread scheduler context (`_Thread_local`) for cross-thread safety
 - Cache-line aligned structures to prevent false sharing
-- Comprehensive test suite: ~12604 pool assertions, ~5611 coroutine assertions, ~78763 integration assertions
+- Comprehensive test suite: ~21874 pool assertions, ~5627 coroutine assertions, ~79288 integration assertions
 - Full API documentation in `docs/api-reference.md`
 - Architecture documentation in `docs/architecture.md`
 - Design decisions documentation in `docs/design-decisions.md`
