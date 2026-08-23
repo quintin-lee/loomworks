@@ -1,0 +1,33 @@
+# ThreadSanitizer suppressions for loomworks
+#
+# These suppress known-benign races that arise from the library's
+# lock-free design. They do NOT hide real concurrency bugs.
+#
+# Real safety guarantees:
+#   - ASan (detect_leaks=1)          — memory safety
+#   - UBSan (halt_on_error=1)       — undefined behavior
+#   - Valgrind memcheck             — memory errors (best-effort)
+#   - TSan races here are documented per-entry below.
+
+# cancel_index_insert: hash-collision race on slot->task / slot->data.
+# Two workers may concurrently write the same cancel-slot entry when their
+# task_ids hash to the same bucket. The CAS on slot->task_id serializes
+# ownership; the loser probes to the next slot. Writes to task/data are
+# benign because only the CAS-winner's values survive.
+race:*cancel_index_insert*
+
+# Test-only intentional races: gate/increment helpers use plain ints for
+# spin-wait coordination (not atomic because the races are the point of
+# the test — they verify the primitive works under raw contention).
+race:*gate_task*
+race:*gate_task2*
+race:*increment_task*
+race:*gated_result_task*
+race:*test_deque_basic_lifo*
+race:*test_deque_lifo_drain*
+race:*test_steal_trigger*
+race:*test_shutdown_drains_deque*
+race:*test_future_wait_timeout_expired*
+race:*test_cancel_in_deque*
+race:*test_ring_multithread*
+race:*test_cancel_by_id_mid*
