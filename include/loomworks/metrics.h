@@ -34,6 +34,16 @@ typedef enum {
  * @param event      The event type.
  * @param pool       The pool that generated the event.
  * @param user_data  Opaque pointer provided at registration time.
+ *
+ * @warning The callback runs synchronously on the worker thread that
+ * fired the event, with no pool lock held.  It must be non-blocking
+ * and must NOT call any loomworks API that touches the same pool
+ * (submit, cancel, shutdown, destroy, wait, resize, broadcast, or
+ * any function that acquires pool->lock).  Doing so deadlocks the
+ * worker: the callback blocks waiting for a condition that can only
+ * be satisfied by the same blocked worker.  If the callback needs
+ * to forward events, post them to an external lock-free queue or
+ * a dedicated dispatcher thread.
  */
 typedef void (*loom_metric_fn)(loom_metric_event_t       event,
                                const loom_thread_pool_t *pool,

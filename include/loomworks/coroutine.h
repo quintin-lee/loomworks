@@ -60,6 +60,7 @@ typedef enum {
     LOOMWORKS_CORO_ERR_INVALID,  /**< Invalid coroutine handle or state. */
     LOOMWORKS_CORO_ERR_GUARD,    /**< Guard page violation detected. */
     LOOMWORKS_CORO_ERR_RUNNING,  /**< Operation invalid in current state. */
+    LOOMWORKS_CORO_ERR_TIMER,    /**< Timer registration failed (sleep not tracked). */
 } loom_coro_result_t;
 
 /**

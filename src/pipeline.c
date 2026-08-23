@@ -32,6 +32,18 @@
 #include <string.h>
 #include <time.h>
 
+/* Monotonic clock attribute for the pipeline condvar.  Matches the
+ * CLOCK_MONOTONIC deadline used in loom_pc_submit's timedwait; mixing
+ * a realtime condvar with monotonic deadlines is undefined behaviour. */
+static pthread_once_t     g_pc_condattr_once = PTHREAD_ONCE_INIT;
+static pthread_condattr_t g_pc_condattr_mono;
+
+static void init_pc_condattr(void)
+{
+    pthread_condattr_init(&g_pc_condattr_mono);
+    pthread_condattr_setclock(&g_pc_condattr_mono, CLOCK_MONOTONIC);
+}
+
 /* Intrusive singly-linked queue node: data is the caller's opaque payload,
  * next chains the FIFO.  Nodes are allocated per submit and freed either by
  * the consuming thread (loom_pc_take) or the drain loop in destroy(). */
@@ -136,7 +148,8 @@ loom_result_t loom_pc_create_ex(uint32_t worker_count,
         free(p);
         return LOOMWORKS_ERR_ALLOC;
     }
-    if (pthread_cond_init(&p->cond, NULL) != 0) {
+    pthread_once(&g_pc_condattr_once, init_pc_condattr);
+    if (pthread_cond_init(&p->cond, &g_pc_condattr_mono) != 0) {
         pthread_mutex_destroy(&p->lock);
         free(p);
         return LOOMWORKS_ERR_ALLOC;
@@ -228,11 +241,12 @@ loom_result_t loom_pc_submit(loom_pc_t *pc, void *item)
     }
     /* Bounded mode: if the queue is full, wait up to 60 s for a consumer to
      * drain.  The item is pre-allocated so we never allocate while holding
-     * the lock.  deadline is computed once from CLOCK_REALTIME (the condvar
-     * clock); timedwait may return spuriously, hence the while loop. */
+     * the lock.  deadline is computed from CLOCK_MONOTONIC so NTP jumps
+     * cannot shorten or extend the 60 s window; timedwait may return
+     * spuriously, hence the while loop. */
     if (pc->capacity > 0 && pc->len >= pc->capacity) {
         struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
         deadline.tv_sec += 60;
         while (pc->len >= pc->capacity && !pc->shutdown) {
             int rc = pthread_cond_timedwait(&pc->cond, &pc->lock, &deadline);

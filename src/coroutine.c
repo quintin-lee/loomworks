@@ -744,6 +744,8 @@ const char *loom_coro_result_str(loom_coro_result_t result)
         return "Guard page violation";
     case LOOMWORKS_CORO_ERR_RUNNING:
         return "Invalid state";
+    case LOOMWORKS_CORO_ERR_TIMER:
+        return "Timer registration failed";
     default:
         return "Unknown";
     }

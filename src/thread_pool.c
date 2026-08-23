@@ -72,7 +72,7 @@ static void          cancel_index_remove(loom_thread_pool_t *pool, loom_task_t *
 static void          future_mark_cancelled(future_task_ctx_t *ctx);
 static void         *timer_thread_fn(void *arg);
 static loom_result_t ensure_timer_thread(loom_thread_pool_t *pool);
-static void          coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns);
+static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns);
 
 /* ================================================================
  *  pool_init — initialise locks, defaults, and worker thread array
@@ -568,13 +568,17 @@ static loom_result_t ensure_timer_thread(loom_thread_pool_t *pool)
 
 /* Register a sleeping pool coroutine with the timer heap.  Invoked from
  * inside the coroutine itself (via loom_coro_sleep_until); ctx is the
- * coroutine, whose sleep_reg_ctx points back at the pool. */
-static void coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns)
+ * coroutine, whose sleep_reg_ctx points back at the pool.
+ *
+ * Returns LOOMWORKS_CORO_OK on success, LOOMWORKS_CORO_ERR_TIMER if the
+ * heap is unrecoverably full.  The caller (loom_coro_sleep_until) marks
+ * the coroutine ERROR on failure so the worker loop cleans it up. */
+static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns)
 {
     struct loom_coroutine *coro = (struct loom_coroutine *)ctx;
     loom_thread_pool_t    *pool = (loom_thread_pool_t *)coro->sleep_reg_ctx;
     if (!pool) {
-        return;
+        return LOOMWORKS_CORO_ERR_INVALID;
     }
     loom_timer_entry_t e;
     e.deadline_ns = deadline_ns;
@@ -584,8 +588,13 @@ static void coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns
     e.task        = coro->task_node;
     pthread_mutex_lock(&pool->timer_lock);
     loom_timer_push(pool, e);
+    if (pool->timer_len == 0 || pool->timer_heap[pool->timer_len - 1].task_id != task_id) {
+        pthread_mutex_unlock(&pool->timer_lock);
+        return LOOMWORKS_CORO_ERR_TIMER;
+    }
     pthread_mutex_unlock(&pool->timer_lock);
     sem_post(&pool->timer_sem);
+    return LOOMWORKS_CORO_OK;
 }
 
 static void *worker_entry(void *arg)

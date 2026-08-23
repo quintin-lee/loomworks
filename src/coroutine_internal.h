@@ -59,7 +59,7 @@ struct loom_coroutine {
     void    *task_node;        /* Pool loom_task_t* carrying this coroutine (NULL = stand-alone). */
     /* Optional pool hook: registers this coroutine's deadline with the pool
      * timer heap. NULL = stand-alone (pure suspension; caller resumes). */
-    void (*sleep_reg)(void *ctx, uint64_t task_id, int64_t deadline_ns);
+    loom_coro_result_t (*sleep_reg)(void *ctx, uint64_t task_id, int64_t deadline_ns);
 
     uint64_t padding[4]; /**< Pad to 64-byte cache-line boundary. */
 };

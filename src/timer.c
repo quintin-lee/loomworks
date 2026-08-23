@@ -47,17 +47,16 @@ static void sift_down(loom_timer_entry_t *h, size_t n, size_t i)
 void loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e)
 {
     if (pool->timer_len == pool->timer_cap) {
-        size_t              cap = pool->timer_cap == 0 ? 64 : pool->timer_cap * 2;
-        loom_timer_entry_t *nh = (loom_timer_entry_t *)realloc(pool->timer_heap, cap * sizeof(*nh));
+        size_t new_cap = pool->timer_cap == 0 ? 64 : pool->timer_cap * 2;
+        loom_timer_entry_t *nh = (loom_timer_entry_t *)realloc(pool->timer_heap, new_cap * sizeof(*nh));
         if (nh == NULL) {
-            /* Timer registration is best-effort: the owner's sem_timedwait
-             * window (worker loop) is a fallback, but with no heap entry the
-             * coroutine may sleep past its deadline until the next wake.
-             * Reserve capacity up-front in pool_init for the common case. */
+            /* Allocation failed: the caller must decide how to handle the
+             * unregistered coroutine.  Returning -1 lets coro_sleep_reg_hook
+             * mark the coroutine ERROR instead of silently dropping it. */
             return;
         }
         pool->timer_heap = nh;
-        pool->timer_cap  = cap;
+        pool->timer_cap  = new_cap;
     }
     pool->timer_heap[pool->timer_len] = e;
     sift_up(pool->timer_heap, pool->timer_len);
