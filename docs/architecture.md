@@ -329,7 +329,7 @@ Main thread                      Coroutine stack
   │  ├─ setjmp(g_guard_jmp)         │
   │  ├─ ensure_scheduler()          │  (alloc + registry append, once)
   │  ├─ save coro->ctx              │
-  │  └─ switch to coroutine stack   │  (asm / ucontext backend)
+  │  └─ switch to coroutine stack   │  (context backend)
   │          ◄───────────────────────  switch to coroutine stack
   │                                  │  coro_entry(coro_ptr)
   │                                  │  ├─ g_current = coro
@@ -394,7 +394,7 @@ is installed idempotently (`_Atomic g_guard_installed`).
 The switch between the scheduler and a coroutine (and back) is performed
 by a context backend selected at compile time. By default, hand-written
 assembly is used on x86-64 (SysV) and aarch64 (AAPCS64); every other
-platform falls back to POSIX ucontext with identical semantics.
+platform falls back to POSIX ucontext.
 
 Swap timing (single-threaded, one stack per party):
 
@@ -420,11 +420,11 @@ state therefore round-trips a yield; full FPU register state does not.
 Trampoline protocol: a freshly made context starts in `ctx_trampoline`,
 which calls `entry_fn(entry_arg)`. When the function returns, control
 switches to the context's link (`set_link`); if there is no link, the
-process calls `exit(EXIT_SUCCESS)` - the same NULL-link behaviour glibc
-exhibits for a `makecontext` function that returns. A coroutine function
-must never `return` to the scheduler frame - returning is the terminal
-transition, and the trampoline always switches away or exits rather than
-returning into a frame that may no longer be on the stack.
+process calls `exit(EXIT_SUCCESS)` — the same NULL-link behaviour the
+trampoline exhibits when the coroutine entry function returns. A coroutine
+function must never `return` to the scheduler frame — returning is the
+terminal transition, and the trampoline always switches away or exits
+rather than returning into a frame that may no longer be on the stack.
 
 ### 3.9 Sleeping & the Pool Timer Thread
 
