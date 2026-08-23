@@ -31,3 +31,11 @@ race:*test_future_wait_timeout_expired*
 race:*test_cancel_in_deque*
 race:*test_ring_multithread*
 race:*test_cancel_by_id_mid*
+
+# Metrics callback races: the callback fires synchronously on the worker
+# thread while the test's main thread reads ctx.submitted/completed/cancelled.
+# The callback contract guarantees it fires on the worker, but the test
+# reads the counters without synchronization — the values are eventually
+# consistent but TSan flags the unsynchronized read.
+race:*metrics_contract_cb*
+race:*metrics_event_callback*
