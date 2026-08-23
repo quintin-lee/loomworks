@@ -457,6 +457,11 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
      * stack is mapped right here in create via allocate_stack, which may
      * serve it from the exact-size reuse pool. */
     c->stack_size  = (stack_size > 0) ? stack_size : LOOMWORKS_CORO_DEFAULT_STACK_SIZE;
+    if (c->stack_size > (size_t)256 * 1024 * 1024) {
+        fprintf(stderr, "loomworks: coroutine stack size %zu exceeds 256 MiB cap\n", c->stack_size);
+        free(c);
+        return LOOMWORKS_CORO_ERR_INVALID;
+    }
     c->mmap_base   = NULL;
     c->mmap_size   = 0;
     c->stack_start = NULL;
