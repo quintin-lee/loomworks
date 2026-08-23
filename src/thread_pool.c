@@ -1895,12 +1895,6 @@ loom_result_t loom_pool_submit_priority(
 }
 
 /* ================================================================
- *  loom_pool_submit_blocking — enqueue with backpressure.
- *
- *  Blocks until there is queue space or the pool shuts down.
- *  Times out after 60 s with LOOMWORKS_ERR_TIMEOUT.
- * ================================================================ */
-/* ================================================================
  *  loom_pool_submit_future_priority — enqueue a priority result task.
  *
  *  Same as loom_pool_submit_future() but accepts an explicit priority.
