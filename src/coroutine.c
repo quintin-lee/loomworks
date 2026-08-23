@@ -182,19 +182,18 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
             }
         }
     }
-    /* Not our guard page ' fall through to the default handler.
-     * We deliberately do NOT chain to the previous handler here because:
-     *   1. Saving/restoring sigactions across signal boundaries is racy.
-     *   2. A re-raised signal could recurse into this handler.
-     *   3. The default handler will produce a normal core dump for debugging.
-     * If we are already inside the handler (nested signal), just exit to
-     * avoid an infinite loop. */
+    /* Not our guard page — terminate the process immediately.
+     * We deliberately do NOT chain to the previous handler because:
+     *   1. Saving/restoring sigactions across a signal boundary is racy.
+     *   2. sigaction/raise are not async-signal-safe and can deadlock
+     *      if the fault interrupted a non-async-signal-safe function
+     *      (malloc, printf, etc.).
+     * _exit() is async-signal-safe and terminates without re-entering
+     * user code. The exit code 128+sig follows shell convention. */
     if (g_in_handler) {
         _exit(128 + sig);
     }
-    g_in_handler = true;
-    sigaction(sig, &(struct sigaction){.sa_handler = SIG_DFL}, NULL);
-    raise(sig);
+    _exit(128 + sig);
 }
 
 void loom_coro_install_guard_handler(void)
