@@ -217,9 +217,10 @@ struct loom_thread_pool {
     uint32_t max_worker_count;     /**< Max capacity of threads array. */
     _Atomic uint64_t next_task_id; /**< Monotonically increasing task ID counter. */
     void            *metrics;      /**< Optional metrics collector (loom_metrics_t*). */
-    /* Inline metrics callback fields to avoid circular dependency */
-    void (*metric_cb)(void *, void *, void *);
-    void *metric_user_data;
+    /* Inline metrics callback — stores loom_metric_fn directly to avoid
+     * union-cast UB.  The callback runs on worker threads under no lock. */
+    loom_metric_fn      metric_cb;
+    void               *metric_user_data;
     /* Shared-memory metrics region (NULL unless a name was configured).
      * Updated synchronously on every metrics_fire() call from the worker
      * thread that fired the event — no lock needed, the counters are

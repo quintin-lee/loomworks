@@ -746,6 +746,7 @@ static void free_all_pooled_stacks(void)
  * coroutine stacks still sitting in the reuse pool. */
 static __attribute__((destructor)) void coro_atexit(void)
 {
+    loom_coro_uninstall_guard_handler();
     free_all_scheduler_stacks();
     free_all_pooled_stacks();
 }

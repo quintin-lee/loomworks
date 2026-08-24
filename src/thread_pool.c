@@ -35,20 +35,6 @@
 #include <unistd.h>
 
 /* ================================================================
- *  Metrics helper — invoke callback if metrics is attached.
- * ================================================================ */
-#define METRICS_CB(pool, event)                                                                    \
-    do {                                                                                           \
-        if ((pool)->metrics) {                                                                     \
-            loom_metric_fn _cb   = ((loom_metrics_t *)(pool)->metrics)->cb;                        \
-            void          *_data = ((loom_metrics_t *)(pool)->metrics)->user_data;                 \
-            if (_cb) {                                                                             \
-                _cb(event, pool, _data);                                                           \
-            }                                                                                      \
-        }                                                                                          \
-    } while (0)
-
-/* ================================================================
  *  Forward declarations
  * ================================================================ */
 
@@ -61,6 +47,7 @@ static void          pool_destroy_internal(loom_thread_pool_t *pool);
 static void         *worker_entry(void *arg);
 static loom_task_t *
 task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority);
+
 void                 task_destroy(loom_thread_pool_t *pool, loom_task_t *task);
 static void          future_task_wrapper(void *arg);
 static bool          lane_has_priority(loom_thread_pool_t *pool, unsigned max_priority);
@@ -104,12 +91,7 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
      * loom_pool_set_metrics_callback() without also creating a
      * loom_metrics_t collector. */
     if (pool->metric_cb) {
-        union {
-            loom_metric_fn f;
-            void (*p)(void *, void *, void *);
-        } u;
-        u.p = pool->metric_cb;
-        u.f(event, pool, pool->metric_user_data);
+        pool->metric_cb(event, pool, pool->metric_user_data);
     }
     /* Always write to shm when available, even without a collector. */
     if (pool->shm && pool->shm_update) {
@@ -133,13 +115,12 @@ static void future_mark_cancelled(future_task_ctx_t *ctx)
 }
 
 /* Smallest power of two >= v (1 when v == 0). */
-static uint64_t next_pow2_u64(uint32_t v)
+static inline uint64_t next_pow2_u64(uint32_t v)
 {
-    uint64_t n = 1;
-    while (n < v) {
-        n <<= 1;
-    }
-    return n;
+    uint64_t n = v;
+    n |= n >> 1; n |= n >> 2; n |= n >> 4;
+    n |= n >> 8; n |= n >> 16; n |= n >> 32;
+    return n + 1;
 }
 
 /* CLOCK_MONOTONIC is immune to wall-clock jumps; all timeout waits in this
@@ -284,23 +265,24 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     /* --- Work-stealing deques (one Chase-Lev deque per worker slot) --- */
     pool->deques = deques_alloc(pool->max_worker_count);
     if (pool->deques != NULL) {
+        uint32_t j;
         bool ok = true;
-        for (uint32_t i = 0; i < pool->max_worker_count; i++) {
-            pool->deques[i].capacity = LOOMWORKS_DEQUE_CAPACITY;
-            pool->deques[i].mask     = LOOMWORKS_DEQUE_CAPACITY - 1;
-            pool->deques[i].bottom   = 0;
-            atomic_store_explicit(&pool->deques[i].top, 0, memory_order_relaxed);
-            atomic_store_explicit(&pool->deques[i].len, 0, memory_order_relaxed);
-            pool->deques[i].slots =
+        for (j = 0; j < pool->max_worker_count; j++) {
+            pool->deques[j].capacity = LOOMWORKS_DEQUE_CAPACITY;
+            pool->deques[j].mask     = LOOMWORKS_DEQUE_CAPACITY - 1;
+            pool->deques[j].bottom   = 0;
+            atomic_store_explicit(&pool->deques[j].top, 0, memory_order_relaxed);
+            atomic_store_explicit(&pool->deques[j].len, 0, memory_order_relaxed);
+            pool->deques[j].slots =
                 (loom_task_t **)calloc(LOOMWORKS_DEQUE_CAPACITY, sizeof(loom_task_t *));
-            if (pool->deques[i].slots == NULL) {
+            if (pool->deques[j].slots == NULL) {
                 ok = false;
                 break;
             }
         }
         if (!ok) {
-            for (uint32_t i = 0; i < pool->max_worker_count; i++) {
-                free((void *)pool->deques[i].slots);
+            for (uint32_t k = 0; k < j; k++) {
+                free((void *)pool->deques[k].slots);
             }
             free(pool->deques);
             pool->deques = NULL; /* lane-only mode */
@@ -463,8 +445,8 @@ static void *timer_thread_fn(void *arg)
         struct timespec abs;
         clock_gettime(CLOCK_MONOTONIC, &abs);
         int64_t now = (int64_t)abs.tv_sec * 1000000000 + (int64_t)abs.tv_nsec;
-        /* Sleep until the earliest deadline, or one second if the heap is
-         * empty (polling fallback — a push may race our peek). */
+        /* Sleep until the earliest deadline.  The caller posts timer_sem
+         * on every push so there is no need for a polling fallback. */
         int64_t deadline = 0;
         bool    has      = false;
         bool    alive    = atomic_load_explicit(&pool->timer_thread_alive, memory_order_acquire);
@@ -482,12 +464,12 @@ static void *timer_thread_fn(void *arg)
             int64_t wait_ns = deadline - now;
             abs.tv_sec += wait_ns / 1000000000;
             abs.tv_nsec = (long)(wait_ns % 1000000000);
-            if (abs.tv_nsec >= 1000000000) {
-                abs.tv_sec += 1;
-                abs.tv_nsec -= 1000000000;
-            }
         } else {
-            abs.tv_sec += 1;
+            /* Heap is empty or all deadlines have passed: wait on the
+             * semaphore — coro_sleep_reg_hook posts it on every push, so
+             * this wakes immediately when the next coroutine sleeps. */
+            abs.tv_sec = 0;
+            abs.tv_nsec = 1000000000ULL; /* 1 s safety net for signals */
         }
         /* sem_timedwait returns EINTR on signals; retry unless shutting
          * down.  A spurious timeout just re-checks the heap. */
@@ -588,14 +570,14 @@ static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64
     e.task        = coro->task_node;
     pthread_mutex_lock(&pool->timer_lock);
     loom_timer_push(pool, e);
-    if (pool->timer_len == 0 || pool->timer_heap[pool->timer_len - 1].task_id != task_id) {
+    if (pool->timer_len == 0 || pool->timer_heap[0].task_id != task_id) {
         pthread_mutex_unlock(&pool->timer_lock);
         return LOOMWORKS_CORO_ERR_TIMER;
     }
     pthread_mutex_unlock(&pool->timer_lock);
     sem_post(&pool->timer_sem);
     return LOOMWORKS_CORO_OK;
-}
+ }
 
 static void *worker_entry(void *arg)
 {
@@ -611,13 +593,15 @@ static void *worker_entry(void *arg)
          * progress even while shutdown is draining.  The coroutine body may
          * call pool APIs, so resume must never run under pool->lock. */
         struct loom_coro_ready *head = NULL;
-        pthread_mutex_lock(&pool->coro_lock);
         if (pool->coro_ready != NULL && pool->coro_ready[idx] != NULL) {
-            head                  = pool->coro_ready[idx];
-            pool->coro_ready[idx] = head->next;
-            head->next            = NULL;
+            pthread_mutex_lock(&pool->coro_lock);
+            if (pool->coro_ready[idx] != NULL) {
+                head                  = pool->coro_ready[idx];
+                pool->coro_ready[idx] = head->next;
+                head->next            = NULL;
+            }
+            pthread_mutex_unlock(&pool->coro_lock);
         }
-        pthread_mutex_unlock(&pool->coro_lock);
         if (head != NULL) {
             pthread_mutex_unlock(&pool->lock);
             loom_coroutine_t *coro  = head->coro;
@@ -2435,12 +2419,7 @@ void loom_pool_set_metrics_callback(loom_thread_pool_t *pool, loom_metric_fn cb,
         pool->metric_user_data = NULL;
         return;
     }
-    union {
-        loom_metric_fn f;
-        void (*p)(void *, void *, void *);
-    } u;
-    u.f                    = cb;
-    pool->metric_cb        = u.p;
+    pool->metric_cb        = cb;
     pool->metric_user_data = user_data;
 }
 
