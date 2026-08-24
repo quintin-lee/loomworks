@@ -57,8 +57,8 @@ typedef struct loom_task {
  * producer pos"; seq == pos+1 is "full"; seq == pos+ring_size is "released
  * by the consumer at pos" (free for the producer at pos+ring_size). */
 typedef struct ring_cell {
-    _Atomic uint64_t       seq;  /* position-relative sequence (see plan) */
-    _Atomic(loom_task_t *) task; /* stable while in the ring */
+    _Atomic uint64_t       seq;  /* release on publish; acquire on consume; canonical Vyukov protocol */
+    _Atomic(loom_task_t *) task; /* written only by producer; read by consumers after seq check */
 } ring_cell_t;
 
 /* Cancel index slot — open addressing, linear probe, hash = id & (cap-1).
