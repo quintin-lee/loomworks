@@ -25,6 +25,7 @@
 #include "loomworks/metrics.h"
 #include "loomworks/metrics_shm.h"
 #include "thread_pool_internal.h"
+#include "loomworks/thread_pool_health.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -2881,4 +2882,44 @@ void loom_pool_broadcast(loom_thread_pool_t *pool)
         sem_post(&pool->work_sem);
     }
     pthread_mutex_unlock(&pool->lock);
+}
+
+/* ================================================================
+ *  Health check — synchronous sampling of pool state
+ * ================================================================ */
+loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool,
+                                       loom_health_status_t *out)
+{
+    if (!pool || !out) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+
+    pthread_mutex_lock(&pool->lock);
+    uint32_t wc = pool->worker_count;
+    uint32_t ac = atomic_load_explicit(&pool->active_workers,
+                                        memory_order_relaxed);
+    uint32_t pc = atomic_load_explicit(&pool->queue_len,
+                                        memory_order_relaxed);
+
+    uint32_t abnormal = 0;
+    for (uint32_t i = 0; i < pool->max_worker_count; i++) {
+        if (atomic_load_explicit(&pool->thread_alive[i],
+                                 memory_order_relaxed) &&
+            !atomic_load_explicit(&pool->thread_clean_exit[i],
+                                  memory_order_relaxed)) {
+            abnormal++;
+        }
+    }
+    pthread_mutex_unlock(&pool->lock);
+
+    double util = (wc > 0) ? (double)ac / (double)wc : 0.0;
+
+    out->worker_count     = wc;
+    out->active_count     = ac;
+    out->pending_count    = pc;
+    out->abnormal_workers = abnormal;
+    out->uptime_ns        = 0;
+    out->utilization      = util;
+
+    return LOOMWORKS_OK;
 }
