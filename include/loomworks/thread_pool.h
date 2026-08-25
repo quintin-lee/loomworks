@@ -285,6 +285,11 @@ double loom_pool_utilization(loom_thread_pool_t *pool);
 void     loom_pool_broadcast(loom_thread_pool_t *pool);
 void     loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
 uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool);
+void     loom_pool_set_backpressure_config(loom_thread_pool_t               *pool,
+                                           const loom_backpressure_config_t *cfg);
+void     loom_pool_set_backpressure_callback(loom_thread_pool_t  *pool,
+                                             loom_backpressure_fn cb,
+                                             void                *ctx);
 
 /**
  * @brief Cancel a task that is still in the queue (not yet started).

@@ -24,6 +24,7 @@
 #include "loomworks/coroutine.h"
 #include "loomworks/metrics.h"
 #include "loomworks/metrics_shm.h"
+#include "loomworks/thread_pool_backpressure.h"
 #include "loomworks/thread_pool_health.h"
 #include "thread_pool_internal.h"
 
@@ -2969,7 +2970,7 @@ uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool)
     if (!pool) {
         return 0;
     }
-    pthread_mutex_lock(&pool->lock);
+    pthread_mutex_lock((pthread_mutex_t *)&pool->lock);
     uint32_t count = 0;
     for (uint32_t i = 0; i < pool->worker_count; i++) {
         bool alive = atomic_load_explicit(&pool->thread_alive[i], memory_order_relaxed);
@@ -2978,7 +2979,7 @@ uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool)
             count++;
         }
     }
-    pthread_mutex_unlock(&pool->lock);
+    pthread_mutex_unlock((pthread_mutex_t *)&pool->lock);
     return count;
 }
 
@@ -2988,6 +2989,48 @@ _Atomic long g_fault_sigsegv_arm = 0;
 
 {
     atomic_store_explicit(&g_fault_sigsegv_arm, n, memory_order_relaxed);
+}
+
+/* ================================================================
+ *  Backpressure — queue depth monitoring and callback
+ * ================================================================ */
+void loom_pool_set_backpressure_config(loom_thread_pool_t               *pool,
+                                       const loom_backpressure_config_t *cfg)
+{
+    if (!pool) {
+        return;
+    }
+    if (cfg) {
+        pool->bp_queue_warn_ratio = cfg->queue_depth_warn_ratio;
+        pool->bp_queue_timeout_ns = cfg->queue_wait_timeout_ns;
+    } else {
+        pool->bp_queue_warn_ratio = 0.8;
+        pool->bp_queue_timeout_ns = 60000000000LL; /* 60s */
+    }
+}
+
+void loom_pool_set_backpressure_callback(loom_thread_pool_t  *pool,
+                                         loom_backpressure_fn cb,
+                                         void                *ctx)
+{
+    if (!pool) {
+        return;
+    }
+    pool->bp_callback     = cb;
+    pool->bp_callback_ctx = ctx;
+    atomic_store_explicit(&pool->bp_callback_throttle, false, memory_order_release);
+}
+
+static void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event)
+{
+    if (!pool || !pool->bp_callback) {
+        return;
+    }
+    if (atomic_load_explicit(&pool->bp_callback_throttle, memory_order_relaxed)) {
+        return;
+    }
+    atomic_store_explicit(&pool->bp_callback_throttle, true, memory_order_release);
+    pool->bp_callback(pool->bp_callback_ctx, event);
 }
 
 /* ================================================================
