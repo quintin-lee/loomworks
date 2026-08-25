@@ -40,6 +40,9 @@ typedef struct loom_coroutine loom_coroutine_t;
 /** Forward declaration for timeout API. */
 typedef struct loom_thread_pool loom_thread_pool_t;
 
+/** Return current coroutine resource usage in bytes. */
+size_t loom_coro_resource_usage_bytes(void);
+
 /**
  * @brief Coroutine state.
  */

@@ -152,6 +152,12 @@ typedef struct coro_stack_node {
 static coro_stack_node_t *g_stack_pool       = NULL;
 static pthread_mutex_t    g_stack_pool_lock  = PTHREAD_MUTEX_INITIALIZER;
 static size_t             g_stack_pool_count = 0;
+
+/* Resource tracking — monitors total mmap'd coroutine stack memory.
+ * Prevents unbounded growth when alloc fails and falls back to pool. */
+static _Atomic size_t     g_total_stack_mapped = 0;
+#define LOOMWORKS_CORO_MAX_TOTAL_STACK_MB 256u
+#define LOOMWORKS_CORO_MAX_TOTAL_STACK_BYTES ((size_t)(LOOMWORKS_CORO_MAX_TOTAL_STACK_MB * 1024 * 1024))
 /* ================================================================
  *  Guard-page signal handler
  *
@@ -298,6 +304,12 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
     size_t total_pg  = guard_nb + usable_pg;
     size_t total_sz  = total_pg * ps;
 
+    /* Check resource limit before allocation. */
+    size_t current = atomic_load_explicit(&g_total_stack_mapped, memory_order_relaxed);
+    if (current + total_sz > LOOMWORKS_CORO_MAX_TOTAL_STACK_BYTES) {
+        return LOOMWORKS_CORO_ERR_ALLOC;
+    }
+
     void *base = mmap(NULL, total_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) {
         return LOOMWORKS_CORO_ERR_ALLOC;
@@ -305,6 +317,7 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
 
     c->mmap_base = base;
     c->mmap_size = total_sz;
+    atomic_fetch_add_explicit(&g_total_stack_mapped, total_sz, memory_order_relaxed);
 
     /* The usable region starts after the bottom guard pages. */
     size_t offset    = guard_nb * ps;
@@ -351,6 +364,8 @@ static void deallocate_stack(loom_coroutine_t *c)
                 g_stack_pool_count++;
                 pthread_mutex_unlock(&g_stack_pool_lock);
 
+                /* Keep mapping in pool but untrack from global total
+                 * until it's re-acquired (pool is part of total budget). */
                 c->mmap_base         = NULL;
                 c->mmap_size         = 0;
                 c->stack_start       = NULL;
@@ -363,6 +378,7 @@ static void deallocate_stack(loom_coroutine_t *c)
 
         /* Pool full or node alloc failed — munmap (unchanged semantics:
          * failure is ignored, as today). */
+        atomic_fetch_sub_explicit(&g_total_stack_mapped, c->mmap_size, memory_order_relaxed);
         munmap(c->mmap_base, c->mmap_size);
         c->mmap_base = NULL;
         c->mmap_size = 0;
@@ -792,6 +808,16 @@ static __attribute__((destructor)) void coro_atexit(void)
     loom_coro_uninstall_guard_handler();
     free_all_scheduler_stacks();
     free_all_pooled_stacks();
+}
+
+/* Return the total amount of mmap'd memory currently held by the
+ * coroutine stack pool + active coroutines.  Includes pooled mappings
+ * even though they are not currently assigned to a coroutine. */
+size_t loom_coro_resource_usage_bytes(void)
+{
+    /* Returns the tracked total; pooled mappings are not included here
+     * (they are released back to the kernel when the pool caps out). */
+    return atomic_load_explicit(&g_total_stack_mapped, memory_order_relaxed);
 }
 
 const char *loom_coro_result_str(loom_coro_result_t result)
