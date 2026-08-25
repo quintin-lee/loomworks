@@ -5,6 +5,7 @@
 #include "loomworks/metrics.h"     /* loom_metric_event_t for shm_write_fn */
 #include "loomworks/metrics_shm.h" /* loom_metrics_shm_t for shm attach */
 #include "loomworks/thread_pool.h"
+#include "loomworks/thread_pool_backpressure.h"
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdatomic.h>

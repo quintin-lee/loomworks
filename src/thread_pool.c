@@ -2816,7 +2816,7 @@ uint32_t loom_pool_worker_count(loom_thread_pool_t *pool)
  *  Acquires the lock briefly for a consistent snapshot.  Returns 0
  *  when @p pool is NULL.
  * ================================================================ */
-uint32_t loom_pool_pending_count(loom_thread_pool_t *pool)
+uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool)
 {
     if (!pool) {
         return 0;
@@ -3017,7 +3017,7 @@ void loom_pool_set_backpressure_callback(loom_thread_pool_t  *pool,
     atomic_store_explicit(&pool->bp_callback_throttle, false, memory_order_release);
 }
 
-static void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event)
+void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event)
 {
     if (!pool || !pool->bp_callback) {
         return;

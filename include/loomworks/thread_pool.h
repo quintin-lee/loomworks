@@ -248,7 +248,7 @@ uint32_t loom_pool_worker_count(loom_thread_pool_t *pool);
  * @param pool  The pool handle.
  * @return      Pending task count, or 0 if pool is invalid.
  */
-uint32_t loom_pool_pending_count(loom_thread_pool_t *pool);
+uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool);
 
 /**
  * @brief Get the number of workers currently executing a task.
