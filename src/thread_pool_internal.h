@@ -229,6 +229,7 @@ struct loom_thread_pool {
     loom_backpressure_fn bp_callback;         /* NULL = no callback */
     void                *bp_callback_ctx;
     _Atomic bool         bp_callback_throttle; /* prevent spam */
+    int64_t              coro_timeout_ns;    /*< Per-coroutine execution timeout (0 = disabled). */
     _Atomic uint64_t     next_task_id;         /**< Monotonically increasing task ID counter. */
     void                *metrics;              /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback — stores loom_metric_fn directly to avoid

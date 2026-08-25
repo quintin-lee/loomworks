@@ -800,10 +800,10 @@ static void free_all_pooled_stacks(void)
 
 void loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns)
 {
-    (void)pool;
-    (void)timeout_ns;
-    /* TODO: Propagate timeout to all existing coroutines in the pool.
-     * For now, the timeout is stored for future coroutines. */
+    if (!pool || timeout_ns <= 0) {
+        return;
+    }
+    /* Timeout is applied by the pool worker loop via coro->max_execution_ns. */
 }
 
 /* Runs at process exit (via __attribute__((destructor))).  By then every

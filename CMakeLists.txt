@@ -137,7 +137,6 @@ set_tests_properties(RuntimeTests PROPERTIES TIMEOUT 120)
 
 add_executable(example_pipeline examples/pipeline_demo.c)
 target_link_libraries(example_pipeline PRIVATE loomworks_static)
-target_link_libraries(example_pipeline PRIVATE loomworks_static)
 
 add_subdirectory(examples)
 

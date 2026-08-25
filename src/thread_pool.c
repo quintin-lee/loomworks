@@ -62,6 +62,7 @@ static void          future_mark_cancelled(future_task_ctx_t *ctx);
 static void         *timer_thread_fn(void *arg);
 static loom_result_t ensure_timer_thread(loom_thread_pool_t *pool);
 static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns);
+static void          fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event);
 
 /* ================================================================
  *  pool_init — initialise locks, defaults, and worker thread array
@@ -1007,8 +1008,10 @@ static void *worker_entry(void *arg)
                 fn(data);
                 struct timespec ts_end;
                 clock_gettime(CLOCK_MONOTONIC, &ts_end);
-                uint64_t latency_ns = (uint64_t)(ts_end.tv_sec - ts_start.tv_sec) * 1000000000u +
-                                      (uint64_t)(ts_end.tv_nsec - ts_start.tv_nsec);
+                int64_t sec_diff = (int64_t)ts_end.tv_sec - (int64_t)ts_start.tv_sec;
+                int64_t nsec_diff = (int64_t)ts_end.tv_nsec - (int64_t)ts_start.tv_nsec;
+                if (nsec_diff < 0) { sec_diff--; nsec_diff += 1000000000; }
+                uint64_t latency_ns = (uint64_t)(sec_diff * 1000000000LL + nsec_diff);
                 loom_metrics_record_latency((loom_metrics_t *)pool->metrics, latency_ns);
             } else {
                 fn(data);
@@ -1743,6 +1746,24 @@ static loom_result_t enqueue_task(loom_thread_pool_t *pool,
             }
         } else {
             return LOOMWORKS_ERR_INVALID;
+        }
+    }
+    /* Fire a backpressure hint when the queue exceeds the warn threshold.
+     * Only one callback per 60s window thanks to the throttle flag. */
+    if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 &&
+        pool->queue_capacity != 0) {
+        uint64_t warn = (uint64_t)((double)pool->queue_capacity * pool->bp_queue_warn_ratio);
+        if (pool->queue_len >= warn) {
+            fire_backpressure(pool, LOOM_BACKPRESSURE_QUEUE_HIGH);
+        }
+    }
+    /* Fire a backpressure hint when the queue exceeds the warn threshold.
+     * Only one callback per 60s window thanks to the throttle flag. */
+    if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 &&
+        pool->queue_capacity != 0) {
+        uint64_t warn = (uint64_t)((double)pool->queue_capacity * pool->bp_queue_warn_ratio);
+        if (pool->queue_len >= warn) {
+            fire_backpressure(pool, LOOM_BACKPRESSURE_QUEUE_HIGH);
         }
     }
     /* NORMAL tasks take the ring only when per-worker deques exist — the
@@ -2555,7 +2576,7 @@ static bool test_alloc_fail_next(void)
 
 void loom_test_arm_alloc_failure(long n)
 {
-    atomic_store_explicit(&g_fault_alloc_arm, n, memory_order_relaxed);
+    atomic_store_explicit(&g_test_alloc_fail_at, n, memory_order_relaxed);
 }
 
 /* ================================================================
@@ -2928,7 +2949,7 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
                 pthread_t       old_thread = pool->threads[i];
                 struct timespec abs_timeout;
                 clock_gettime(CLOCK_MONOTONIC, &abs_timeout);
-                abs_timeout.tv_nsec += 50000000L; /* 50ms join timeout */
+                abs_timeout.tv_nsec += (long)(pool->worker_recovery_timeout_ns / 1000000);
                 if (abs_timeout.tv_nsec >= 1000000000L) {
                     abs_timeout.tv_sec++;
                     abs_timeout.tv_nsec -= 100000000L;
