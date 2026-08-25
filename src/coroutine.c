@@ -53,7 +53,11 @@ static _Thread_local loom_coro_ctx_t   g_scheduler; /* per-thread scheduler cont
 static _Thread_local char             *g_scheduler_stack  = NULL;
 static _Thread_local bool              g_scheduler_inited = false;
 static _Atomic bool                    g_guard_installed  = false;
-static sigjmp_buf                      g_guard_jmp; /* longjmp target for guard violations */
+/* Per-thread longjmp target for guard violations.  Thread-local so that
+ * concurrent threads each have their own jmpbuf — the signal handler reads
+ * g_current (also _Thread_local) to attribute faults, so a single global
+ * jmpbuf would be racy if two threads ran coroutines concurrently. */
+static _Thread_local sigjmp_buf          g_guard_jmp;
 /* Guards install/uninstall against concurrent sigaction calls from
  * different threads.  The relaxed fast-path read on g_guard_installed
  * avoids the mutex on every resume(); the mutex only serializes the
@@ -286,6 +290,9 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
             (void)c->stack_end;
             c->valgrind_stack_id = 0;
 #endif
+            /* Re-acquired from pool — restore the tracking budget. */
+            atomic_fetch_add_explicit(&g_total_stack_mapped, node->mmap_size,
+                                      memory_order_relaxed);
             free(node);
             return LOOMWORKS_CORO_OK;
         }
