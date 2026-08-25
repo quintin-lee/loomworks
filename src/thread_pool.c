@@ -2535,6 +2535,10 @@ loom_thread_pool_t *loom_pool_current(void)
  * branch — zero behavior change. */
 static _Atomic long g_test_alloc_fail_at = -1;
 
+/* Global fault injection arms for public test API. */
+_Atomic long g_fault_alloc_arm   = 0;
+_Atomic long g_fault_sigsegv_arm = 0;
+
 static bool test_alloc_fail_next(void)
 {
     long v = atomic_load_explicit(&g_test_alloc_fail_at, memory_order_relaxed);
@@ -2981,14 +2985,6 @@ uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool)
     }
     pthread_mutex_unlock((pthread_mutex_t *)&pool->lock);
     return count;
-}
-
-/* Global fault injection arms for public test API. */
-_Atomic long g_fault_alloc_arm   = 0;
-_Atomic long g_fault_sigsegv_arm = 0;
-
-{
-    atomic_store_explicit(&g_fault_sigsegv_arm, n, memory_order_relaxed);
 }
 
 /* ================================================================

@@ -221,8 +221,15 @@ struct loom_thread_pool {
     int64_t          worker_recovery_timeout_ns; /**< Recovery timeout in ns (0=disabled). */
     _Atomic uint32_t max_recovery_attempts;      /**< Max rebuild attempts per worker. */
     _Atomic uint32_t recovery_attempts[64];      /**< Per-slot attempt count. */
-    _Atomic uint64_t next_task_id;               /**< Monotonically increasing task ID counter. */
-    void            *metrics; /**< Optional metrics collector (loom_metrics_t*). */
+
+    /* Backpressure configuration. */
+    double               bp_queue_warn_ratio; /* default 0.8 */
+    int64_t              bp_queue_timeout_ns; /* default 60s */
+    loom_backpressure_fn bp_callback;         /* NULL = no callback */
+    void                *bp_callback_ctx;
+    _Atomic bool         bp_callback_throttle; /* prevent spam */
+    _Atomic uint64_t     next_task_id;         /**< Monotonically increasing task ID counter. */
+    void                *metrics;              /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback — stores loom_metric_fn directly to avoid
      * union-cast UB.  The callback runs on worker threads under no lock. */
     loom_metric_fn metric_cb;
