@@ -2550,7 +2550,7 @@ static bool test_alloc_fail_next(void)
 
 void loom_test_arm_alloc_failure(long n)
 {
-    atomic_store_explicit(&g_test_alloc_fail_at, n, memory_order_relaxed);
+    atomic_store_explicit(&g_fault_alloc_arm, n, memory_order_relaxed);
 }
 
 /* ================================================================
@@ -2980,6 +2980,20 @@ uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool)
     }
     pthread_mutex_unlock(&pool->lock);
     return count;
+}
+
+/* Global fault injection arms for public test API. */
+_Atomic long g_fault_alloc_arm   = 0;
+_Atomic long g_fault_sigsegv_arm = 0;
+
+void loom_test_arm_alloc_failure(long n)
+{
+    atomic_store_explicit(&g_fault_alloc_arm, n, memory_order_relaxed);
+}
+
+void loom_test_arm_sigsegv(long n)
+{
+    atomic_store_explicit(&g_fault_sigsegv_arm, n, memory_order_relaxed);
 }
 
 /* ================================================================
