@@ -40,14 +40,18 @@ loom_runtime_t              ← single-entry routing layer (THREAD vs CORO flag)
 - **Coroutine stacks**: `mmap` with `PROT_NONE` guard pages on both ends; SIGSEGV/SIGBUS handler uses `longjmp` to return error state. Stacks pooled (cap 64 mappings).
 - **Context backend**: hand-written ASM (x86_64/aarch64) by default; POSIX `ucontext` fallback forced via `LOOMWORKS_CTX_BACKEND=ucontext`.
 - **No C++**: pure C11, no C99 extensions, `_POSIX_C_SOURCE 200809L` allowed.
-- **Destroy safety**: NULL-pointer-safe destroy on every public handle.
-
-### Data flow: task submission
-
-1. `loom_pool_submit()` → check shutdown → bump metrics → acquire cancel slot → allocate task node from Treiber pool → insert into priority lane or Vyukov ring → signal worker condvar.
-2. Worker loop → pop local deque (LIFO) → if empty, steal from neighbor (FIFO) → if still empty, drain ring → execute task.
-3. `loom_pool_shutdown()` → set shutdown flag → wake all workers → each worker drains remaining tasks before exiting.
-
+/**
+ * @brief Coroutine state.
+ */
+typedef enum {
+    LOOMWORKS_CORO_NEW,       /**< Coroutine created but not started. */
+    LOOMWORKS_CORO_RUNNING,   /**< Currently executing. */
+    LOOMWORKS_CORO_SUSPENDED, /**< Paused via yield or initial suspend. */
+    LOOMWORKS_CORO_SLEEPING,  /**< Sleeping until a deadline; resumable only after it. */
+    LOOMWORKS_CORO_DONE,      /**< Completed execution. */
+    LOOMWORKS_CORO_ERROR,     /**< Error state (e.g., guard page hit). */
+    LOOMWORKS_CORO_TIMEOUT,   /**< Execution time limit exceeded (forced yield). */
+} loom_coro_state_t;
 ## Key Directories
 
 | Path | Purpose |
@@ -55,13 +59,47 @@ loom_runtime_t              ← single-entry routing layer (THREAD vs CORO flag)
 | `include/loomworks/` | Six public headers; `loomworks.h` is the single convenince include |
 | `src/` | All implementation; internal headers (`*_internal.h`) are non-public |
 | `tests/` | Five test executables, hand-rolled assertion framework (no GoogleTest/etc.) |
-| `examples/` | Demo programs + `bench` benchmark harness + `monitor_demo` |
-| `cmake/` | BuildTypes.cmake (Debug/Release/ASan/TSan/UBSan), package config template |
-| `docs/` | architecture, api-reference, contributing, design-decisions, faq, migration, risk-assessment |
-| `tools/` | `tag-release.sh` (version sync across 4 files), `bench_compare.py` (regression gate) |
-| `.github/workflows/` | `ci.yml` (full matrix + sanitizers + QEMU), `perf.yml` (benchmark comparison) |
+struct loom_coroutine {
+    loom_coro_state_t state;      /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR/TIMEOUT). */
+    loom_coro_fn      entry_fn;   /**< User entry function. */
+    void             *user_data;  /**< Opaque argument passed to entry_fn. */
+    size_t            stack_size; /**< Requested stack size in bytes. */
+    pthread_t         owner;      /**< Thread that created the coroutine. */
 
-## Development Commands
+    /* Lifetime rule: resume/terminate are only valid from owner; calling
+     * them from another thread is user error, guarded at runtime with
+     * LOOMWORKS_CORO_ERR_INVALID in coroutine.c because the ucontext
+     * machinery is not safe to touch from multiple threads. */
+
+    loom_coro_ctx_t ctx; /**< Saved context (abstracted backend). */
+
+    void  *mmap_base;   /**< Base address from mmap(). */
+    size_t mmap_size;   /**< Total size of the mmap region (includes guards). */
+    void  *stack_start; /**< Start of the usable (mprotect'd) region. */
+    void  *stack_end;   /**< End of the usable region (exclusive). */
+
+    uintptr_t valgrind_stack_id; /**< Valgrind stack registration ID. */
+
+    /* ASan fiber bookkeeping: under AddressSanitizer the current fake-stack
+     * pointer must be saved across a raw context switch (see the macros in
+     * coroutine.c).  NULL when not built with ASan. */
+    void *fake_stack_save;
+
+    uint64_t task_id;          /* Pool task id (0 for stand-alone coroutines). */
+    int64_t  wake_deadline_ns; /* 0 = not sleeping; CLOCK_MONOTONIC absolute. */
+    uint32_t worker_idx;       /* Owner worker slot; stamped at create time. */
+    void    *sleep_reg_ctx;    /* Pool pointer for the sleep_reg hook (NULL = stand-alone). */
+    void    *task_node;        /* Pool loom_task_t* carrying this coroutine (NULL = stand-alone). */
+    /* Optional pool hook: registers this coroutine's deadline with the pool
+     * timer heap. NULL = stand-alone (pure suspension; caller resumes). */
+    loom_coro_result_t (*sleep_reg)(void *ctx, uint64_t task_id, int64_t deadline_ns);
+
+    /* Execution timeout fields (0 = disabled). Set by loom_coro_set_timeout(). */
+    int64_t  execution_start_ns;  /**< CLOCK_MONOTONIC time when coroutine started running. */
+    int64_t  max_execution_ns;    /**< Maximum allowed execution time (0 = unlimited). */
+
+    uint64_t padding[2]; /**< Pad to 64-byte cache-line boundary. */
+};
 
 ```bash
 # Configure (ASM backend auto-selected; force ucontext with -DLOOMWORKS_CTX_BACKEND=ucontext)
@@ -71,10 +109,21 @@ cmake -S . -B build
 cmake --build build
 
 # Run all tests
-cd build && ctest --output-on-failure
+/**
+ * @brief Default coroutine stack size.
+ */
+#define LOOMWORKS_CORO_DEFAULT_STACK_SIZE ((size_t)(64 * 1024)) /* 64 KiB */
 
-# Individual test binaries
-./build/tests/test_thread_pool
+/**
+ * @brief Number of guard pages on each side of the stack.
+ */
+#define LOOMWORKS_CORO_GUARD_PAGES_EACH 1u
+
+/**
+ * @brief Default coroutine execution timeout (100ms).
+ *        Set to 0 to disable timeout.
+ */
+#define LOOMWORKS_CORO_DEFAULT_TIMEOUT_NS ((int64_t)(100 * 1000000))
 ./build/tests/test_coroutine
 ./build/tests/test_integration
 ./build/tests/test_runtime

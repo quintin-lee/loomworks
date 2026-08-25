@@ -266,7 +266,3 @@ loom_result_t loom_runtime_metrics_snapshot(const loom_runtime_t *rt, loom_metri
      return rt ? rt->shm : NULL;
  }
 
-loom_metrics_shm_t *loom_runtime_shm(const loom_runtime_t *rt)
-{
-    return rt ? rt->shm : NULL;
-}

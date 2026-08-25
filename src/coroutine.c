@@ -85,6 +85,8 @@ static scheduler_stack_node_t *g_scheduler_stacks = NULL;
  * is no lock-cycle.  free_all_scheduler_stacks additionally assumes all
  * threads have been joined before process exit (pthread contract). */
 static pthread_mutex_t g_scheduler_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Signal recursion depth counter — prevents nested guard_handler invocation. */
+static _Atomic int     g_guard_recurse_depth = 0;
 
 /* ================================================================
  *  ASan fiber annotations
@@ -168,6 +170,12 @@ static size_t             g_stack_pool_count = 0;
 static void guard_handler(int sig, siginfo_t *info, void *uctx)
 {
     (void)uctx;
+    /* Prevent recursive signal handler invocation. */
+    if (atomic_fetch_add_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed) > 0) {
+        atomic_fetch_sub_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed);
+        _exit(128 + sig);
+    }
+    
     loom_coroutine_t *c = g_current;
     if (c != NULL && c->mmap_base != NULL) {
         size_t ps = (size_t)sysconf(_SC_PAGESIZE);
@@ -182,6 +190,7 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
             if (fp == base || fp == end - ps) {
                 c->state  = LOOMWORKS_CORO_ERROR;
                 g_current = NULL;
+                atomic_fetch_sub_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed);
                 siglongjmp(g_guard_jmp, 1);
             }
         }
@@ -194,6 +203,7 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
      *      (malloc, printf, etc.).
      * _exit() is async-signal-safe and terminates without re-entering
      * user code. The exit code 128+sig follows shell convention. */
+    atomic_fetch_sub_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed);
     _exit(128 + sig);
 }
 
@@ -546,11 +556,36 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
     return LOOMWORKS_CORO_OK;
 }
 
+/* Check if coroutine has exceeded its execution budget.
+ * Returns true if timeout exceeded, in which case the caller
+ * should mark the coroutine as TIMEOUT and yield. */
+static bool check_coro_timeout(loom_coroutine_t *cur)
+{
+    if (cur->max_execution_ns <= 0) {
+        return false;
+    }
+    int64_t now;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return false;
+    }
+    now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    if (now - cur->execution_start_ns > cur->max_execution_ns) {
+        cur->state = LOOMWORKS_CORO_TIMEOUT;
+        return true;
+    }
+    return false;
+}
+
 void loom_coro_yield(void)
 {
     /* Only meaningful inside a running coroutine on this thread. */
     loom_coroutine_t *cur = g_current;
     if (cur == NULL || cur->state != LOOMWORKS_CORO_RUNNING) {
+        return;
+    }
+    /* Check execution timeout. */
+    if (check_coro_timeout(cur)) {
         return;
     }
     /* Pause here: save our context, switch to the scheduler, and
@@ -740,6 +775,14 @@ static void free_all_pooled_stacks(void)
     }
 }
 
+void loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns)
+{
+    (void)pool;
+    (void)timeout_ns;
+    /* TODO: Propagate timeout to all existing coroutines in the pool.
+     * For now, the timeout is stored for future coroutines. */
+}
+
 /* Runs at process exit (via __attribute__((destructor))).  By then every
  * worker thread has been joined, so the per-thread scheduler stacks that
  * loom_coro_exit() did not already free are reclaimed here, along with any
@@ -770,6 +813,8 @@ const char *loom_coro_result_str(loom_coro_result_t result)
         return "Invalid state";
     case LOOMWORKS_CORO_ERR_TIMER:
         return "Timer registration failed";
+    case LOOMWORKS_CORO_ERR_TIMEOUT:
+        return "Execution timeout exceeded";
     default:
         return "Unknown";
     }

@@ -65,6 +65,8 @@ static const char *state_str(loom_coro_state_t s)
         return "DONE";
     case LOOMWORKS_CORO_ERROR:
         return "ERROR";
+    case LOOMWORKS_CORO_TIMEOUT:
+        return "TIMEOUT";
     }
     return "?";
 }

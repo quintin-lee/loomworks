@@ -37,6 +37,9 @@ extern "C" {
 /** Opaque coroutine handle. */
 typedef struct loom_coroutine loom_coroutine_t;
 
+/** Forward declaration for timeout API. */
+typedef struct loom_thread_pool loom_thread_pool_t;
+
 /**
  * @brief Coroutine state.
  */
@@ -47,6 +50,7 @@ typedef enum {
     LOOMWORKS_CORO_SLEEPING,  /**< Sleeping until a deadline; resumable only after it. */
     LOOMWORKS_CORO_DONE,      /**< Completed execution. */
     LOOMWORKS_CORO_ERROR,     /**< Error state (e.g., guard page hit). */
+    LOOMWORKS_CORO_TIMEOUT,   /**< Execution time limit exceeded (forced yield). */
 } loom_coro_state_t;
 
 /**
@@ -61,6 +65,7 @@ typedef enum {
     LOOMWORKS_CORO_ERR_GUARD,    /**< Guard page violation detected. */
     LOOMWORKS_CORO_ERR_RUNNING,  /**< Operation invalid in current state. */
     LOOMWORKS_CORO_ERR_TIMER,    /**< Timer registration failed (sleep not tracked). */
+    LOOMWORKS_CORO_ERR_TIMEOUT,  /**< Execution timeout exceeded. */
 } loom_coro_result_t;
 
 /**
@@ -79,6 +84,12 @@ typedef void (*loom_coro_fn)(void *user_data);
  * @brief Number of guard pages on each side of the stack.
  */
 #define LOOMWORKS_CORO_GUARD_PAGES_EACH 1u
+
+/**
+ * @brief Default coroutine execution timeout (100ms).
+ *        Set to 0 to disable timeout.
+ */
+#define LOOMWORKS_CORO_DEFAULT_TIMEOUT_NS ((int64_t)(100 * 1000000))
 
 /**
  * @brief Create a new coroutine.
@@ -220,6 +231,20 @@ void loom_coro_install_guard_handler(void);
  * @brief Remove the guard-page handler and restore SIGSEGV/SIGBUS defaults.
  */
 void loom_coro_uninstall_guard_handler(void);
+
+/**
+ * @brief Set execution timeout for coroutines on this pool.
+ *
+ * When a coroutine executes longer than @p timeout_ns nanoseconds without
+ * yielding, it will be forcibly suspended on its next yield point.
+ * Set timeout_ns to 0 to disable timeouts (default behavior).
+ *
+ * Must be called before submitting coroutine tasks.
+ *
+ * @param pool       The thread pool handle.
+ * @param timeout_ns Timeout in nanoseconds (0 = disabled).
+ */
+void loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
 
 #ifdef __cplusplus
 }

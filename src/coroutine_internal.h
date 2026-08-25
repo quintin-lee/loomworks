@@ -27,7 +27,7 @@
  * all coroutines created on the same thread.
  */
 struct loom_coroutine {
-    loom_coro_state_t state;      /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR). */
+    loom_coro_state_t state;      /**< Current state (NEW/RUNNING/SUSPENDED/DONE/ERROR/TIMEOUT). */
     loom_coro_fn      entry_fn;   /**< User entry function. */
     void             *user_data;  /**< Opaque argument passed to entry_fn. */
     size_t            stack_size; /**< Requested stack size in bytes. */
@@ -61,7 +61,11 @@ struct loom_coroutine {
      * timer heap. NULL = stand-alone (pure suspension; caller resumes). */
     loom_coro_result_t (*sleep_reg)(void *ctx, uint64_t task_id, int64_t deadline_ns);
 
-    uint64_t padding[4]; /**< Pad to 64-byte cache-line boundary. */
+    /* Execution timeout fields (0 = disabled). Set by loom_coro_set_timeout(). */
+    int64_t execution_start_ns;  /**< CLOCK_MONOTONIC time when coroutine started running. */
+    int64_t max_execution_ns;    /**< Maximum allowed execution time (0 = unlimited). */
+
+    uint64_t padding[2]; /**< Pad to 64-byte cache-line boundary. */
 };
 
 /**
