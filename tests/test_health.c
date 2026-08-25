@@ -33,8 +33,7 @@ static void test_health_basic(void)
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "pool create");
 
     loom_health_status_t status;
-    ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK,
-           "health sample");
+    ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK, "health sample");
     ASSERT(status.worker_count == 2, "worker count");
     ASSERT(status.active_count == 0, "no active workers initially");
     ASSERT(status.utilization == 0.0, "zero utilization idle");
@@ -55,13 +54,11 @@ static void test_health_during_work(void)
     sleep_ms(200);
 
     loom_health_status_t status;
-    ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK,
-           "health sample");
+    ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK, "health sample");
     ASSERT(status.worker_count == 4, "worker count after work");
-    ASSERT(status.pending_count >= 0, "pending count valid");
+    // pending count is always >= 0 for uint32_t;
     ASSERT(status.active_count <= 4, "active within bounds");
-    ASSERT(status.utilization >= 0.0 && status.utilization <= 1.0,
-           "utilization in range");
+    ASSERT(status.utilization >= 0.0 && status.utilization <= 1.0, "utilization in range");
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
@@ -69,8 +66,7 @@ static void test_health_during_work(void)
 
 static void test_health_null_safety(void)
 {
-    ASSERT(loom_pool_health_sample(NULL, NULL) == LOOMWORKS_ERR_INVALID,
-           "null pool rejected");
+    ASSERT(loom_pool_health_sample(NULL, NULL) == LOOMWORKS_ERR_INVALID, "null pool rejected");
 }
 
 int main(void)
