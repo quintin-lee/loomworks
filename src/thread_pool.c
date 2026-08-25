@@ -24,8 +24,8 @@
 #include "loomworks/coroutine.h"
 #include "loomworks/metrics.h"
 #include "loomworks/metrics_shm.h"
-#include "thread_pool_internal.h"
 #include "loomworks/thread_pool_health.h"
+#include "thread_pool_internal.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -119,8 +119,12 @@ static void future_mark_cancelled(future_task_ctx_t *ctx)
 static inline uint64_t next_pow2_u64(uint32_t v)
 {
     uint64_t n = v;
-    n |= n >> 1; n |= n >> 2; n |= n >> 4;
-    n |= n >> 8; n |= n >> 16; n |= n >> 32;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n |= n >> 32;
     return n + 1;
 }
 
@@ -275,12 +279,18 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->node_stack, 0, memory_order_relaxed);
 
     pool->max_worker_count = pool->worker_count;
+    /* Initialize worker recovery defaults. */
+    pool->worker_recovery_timeout_ns = 5000000000LL; /* 5s default */
+    atomic_store_explicit(&pool->max_recovery_attempts, 3u, memory_order_relaxed);
+    for (uint32_t i = 0; i < pool->max_worker_count; i++) {
+        atomic_store_explicit(&pool->recovery_attempts[i], 0u, memory_order_relaxed);
+    }
 
     /* --- Work-stealing deques (one Chase-Lev deque per worker slot) --- */
     pool->deques = deques_alloc(pool->max_worker_count);
     if (pool->deques != NULL) {
         uint32_t j;
-        bool ok = true;
+        bool     ok = true;
         for (j = 0; j < pool->max_worker_count; j++) {
             pool->deques[j].capacity = LOOMWORKS_DEQUE_CAPACITY;
             pool->deques[j].mask     = LOOMWORKS_DEQUE_CAPACITY - 1;
@@ -449,7 +459,8 @@ typedef struct {
  * resumes a coroutine itself (affinity is preserved): it only moves the
  * task node from the timer heap into the owner worker's ready FIFO and
  * posts a work token.  The owner worker picks it up in Step 0. */
-static void *timer_thread_fn(void *arg)
+static uint32_t check_and_recover_workers(loom_thread_pool_t *pool);
+static void    *timer_thread_fn(void *arg)
 {
     loom_thread_pool_t *pool = (loom_thread_pool_t *)arg;
     /* Drain-until-empty: keep running after timer_thread_alive goes false so
@@ -471,6 +482,9 @@ static void *timer_thread_fn(void *arg)
         }
         bool empty = (pool->timer_len == 0);
         pthread_mutex_unlock(&pool->timer_lock);
+        /* Check for worker recovery every iteration. */
+        check_and_recover_workers(pool);
+
         if (!alive && empty) {
             break;
         }
@@ -482,7 +496,7 @@ static void *timer_thread_fn(void *arg)
             /* Heap is empty or all deadlines have passed: wait on the
              * semaphore — coro_sleep_reg_hook posts it on every push, so
              * this wakes immediately when the next coroutine sleeps. */
-            abs.tv_sec = 0;
+            abs.tv_sec  = 0;
             abs.tv_nsec = 1000000000ULL; /* 1 s safety net for signals */
         }
         /* sem_timedwait returns EINTR on signals; retry unless shutting
@@ -591,7 +605,7 @@ static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64
     pthread_mutex_unlock(&pool->timer_lock);
     sem_post(&pool->timer_sem);
     return LOOMWORKS_CORO_OK;
- }
+}
 
 static void *worker_entry(void *arg)
 {
@@ -1215,9 +1229,9 @@ static void cancel_index_insert(loom_thread_pool_t *pool, loom_task_t *task)
     for (uint64_t i = 0; i < cap; i++) {
         cancel_slot_t *slot = &pool->cancel_slots[h];
         uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_relaxed);
-        if (cur == 0 || cur == 1) { /* EMPTY or TOMBSTONE: reusable */
-            slot->task = task;      /* plain stores — visible via release publish */
-            slot->data = task->user_data;
+        if (cur == 0 || cur == 1) {      /* EMPTY or TOMBSTONE: reusable */
+            slot->task           = task; /* plain stores — visible via release publish */
+            slot->data           = task->user_data;
             slot->user_data_hash = hash_ptr(task->user_data);
             atomic_store_explicit(&slot->task_id, want, memory_order_release);
             return;
@@ -2783,7 +2797,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
  *
  *  Returns 0 when @p pool is NULL (safe null-pointer query).
  * ================================================================ */
-uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool)
+uint32_t loom_pool_worker_count(loom_thread_pool_t *pool)
 {
     if (!pool) {
         return 0;
@@ -2797,7 +2811,7 @@ uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool)
  *  Acquires the lock briefly for a consistent snapshot.  Returns 0
  *  when @p pool is NULL.
  * ================================================================ */
-uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool)
+uint32_t loom_pool_pending_count(loom_thread_pool_t *pool)
 {
     if (!pool) {
         return 0;
@@ -2814,7 +2828,7 @@ uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool)
  *  Lock-free (relaxed atomic load); may lag briefly.  Returns 0
  *  when @p pool is NULL.
  * ================================================================ */
-uint32_t loom_pool_active_count(const loom_thread_pool_t *pool)
+uint32_t loom_pool_active_count(loom_thread_pool_t *pool)
 {
     if (!pool) {
         return 0;
@@ -2827,7 +2841,7 @@ uint32_t loom_pool_active_count(const loom_thread_pool_t *pool)
  *
  *  Returns 0 when @p pool is NULL.
  * ================================================================ */
-uint32_t loom_pool_idle_count(const loom_thread_pool_t *pool)
+uint32_t loom_pool_idle_count(loom_thread_pool_t *pool)
 {
     if (!pool) {
         return 0;
@@ -2842,7 +2856,7 @@ uint32_t loom_pool_idle_count(const loom_thread_pool_t *pool)
  *
  *  Returns 0.0 when @p pool is NULL or has no workers.
  * ================================================================ */
-double loom_pool_utilization(const loom_thread_pool_t *pool)
+double loom_pool_utilization(loom_thread_pool_t *pool)
 {
     if (!pool || pool->worker_count == 0) {
         return 0.0;
@@ -2864,7 +2878,7 @@ void loom_pool_broadcast(loom_thread_pool_t *pool)
     }
     static struct timespec s_last_broadcast = {0, 0};
     static pthread_mutex_t s_bcast_lock     = PTHREAD_MUTEX_INITIALIZER;
-    struct timespec         now;
+    struct timespec        now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     pthread_mutex_lock(&s_bcast_lock);
     if (now.tv_sec == s_last_broadcast.tv_sec && now.tv_nsec < s_last_broadcast.tv_nsec + 1000) {
@@ -2885,10 +2899,93 @@ void loom_pool_broadcast(loom_thread_pool_t *pool)
 }
 
 /* ================================================================
+ *  Worker auto-recovery — detect and rebuild abnormal workers
+ * ================================================================ */
+static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
+{
+    if (pool->worker_recovery_timeout_ns <= 0) {
+        return 0;
+    }
+    pthread_mutex_lock(&pool->lock);
+    uint32_t recovered = 0;
+
+    for (uint32_t i = 0; i < pool->worker_count; i++) {
+        bool alive = atomic_load_explicit(&pool->thread_alive[i], memory_order_relaxed);
+        bool clean = atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_relaxed);
+
+        if (alive && !clean) {
+            uint32_t attempts =
+                atomic_load_explicit(&pool->recovery_attempts[i], memory_order_relaxed);
+            uint32_t max_att =
+                atomic_load_explicit(&pool->max_recovery_attempts, memory_order_relaxed);
+            if (attempts < max_att) {
+                /* Attempt to join and restart the worker. */
+                pthread_t       old_thread = pool->threads[i];
+                struct timespec abs_timeout;
+                clock_gettime(CLOCK_MONOTONIC, &abs_timeout);
+                abs_timeout.tv_nsec += 50000000L; /* 50ms join timeout */
+                if (abs_timeout.tv_nsec >= 1000000000L) {
+                    abs_timeout.tv_sec++;
+                    abs_timeout.tv_nsec -= 100000000L;
+                }
+                int rc = pthread_join(old_thread, NULL);
+                if (rc == 0 || rc == ESRCH) {
+                    atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
+                    worker_arg_t *wa = (worker_arg_t *)malloc(sizeof(*wa));
+                    if (wa) {
+                        wa->pool  = pool;
+                        wa->index = i;
+                        if (pthread_create(&pool->threads[i], NULL, worker_entry, wa) == 0) {
+                            atomic_store_explicit(
+                                &pool->thread_alive[i], true, memory_order_release);
+                            atomic_store_explicit(
+                                &pool->recovery_attempts[i], attempts + 1, memory_order_relaxed);
+                            recovered++;
+                        } else {
+                            free(wa);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&pool->lock);
+    return recovered;
+}
+
+/* ================================================================
+ *  Public API — Worker recovery configuration
+ * ================================================================ */
+void loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t timeout_ns)
+{
+    if (!pool) {
+        return;
+    }
+    pool->worker_recovery_timeout_ns = timeout_ns;
+}
+
+uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool)
+{
+    if (!pool) {
+        return 0;
+    }
+    pthread_mutex_lock(&pool->lock);
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < pool->worker_count; i++) {
+        bool alive = atomic_load_explicit(&pool->thread_alive[i], memory_order_relaxed);
+        bool clean = atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_relaxed);
+        if (alive && !clean) {
+            count++;
+        }
+    }
+    pthread_mutex_unlock(&pool->lock);
+    return count;
+}
+
+/* ================================================================
  *  Health check — synchronous sampling of pool state
  * ================================================================ */
-loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool,
-                                       loom_health_status_t *out)
+loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool, loom_health_status_t *out)
 {
     if (!pool || !out) {
         return LOOMWORKS_ERR_INVALID;
@@ -2896,17 +2993,13 @@ loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool,
 
     pthread_mutex_lock(&pool->lock);
     uint32_t wc = pool->worker_count;
-    uint32_t ac = atomic_load_explicit(&pool->active_workers,
-                                        memory_order_relaxed);
-    uint32_t pc = atomic_load_explicit(&pool->queue_len,
-                                        memory_order_relaxed);
+    uint32_t ac = atomic_load_explicit(&pool->active_workers, memory_order_relaxed);
+    uint32_t pc = atomic_load_explicit(&pool->queue_len, memory_order_relaxed);
 
     uint32_t abnormal = 0;
     for (uint32_t i = 0; i < pool->max_worker_count; i++) {
-        if (atomic_load_explicit(&pool->thread_alive[i],
-                                 memory_order_relaxed) &&
-            !atomic_load_explicit(&pool->thread_clean_exit[i],
-                                  memory_order_relaxed)) {
+        if (atomic_load_explicit(&pool->thread_alive[i], memory_order_relaxed) &&
+            !atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_relaxed)) {
             abnormal++;
         }
     }
