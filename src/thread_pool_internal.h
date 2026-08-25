@@ -64,9 +64,10 @@ typedef struct ring_cell {
 /* Cancel index slot — open addressing, linear probe, hash = id & (cap-1).
  * task_id: 0 = EMPTY, 1 = TOMBSTONE, id+1 = occupied. */
 typedef struct cancel_slot {
-    _Atomic uint64_t task_id; /* 0 EMPTY / 1 TOMBSTONE / id+1 occupied */
-    loom_task_t     *task;    /* owning task (for the cancelled flag) */
-    void            *data;    /* task user_data (for loom_pool_cancel) */
+    _Atomic uint64_t task_id;      /* 0 EMPTY / 1 TOMBSTONE / id+1 occupied */
+    loom_task_t     *task;         /* owning task (for the cancelled flag) */
+    void            *data;         /* task user_data (for loom_pool_cancel) */
+    uint64_t         user_data_hash; /* hash of user_data for fast matching */
 } cancel_slot_t;
 
 /* Per-worker Chase-Lev work-stealing deque.  Owner thread pushes/pops at

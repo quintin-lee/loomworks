@@ -123,6 +123,19 @@ static inline uint64_t next_pow2_u64(uint32_t v)
     return n + 1;
 }
 
+/* Simple hash for user_data pointers (used in cancel index).
+ * Mixes address bits to reduce collisions. */
+static inline uint64_t hash_ptr(const void *p)
+{
+    uintptr_t x = (uintptr_t)p;
+    x ^= x >> 16;
+    x *= 0x85ebca6bULL;
+    x ^= x >> 13;
+    x *= 0xc2b2ae35ULL;
+    x ^= x >> 16;
+    return x;
+}
+
 /* CLOCK_MONOTONIC is immune to wall-clock jumps; all timeout waits in this
  * module pair a monotonic deadline with a monotonic-clocked condvar. */
 static pthread_once_t     g_condattr_once = PTHREAD_ONCE_INIT;
@@ -1204,6 +1217,7 @@ static void cancel_index_insert(loom_thread_pool_t *pool, loom_task_t *task)
         if (cur == 0 || cur == 1) { /* EMPTY or TOMBSTONE: reusable */
             slot->task = task;      /* plain stores — visible via release publish */
             slot->data = task->user_data;
+            slot->user_data_hash = hash_ptr(task->user_data);
             atomic_store_explicit(&slot->task_id, want, memory_order_release);
             return;
         }
@@ -2152,10 +2166,15 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
      * matches and claim its slot as a tombstone — the worker then skips
      * the node and frees it; we account queue_len here. */
     if (pool->cancel_slots != NULL && pool->cancel_cap != 0) {
+        uint64_t target_hash = hash_ptr(data);
         for (uint64_t i = 0; i < pool->cancel_cap; i++) {
             cancel_slot_t *slot = &pool->cancel_slots[i];
             uint64_t       cur  = atomic_load_explicit(&slot->task_id, memory_order_acquire);
             if (cur <= 1) { /* EMPTY or TOMBSTONE */
+                continue;
+            }
+            /* Fast hash check before pointer comparison */
+            if (slot->user_data_hash != target_hash) {
                 continue;
             }
             loom_task_t *task = slot->task;
