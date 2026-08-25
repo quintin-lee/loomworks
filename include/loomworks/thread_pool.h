@@ -240,7 +240,7 @@ loom_result_t loom_pool_destroy(loom_thread_pool_t **pool);
  * @param pool  The pool handle.
  * @return      Worker count, or 0 if pool is invalid.
  */
-uint32_t loom_pool_worker_count(const loom_thread_pool_t *pool);
+uint32_t loom_pool_worker_count(loom_thread_pool_t *pool);
 
 /**
  * @brief Get the number of pending tasks in the queue.
@@ -256,7 +256,7 @@ uint32_t loom_pool_pending_count(const loom_thread_pool_t *pool);
  * @param pool  The pool handle.
  * @return      Active worker count, or 0 if pool is invalid.
  */
-uint32_t loom_pool_active_count(const loom_thread_pool_t *pool);
+uint32_t loom_pool_active_count(loom_thread_pool_t *pool);
 
 /**
  * @brief Get the number of idle workers (worker_count - active).
@@ -264,7 +264,7 @@ uint32_t loom_pool_active_count(const loom_thread_pool_t *pool);
  * @param pool  The pool handle.
  * @return      Idle worker count, or 0 if pool is invalid.
  */
-uint32_t loom_pool_idle_count(const loom_thread_pool_t *pool);
+uint32_t loom_pool_idle_count(loom_thread_pool_t *pool);
 
 /**
  * @brief Get pool utilization as active / worker_count (0.0 when worker_count == 0).
@@ -272,7 +272,7 @@ uint32_t loom_pool_idle_count(const loom_thread_pool_t *pool);
  * @param pool  The pool handle.
  * @return      Utilization in [0.0, 1.0], or 0.0 if pool is invalid.
  */
-double loom_pool_utilization(const loom_thread_pool_t *pool);
+double loom_pool_utilization(loom_thread_pool_t *pool);
 
 /**
  * @brief Wake all worker threads blocked on the pool condition variable.
@@ -282,7 +282,9 @@ double loom_pool_utilization(const loom_thread_pool_t *pool);
  *
  * @param pool  The pool handle.
  */
-void loom_pool_broadcast(loom_thread_pool_t *pool);
+void     loom_pool_broadcast(loom_thread_pool_t *pool);
+void     loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
+uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool);
 
 /**
  * @brief Cancel a task that is still in the queue (not yet started).

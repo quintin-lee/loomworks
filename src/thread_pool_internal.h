@@ -5,6 +5,7 @@
 #include "loomworks/metrics.h"     /* loom_metric_event_t for shm_write_fn */
 #include "loomworks/metrics_shm.h" /* loom_metrics_shm_t for shm attach */
 #include "loomworks/thread_pool.h"
+#include "loomworks/thread_pool_backpressure.h"
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdatomic.h>
@@ -57,16 +58,16 @@ typedef struct loom_task {
  * producer pos"; seq == pos+1 is "full"; seq == pos+ring_size is "released
  * by the consumer at pos" (free for the producer at pos+ring_size). */
 typedef struct ring_cell {
-    _Atomic uint64_t       seq;  /* release on publish; acquire on consume; canonical Vyukov protocol */
+    _Atomic uint64_t seq; /* release on publish; acquire on consume; canonical Vyukov protocol */
     _Atomic(loom_task_t *) task; /* written only by producer; read by consumers after seq check */
 } ring_cell_t;
 
 /* Cancel index slot — open addressing, linear probe, hash = id & (cap-1).
  * task_id: 0 = EMPTY, 1 = TOMBSTONE, id+1 = occupied. */
 typedef struct cancel_slot {
-    _Atomic uint64_t task_id;      /* 0 EMPTY / 1 TOMBSTONE / id+1 occupied */
-    loom_task_t     *task;         /* owning task (for the cancelled flag) */
-    void            *data;         /* task user_data (for loom_pool_cancel) */
+    _Atomic uint64_t task_id;        /* 0 EMPTY / 1 TOMBSTONE / id+1 occupied */
+    loom_task_t     *task;           /* owning task (for the cancelled flag) */
+    void            *data;           /* task user_data (for loom_pool_cancel) */
     uint64_t         user_data_hash; /* hash of user_data for fast matching */
 } cancel_slot_t;
 
@@ -214,14 +215,26 @@ struct loom_thread_pool {
     pthread_t    *threads;      /**< pthread_t array (one per worker). */
     _Atomic bool *thread_alive; /**< Parallel to threads[]: true while slot has a live worker. */
     _Atomic bool
-            *thread_clean_exit;    /**< Parallel to threads[]: true once a worker exits normally. */
-    uint32_t max_worker_count;     /**< Max capacity of threads array. */
-    _Atomic uint64_t next_task_id; /**< Monotonically increasing task ID counter. */
-    void            *metrics;      /**< Optional metrics collector (loom_metrics_t*). */
+            *thread_clean_exit; /**< Parallel to threads[]: true once a worker exits normally. */
+    uint32_t max_worker_count;  /**< Max capacity of threads array. */
+
+    /* Worker recovery configuration. Default disabled (timeout_ns=0). */
+    int64_t          worker_recovery_timeout_ns; /**< Recovery timeout in ns (0=disabled). */
+    _Atomic uint32_t max_recovery_attempts;      /**< Max rebuild attempts per worker. */
+    _Atomic uint32_t recovery_attempts[64];      /**< Per-slot attempt count. */
+
+    /* Backpressure configuration. */
+    double               bp_queue_warn_ratio; /* default 0.8 */
+    int64_t              bp_queue_timeout_ns; /* default 60s */
+    loom_backpressure_fn bp_callback;         /* NULL = no callback */
+    void                *bp_callback_ctx;
+    _Atomic bool         bp_callback_throttle; /* prevent spam */
+    _Atomic uint64_t     next_task_id;         /**< Monotonically increasing task ID counter. */
+    void                *metrics;              /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback — stores loom_metric_fn directly to avoid
      * union-cast UB.  The callback runs on worker threads under no lock. */
-    loom_metric_fn      metric_cb;
-    void               *metric_user_data;
+    loom_metric_fn metric_cb;
+    void          *metric_user_data;
     /* Shared-memory metrics region (NULL unless a name was configured).
      * Updated synchronously on every metrics_fire() call from the worker
      * thread that fired the event — no lock needed, the counters are
