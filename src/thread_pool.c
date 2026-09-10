@@ -62,7 +62,7 @@ static void          future_mark_cancelled(future_task_ctx_t *ctx);
 static void         *timer_thread_fn(void *arg);
 static loom_result_t ensure_timer_thread(loom_thread_pool_t *pool);
 static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns);
-static void          fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event);
+static void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event);
 
 /* ================================================================
  *  pool_init — initialise locks, defaults, and worker thread array
@@ -281,8 +281,8 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->node_stack, 0, memory_order_relaxed);
 
     pool->max_worker_count = pool->worker_count;
-    /* Initialize worker recovery defaults. */
-    pool->worker_recovery_timeout_ns = 5000000000LL; /* 5s default */
+    /* Initialize worker recovery defaults (0 = disabled). */
+    pool->worker_recovery_timeout_ns = 0;
     atomic_store_explicit(&pool->max_recovery_attempts, 3u, memory_order_relaxed);
     for (uint32_t i = 0; i < pool->max_worker_count; i++) {
         atomic_store_explicit(&pool->recovery_attempts[i], 0u, memory_order_relaxed);
@@ -369,6 +369,37 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
     }
+
+    /* Setup NUMA topology if requested */
+    if (pool->numa_mode == LOOM_NUMA_AUTO) {
+        loom_result_t nrc = loom_numa_detect_topology(&pool->numa_topo);
+        if (nrc != LOOMWORKS_OK) {
+            pool_destroy_internal(pool);
+            return nrc;
+        }
+    } else if (pool->numa_mode == LOOM_NUMA_VIRTUAL) {
+        loom_result_t nrc = loom_numa_virtual_topology(pool->virtual_domains, &pool->numa_topo);
+        if (nrc != LOOMWORKS_OK) {
+            pool_destroy_internal(pool);
+            return nrc;
+        }
+    } else {
+        pool->numa_topo = NULL;
+    }
+
+    if (pool->numa_topo != NULL) {
+        pool->worker_domain_ids = (uint32_t *)calloc(pool->max_worker_count, sizeof(uint32_t));
+        pool->worker_cpu_ids    = (uint32_t *)calloc(pool->max_worker_count, sizeof(uint32_t));
+        if (!pool->worker_domain_ids || !pool->worker_cpu_ids) {
+            pool_destroy_internal(pool);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        for (uint32_t i = 0; i < pool->max_worker_count; i++) {
+            loom_numa_map_worker(
+                pool->numa_topo, i, &pool->worker_domain_ids[i], &pool->worker_cpu_ids[i]);
+        }
+    }
+
     return LOOMWORKS_OK;
 }
 
@@ -439,6 +470,16 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     free(pool->threads);
     free(pool->thread_alive);
     free(pool->thread_clean_exit);
+
+    if (pool->numa_topo != NULL) {
+        loom_numa_topology_free(pool->numa_topo);
+        pool->numa_topo = NULL;
+    }
+    free(pool->worker_domain_ids);
+    pool->worker_domain_ids = NULL;
+    free(pool->worker_cpu_ids);
+    pool->worker_cpu_ids = NULL;
+
     free(pool);
 }
 
@@ -616,6 +657,14 @@ static void *worker_entry(void *arg)
     uint32_t            idx  = wa->index;
     free(wa);
     g_current_pool = pool;
+
+    if (pool->numa_topo != NULL && pool->worker_cpu_ids != NULL) {
+        uint32_t cpu = pool->worker_cpu_ids[idx];
+        if (cpu != (uint32_t)-1) {
+            loom_numa_bind_current_thread(cpu);
+        }
+    }
+
     while (1) {
         pthread_mutex_lock(&pool->lock);
         /* Step C0: resume this worker's ready coroutine FIFO (head first).
@@ -1008,9 +1057,12 @@ static void *worker_entry(void *arg)
                 fn(data);
                 struct timespec ts_end;
                 clock_gettime(CLOCK_MONOTONIC, &ts_end);
-                int64_t sec_diff = (int64_t)ts_end.tv_sec - (int64_t)ts_start.tv_sec;
+                int64_t sec_diff  = (int64_t)ts_end.tv_sec - (int64_t)ts_start.tv_sec;
                 int64_t nsec_diff = (int64_t)ts_end.tv_nsec - (int64_t)ts_start.tv_nsec;
-                if (nsec_diff < 0) { sec_diff--; nsec_diff += 1000000000; }
+                if (nsec_diff < 0) {
+                    sec_diff--;
+                    nsec_diff += 1000000000;
+                }
                 uint64_t latency_ns = (uint64_t)(sec_diff * 1000000000LL + nsec_diff);
                 loom_metrics_record_latency((loom_metrics_t *)pool->metrics, latency_ns);
             } else {
@@ -1565,9 +1617,11 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
     }
     memset(p, 0, sizeof(*p));
     if (config) {
-        p->worker_count   = config->worker_count;
-        p->stack_size     = config->stack_size;
-        p->queue_capacity = config->queue_capacity;
+        p->worker_count    = config->worker_count;
+        p->stack_size      = config->stack_size;
+        p->queue_capacity  = config->queue_capacity;
+        p->numa_mode       = config->numa_mode;
+        p->virtual_domains = config->virtual_domains;
     }
     loom_result_t rc = pool_init(p);
     if (rc != LOOMWORKS_OK) {
@@ -1750,8 +1804,7 @@ static loom_result_t enqueue_task(loom_thread_pool_t *pool,
     }
     /* Fire a backpressure hint when the queue exceeds the warn threshold.
      * Only one callback per 60s window thanks to the throttle flag. */
-    if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 &&
-        pool->queue_capacity != 0) {
+    if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 && pool->queue_capacity != 0) {
         uint64_t warn = (uint64_t)((double)pool->queue_capacity * pool->bp_queue_warn_ratio);
         if (pool->queue_len >= warn) {
             fire_backpressure(pool, LOOM_BACKPRESSURE_QUEUE_HIGH);
@@ -1759,8 +1812,7 @@ static loom_result_t enqueue_task(loom_thread_pool_t *pool,
     }
     /* Fire a backpressure hint when the queue exceeds the warn threshold.
      * Only one callback per 60s window thanks to the throttle flag. */
-    if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 &&
-        pool->queue_capacity != 0) {
+    if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 && pool->queue_capacity != 0) {
         uint64_t warn = (uint64_t)((double)pool->queue_capacity * pool->bp_queue_warn_ratio);
         if (pool->queue_len >= warn) {
             fire_backpressure(pool, LOOM_BACKPRESSURE_QUEUE_HIGH);
@@ -2714,6 +2766,26 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
             pool->coro_ready = new_coro_ready;
             pthread_mutex_unlock(&pool->coro_lock);
         }
+        if (pool->numa_topo != NULL) {
+            uint32_t *new_dom =
+                (uint32_t *)realloc(pool->worker_domain_ids, count * sizeof(uint32_t));
+            uint32_t *new_cpu = (uint32_t *)realloc(pool->worker_cpu_ids, count * sizeof(uint32_t));
+            if (new_dom != NULL && new_cpu != NULL) {
+                pool->worker_domain_ids = new_dom;
+                pool->worker_cpu_ids    = new_cpu;
+                for (uint32_t i = old_max; i < count; i++) {
+                    loom_numa_map_worker(
+                        pool->numa_topo, i, &pool->worker_domain_ids[i], &pool->worker_cpu_ids[i]);
+                }
+            } else {
+                if (new_dom != NULL) {
+                    pool->worker_domain_ids = new_dom;
+                }
+                if (new_cpu != NULL) {
+                    pool->worker_cpu_ids = new_cpu;
+                }
+            }
+        }
         pool->max_worker_count = count;
     }
     uint32_t old_count = pool->worker_count;
@@ -3083,4 +3155,31 @@ loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool, loom_health_stat
     out->utilization      = util;
 
     return LOOMWORKS_OK;
+}
+
+/* ================================================================
+ *  NUMA query APIs
+ * ================================================================ */
+uint32_t loom_pool_numa_domain_count(const loom_thread_pool_t *pool)
+{
+    if (!pool || !pool->numa_topo) {
+        return 1;
+    }
+    return pool->numa_topo->domain_count > 0 ? pool->numa_topo->domain_count : 1;
+}
+
+uint32_t loom_pool_worker_domain(const loom_thread_pool_t *pool, uint32_t worker_idx)
+{
+    if (!pool || !pool->numa_topo || !pool->worker_domain_ids || worker_idx >= pool->worker_count) {
+        return 0;
+    }
+    return pool->worker_domain_ids[worker_idx];
+}
+
+uint32_t loom_pool_worker_cpu(const loom_thread_pool_t *pool, uint32_t worker_idx)
+{
+    if (!pool || !pool->numa_topo || !pool->worker_cpu_ids || worker_idx >= pool->worker_count) {
+        return (uint32_t)-1;
+    }
+    return pool->worker_cpu_ids[worker_idx];
 }

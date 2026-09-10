@@ -57,19 +57,19 @@ static _Atomic bool                    g_guard_installed  = false;
  * concurrent threads each have their own jmpbuf — the signal handler reads
  * g_current (also _Thread_local) to attribute faults, so a single global
  * jmpbuf would be racy if two threads ran coroutines concurrently. */
-static _Thread_local sigjmp_buf          g_guard_jmp;
+static _Thread_local sigjmp_buf g_guard_jmp;
 /* Guards install/uninstall against concurrent sigaction calls from
  * different threads.  The relaxed fast-path read on g_guard_installed
  * avoids the mutex on every resume(); the mutex only serializes the
  * actual sigaction system call. */
-static pthread_mutex_t                 g_handler_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_handler_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Prior SIGSEGV/SIGBUS dispositions, saved on first install so they can be
  * chained to: uninstall restores them and a fault that is not on a coroutine
  * guard page is re-raised through them.  Zero-init means "SIG_DFL" if no
  * handler was ever installed. */
 static struct sigaction g_prev_segv;
 /* Recursion guard: prevents nested signal handler invocation. */
-static struct sigaction   g_prev_bus;
+static struct sigaction g_prev_bus;
 /* Linked list of all scheduler stacks for atexit cleanup. */
 typedef struct scheduler_stack_node {
     char                        *stack;
@@ -90,7 +90,7 @@ static scheduler_stack_node_t *g_scheduler_stacks = NULL;
  * threads have been joined before process exit (pthread contract). */
 static pthread_mutex_t g_scheduler_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Signal recursion depth counter — prevents nested guard_handler invocation. */
-static _Atomic int     g_guard_recurse_depth = 0;
+static _Atomic int g_guard_recurse_depth = 0;
 
 /* ================================================================
  *  ASan fiber annotations
@@ -159,9 +159,10 @@ static size_t             g_stack_pool_count = 0;
 
 /* Resource tracking — monitors total mmap'd coroutine stack memory.
  * Prevents unbounded growth when alloc fails and falls back to pool. */
-static _Atomic size_t     g_total_stack_mapped = 0;
+static _Atomic size_t g_total_stack_mapped = 0;
 #define LOOMWORKS_CORO_MAX_TOTAL_STACK_MB 256u
-#define LOOMWORKS_CORO_MAX_TOTAL_STACK_BYTES ((size_t)(LOOMWORKS_CORO_MAX_TOTAL_STACK_MB * 1024 * 1024))
+#define LOOMWORKS_CORO_MAX_TOTAL_STACK_BYTES                                                       \
+    ((size_t)(LOOMWORKS_CORO_MAX_TOTAL_STACK_MB * 1024 * 1024))
 /* ================================================================
  *  Guard-page signal handler
  *
@@ -185,7 +186,7 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
         atomic_fetch_sub_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed);
         _exit(128 + sig);
     }
-    
+
     loom_coroutine_t *c = g_current;
     if (c != NULL && c->mmap_base != NULL) {
         size_t ps = (size_t)sysconf(_SC_PAGESIZE);
@@ -291,8 +292,7 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
             c->valgrind_stack_id = 0;
 #endif
             /* Re-acquired from pool — restore the tracking budget. */
-            atomic_fetch_add_explicit(&g_total_stack_mapped, node->mmap_size,
-                                      memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_total_stack_mapped, node->mmap_size, memory_order_relaxed);
             free(node);
             return LOOMWORKS_CORO_OK;
         }
@@ -373,6 +373,8 @@ static void deallocate_stack(loom_coroutine_t *c)
 
                 /* Keep mapping in pool but untrack from global total
                  * until it's re-acquired (pool is part of total budget). */
+                atomic_fetch_sub_explicit(
+                    &g_total_stack_mapped, c->mmap_size, memory_order_relaxed);
                 c->mmap_base         = NULL;
                 c->mmap_size         = 0;
                 c->stack_start       = NULL;
@@ -489,7 +491,7 @@ loom_coro_create(loom_coro_fn fn, void *data, size_t stack_size, loom_coroutine_
     /* 0 means "use the default" (LOOMWORKS_CORO_DEFAULT_STACK_SIZE); the
      * stack is mapped right here in create via allocate_stack, which may
      * serve it from the exact-size reuse pool. */
-    c->stack_size  = (stack_size > 0) ? stack_size : LOOMWORKS_CORO_DEFAULT_STACK_SIZE;
+    c->stack_size = (stack_size > 0) ? stack_size : LOOMWORKS_CORO_DEFAULT_STACK_SIZE;
     if (c->stack_size > (size_t)256 * 1024 * 1024) {
         fprintf(stderr, "loomworks: coroutine stack size %zu exceeds 256 MiB cap\n", c->stack_size);
         free(c);
@@ -587,7 +589,7 @@ static bool check_coro_timeout(loom_coroutine_t *cur)
     if (cur->max_execution_ns <= 0) {
         return false;
     }
-    int64_t now;
+    int64_t         now;
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return false;
