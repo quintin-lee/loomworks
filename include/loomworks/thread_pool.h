@@ -70,12 +70,23 @@ typedef void *(*loom_task_fn_result)(void *user_data);
 #define LOOMWORKS_DEFAULT_WORKER_COUNT 0
 
 /**
+ * @brief NUMA affinity modes.
+ */
+typedef enum {
+    LOOM_NUMA_DISABLED = 0, /**< NUMA affinity disabled (default). */
+    LOOM_NUMA_AUTO     = 1, /**< Auto-detect physical NUMA topology via sysfs. */
+    LOOM_NUMA_VIRTUAL  = 2, /**< Virtual NUMA topology partitioning available cores. */
+} loom_numa_mode_t;
+
+/**
  * @brief Thread pool configuration.
  */
 typedef struct {
-    uint32_t worker_count;   /**< Number of worker threads (0 = auto). */
-    size_t   stack_size;     /**< Stack size per worker (0 = default). */
-    uint32_t queue_capacity; /**< Max pending tasks before blocking submit (0 = unbounded). */
+    uint32_t worker_count;      /**< Number of worker threads (0 = auto). */
+    size_t   stack_size;        /**< Stack size per worker (0 = default). */
+    uint32_t queue_capacity;    /**< Max pending tasks before blocking submit (0 = unbounded). */
+    loom_numa_mode_t numa_mode; /**< NUMA affinity mode (default: DISABLED). */
+    uint32_t virtual_domains;   /**< Number of virtual domains (0 = auto, for VIRTUAL mode). */
 } loom_pool_config_t;
 
 /**
@@ -349,6 +360,32 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count);
  */
 loom_result_t
 loom_future_wait_timeout(loom_future_t *future, void **result, const struct timespec *deadline);
+
+/**
+ * @brief Get the number of NUMA domains active in the pool.
+ *
+ * @param pool The pool handle.
+ * @return Domain count (1 if NUMA is disabled or single-node, >= 1 otherwise).
+ */
+uint32_t loom_pool_numa_domain_count(const loom_thread_pool_t *pool);
+
+/**
+ * @brief Get the NUMA domain assigned to a specific worker.
+ *
+ * @param pool       The pool handle.
+ * @param worker_idx Worker index (0 <= worker_idx < worker_count).
+ * @return Domain index (0 if NUMA disabled or worker_idx invalid).
+ */
+uint32_t loom_pool_worker_domain(const loom_thread_pool_t *pool, uint32_t worker_idx);
+
+/**
+ * @brief Get the CPU core ID assigned to a specific worker.
+ *
+ * @param pool       The pool handle.
+ * @param worker_idx Worker index (0 <= worker_idx < worker_count).
+ * @return CPU core ID, or (uint32_t)-1 if worker is not pinned to a specific CPU.
+ */
+uint32_t loom_pool_worker_cpu(const loom_thread_pool_t *pool, uint32_t worker_idx);
 
 #ifdef __cplusplus
 }

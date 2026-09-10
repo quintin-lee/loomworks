@@ -6,6 +6,7 @@
 #include "loomworks/metrics_shm.h" /* loom_metrics_shm_t for shm attach */
 #include "loomworks/thread_pool.h"
 #include "loomworks/thread_pool_backpressure.h"
+#include "numa_internal.h"
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdatomic.h>
@@ -229,9 +230,9 @@ struct loom_thread_pool {
     loom_backpressure_fn bp_callback;         /* NULL = no callback */
     void                *bp_callback_ctx;
     _Atomic bool         bp_callback_throttle; /* prevent spam */
-    int64_t              coro_timeout_ns;    /*< Per-coroutine execution timeout (0 = disabled). */
-    _Atomic uint64_t     next_task_id;         /**< Monotonically increasing task ID counter. */
-    void                *metrics;              /**< Optional metrics collector (loom_metrics_t*). */
+    int64_t              coro_timeout_ns; /*< Per-coroutine execution timeout (0 = disabled). */
+    _Atomic uint64_t     next_task_id;    /**< Monotonically increasing task ID counter. */
+    void                *metrics;         /**< Optional metrics collector (loom_metrics_t*). */
     /* Inline metrics callback — stores loom_metric_fn directly to avoid
      * union-cast UB.  The callback runs on worker threads under no lock. */
     loom_metric_fn metric_cb;
@@ -242,6 +243,13 @@ struct loom_thread_pool {
      * atomic. */
     void *shm;
     void (*shm_update)(loom_metric_event_t event, void *ctx);
+
+    /* NUMA topology and worker binding */
+    loom_numa_mode_t      numa_mode;
+    uint32_t              virtual_domains;
+    loom_numa_topology_t *numa_topo;
+    uint32_t             *worker_domain_ids;
+    uint32_t             *worker_cpu_ids;
 };
 
 /**
