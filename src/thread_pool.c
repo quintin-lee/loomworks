@@ -316,7 +316,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         pool->created_ns = (int64_t)ts_created.tv_sec * 1000000000LL + ts_created.tv_nsec;
     }
     /* Initialize worker recovery defaults (0 = disabled). */
-    pool->worker_recovery_timeout_ns = 0;
+    atomic_store_explicit(&pool->worker_recovery_timeout_ns, 0, memory_order_relaxed);
     atomic_store_explicit(&pool->abnormal_total, 0u, memory_order_relaxed);
     atomic_store_explicit(&pool->coro_timeout_ns, 0, memory_order_relaxed);
     atomic_store_explicit(&pool->max_recovery_attempts, 3u, memory_order_relaxed);
@@ -3085,7 +3085,7 @@ void loom_pool_broadcast(loom_thread_pool_t *pool)
  * ================================================================ */
 static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
 {
-    if (pool->worker_recovery_timeout_ns <= 0) {
+    if (atomic_load_explicit(&pool->worker_recovery_timeout_ns, memory_order_relaxed) <= 0) {
         return 0;
     }
     pthread_mutex_lock(&pool->lock);
@@ -3164,7 +3164,7 @@ void loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t tim
     if (!pool) {
         return;
     }
-    pool->worker_recovery_timeout_ns = timeout_ns;
+    atomic_store_explicit(&pool->worker_recovery_timeout_ns, timeout_ns, memory_order_relaxed);
 }
 
 /* ================================================================
