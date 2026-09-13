@@ -326,6 +326,12 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
     }
+    pool->worker_executing =
+        (_Atomic bool *)calloc(pool->max_worker_count, sizeof(_Atomic bool));
+    if (pool->worker_executing == NULL) {
+        pool_destroy_internal(pool);
+        return LOOMWORKS_ERR_ALLOC;
+    }
 
     /* --- Work-stealing deques (one Chase-Lev deque per worker slot) --- */
     pool->deques = deques_alloc(pool->max_worker_count);
@@ -510,6 +516,7 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     free(pool->thread_alive);
     free(pool->thread_clean_exit);
     free(pool->recovery_attempts);
+    free(pool->worker_executing);
 
     if (pool->numa_topo != NULL) {
         loom_numa_topology_free(pool->numa_topo);
@@ -1103,6 +1110,10 @@ static void *worker_entry(void *arg)
         pthread_mutex_unlock(&pool->lock);
         if (task) {
             atomic_fetch_add(&pool->active_workers, 1);
+            /* Mark this slot executing so a crash mid-task is observable:
+             * if the worker never returns (pthread_exit/signal), recovery
+             * sees the set flag on reap and repairs active_workers. */
+            atomic_store_explicit(&pool->worker_executing[idx], true, memory_order_relaxed);
             metrics_fire(pool, LOOMWORKS_METRIC_STARTED);
             if (pool->metrics) {
                 struct timespec ts_start;
@@ -1122,6 +1133,7 @@ static void *worker_entry(void *arg)
                 fn(data);
             }
             metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
+            atomic_store_explicit(&pool->worker_executing[idx], false, memory_order_relaxed);
             atomic_fetch_sub(&pool->active_workers, 1);
         }
     }
@@ -2805,6 +2817,18 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         /* Zero the newly-extended tail: fresh slots have no attempts yet. */
         memset(new_recovery + old_max, 0, (count - old_max) * sizeof(_Atomic uint32_t));
         pool->recovery_attempts = new_recovery;
+        _Atomic bool *new_executing =
+            test_alloc_fail_next()
+                ? NULL
+                : (_Atomic bool *)realloc(pool->worker_executing, count * sizeof(_Atomic bool));
+        if (!new_executing) {
+            rollback_deques_tail(pool, old_max, count);
+            pthread_mutex_unlock(&pool->lock);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        /* Zero the newly-extended tail: fresh slots are not executing. */
+        memset(new_executing + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
+        pool->worker_executing = new_executing;
         if (pool->coro_ready != NULL) {
             /* Switch under coro_lock: the timer thread reads the array
              * inside coro_lock to push ready nodes, so replacing the
@@ -3098,6 +3122,14 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
              * so this is a genuine abnormal exit: count it.  Cumulative —
              * a later successful restart does not erase the crash. */
             atomic_fetch_add_explicit(&pool->abnormal_total, 1u, memory_order_relaxed);
+            /* The reaped worker died mid-task iff its executing flag is still
+             * set (join success synchronizes with thread termination, so the
+             * flag read is exact).  Repair the leaked active_workers +1 and
+             * clear the flag so a restarted worker starts clean. */
+            if (atomic_load_explicit(&pool->worker_executing[i], memory_order_relaxed)) {
+                atomic_store_explicit(&pool->worker_executing[i], false, memory_order_relaxed);
+                atomic_fetch_sub(&pool->active_workers, 1);
+            }
             /* Terminated worker reaped.  Restart it in the same slot. */
             worker_arg_t *wa = malloc(sizeof(*wa));
             if (wa) {

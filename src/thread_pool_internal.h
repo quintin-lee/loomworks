@@ -225,6 +225,7 @@ struct loom_thread_pool {
     _Atomic uint32_t max_recovery_attempts;      /**< Max rebuild attempts per worker. */
     _Atomic uint32_t abnormal_total;            /**< Cumulative abnormal worker exits observed by recovery. */
     _Atomic uint32_t *recovery_attempts; /**< Per-slot attempt count (heap; sized to max_worker_count). */
+    _Atomic bool     *worker_executing;  /**< Per-slot: true while the worker runs a task (heap; sized to max_worker_count). */
 
     /* Backpressure configuration. */
     double               bp_queue_warn_ratio; /* default 0.8 */

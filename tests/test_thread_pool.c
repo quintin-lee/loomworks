@@ -2371,6 +2371,13 @@ static void test_recovery_counts_crashed_worker(void)
     WAIT_UNTIL(5, sink == 1);
     ASSERT(sink == 1, "crash-count: pool functional after recovery");
 
+    /* The crashed worker died mid-task (+1 leaked); recovery must have
+     * repaired it via the executing flag.  Without the repair, active
+     * stays 1 forever and utilization reports 1.0 on an idle pool. */
+    ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK, "crash-count: resample");
+    ASSERT(status.active_count == 0, "crash-count: leaked active repaired");
+    ASSERT(status.utilization == 0.0, "crash-count: idle pool reads zero utilization");
+
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
@@ -2619,6 +2626,38 @@ static void test_resize_alloc_fail_clean_exit_realloc(void)
     loom_pool_destroy(&pool);
 }
 
+static void test_resize_alloc_fail_recovery_realloc(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(10); /* 11th check = recovery_attempts realloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "recovery realloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count unchanged");
+
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_resize_alloc_fail_executing_realloc(void)
+{
+    loom_test_arm_alloc_failure(-1);
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
+
+    loom_test_arm_alloc_failure(11); /* 12th check = worker_executing realloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "executing realloc fails");
+    ASSERT(loom_pool_worker_count(pool) == 2, "worker count unchanged");
+
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 static void test_resize_alloc_fail_worker_arg_first(void)
 {
     loom_test_arm_alloc_failure(-1);
@@ -2626,7 +2665,7 @@ static void test_resize_alloc_fail_worker_arg_first(void)
     loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
-    loom_test_arm_alloc_failure(10); /* 11th check = first worker_arg malloc */
+    loom_test_arm_alloc_failure(12); /* 13th check = first worker_arg malloc */
     ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "first worker malloc fails");
     ASSERT(loom_pool_worker_count(pool) == 2, "worker count rolled back");
     ASSERT(atomic_load_explicit(&pool->thread_alive[2], memory_order_acquire) == false,
@@ -2644,7 +2683,7 @@ static void test_resize_alloc_fail_worker_arg_mid(void)
     loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
-    loom_test_arm_alloc_failure(11); /* 12th check = second worker_arg malloc */
+    loom_test_arm_alloc_failure(13); /* 14th check = second worker_arg malloc */
     ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "second worker malloc fails");
     ASSERT(loom_pool_worker_count(pool) == 2, "worker count rolled back");
     ASSERT(atomic_load_explicit(&pool->thread_alive[2], memory_order_acquire) == false,
@@ -2670,9 +2709,9 @@ static void test_resize_fail_then_worker_crash_detected(void)
     ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
            "metrics created");
 
-    /* Failed grow: workers 2..6 are created, then the 6th malloc (check 16)
+    /* Failed grow: workers 2..6 are created, then the 6th malloc (check 18)
      * fails and the rollback joins them. Pre-fix their clean_exit stays true. */
-    loom_test_arm_alloc_failure(15);
+    loom_test_arm_alloc_failure(17);
     ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "6th worker malloc fails");
     ASSERT(loom_pool_worker_count(pool) == 2, "worker count rolled back");
 
@@ -4361,6 +4400,8 @@ int main(void)
     test_resize_alloc_fail_threads_realloc();
     test_resize_alloc_fail_alive_realloc();
     test_resize_alloc_fail_clean_exit_realloc();
+    test_resize_alloc_fail_recovery_realloc();
+    test_resize_alloc_fail_executing_realloc();
     test_resize_alloc_fail_worker_arg_first();
     test_resize_alloc_fail_worker_arg_mid();
     test_resize_fail_then_worker_crash_detected();
