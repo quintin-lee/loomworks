@@ -222,7 +222,7 @@ struct loom_thread_pool {
     /* Worker recovery configuration. Default disabled (timeout_ns=0). */
     int64_t          worker_recovery_timeout_ns; /**< Recovery timeout in ns (0=disabled). */
     _Atomic uint32_t max_recovery_attempts;      /**< Max rebuild attempts per worker. */
-    _Atomic uint32_t recovery_attempts[64];      /**< Per-slot attempt count. */
+    _Atomic uint32_t *recovery_attempts; /**< Per-slot attempt count (heap; sized to max_worker_count). */
 
     /* Backpressure configuration. */
     double               bp_queue_warn_ratio; /* default 0.8 */

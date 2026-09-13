@@ -18,6 +18,17 @@
  *   loom_future_t protected by its own mutex+condvar.  The caller
  *   blocks on loom_future_wait() until the worker signals readiness.
  */
+/* Must precede every system header: gate the GNU non-blocking-join
+ * primitive (pthread_tryjoin_np) used by worker auto-recovery so a
+ * terminated worker can be reaped without ever joining a *live* thread
+ * (which would deadlock while pool->lock is held).  Under
+ * LOOMWORKS_POSIX_FALLBACK we drop the GNU extension and recovery
+ * degrades to detection-only — see check_and_recover_workers. */
+#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
+#  ifndef _GNU_SOURCE
+#    define _GNU_SOURCE
+#  endif
+#endif
 #include "portability.h" /* must precede system headers: owns _GNU_SOURCE */
 #include "loomworks/thread_pool.h"
 #include "coroutine_internal.h"
@@ -35,6 +46,22 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Non-blocking reap of a *terminated* worker.  pthread_tryjoin_np (GNU)
+ * returns 0 for a worker that has exited (reap it, safe to restart),
+ * EBUSY for a worker that is still running (leave it alone — a blocking
+ * pthread_join on a live worker would deadlock while pool->lock is held,
+ * since the live worker must reacquire pool->lock to make progress).
+ * Under LOOMWORKS_POSIX_FALLBACK (strict POSIX, no GNU extension) there is
+ * no portable non-blocking join: the macro becomes detection-only, so
+ * recovery can still flag + count abnormal workers but never restart one,
+ * and it can never deadlock. */
+#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
+#  define LOOMWORKS_TRYJOIN(thread, out) pthread_tryjoin_np((thread), (out))
+#else
+#  define LOOMWORKS_TRYJOIN(thread, out) (-1)
+#  define LOOMWORKS_TRYJOIN_UNSUPPORTED 1
+#endif
 
 /* ================================================================
  *  Forward declarations
@@ -284,8 +311,11 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     /* Initialize worker recovery defaults (0 = disabled). */
     pool->worker_recovery_timeout_ns = 0;
     atomic_store_explicit(&pool->max_recovery_attempts, 3u, memory_order_relaxed);
-    for (uint32_t i = 0; i < pool->max_worker_count; i++) {
-        atomic_store_explicit(&pool->recovery_attempts[i], 0u, memory_order_relaxed);
+    pool->recovery_attempts =
+        (_Atomic uint32_t *)calloc(pool->max_worker_count, sizeof(_Atomic uint32_t));
+    if (pool->recovery_attempts == NULL) {
+        pool_destroy_internal(pool);
+        return LOOMWORKS_ERR_ALLOC;
     }
 
     /* --- Work-stealing deques (one Chase-Lev deque per worker slot) --- */
@@ -470,6 +500,7 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     free(pool->threads);
     free(pool->thread_alive);
     free(pool->thread_clean_exit);
+    free(pool->recovery_attempts);
 
     if (pool->numa_topo != NULL) {
         loom_numa_topology_free(pool->numa_topo);
@@ -2745,6 +2776,19 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         /* Zero the newly-extended tail: fresh slots must read as not-exited. */
         memset(new_clean_exit + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
         pool->thread_clean_exit = new_clean_exit;
+        _Atomic uint32_t *new_recovery =
+            test_alloc_fail_next()
+                ? NULL
+                : (_Atomic uint32_t *)realloc(pool->recovery_attempts,
+                                               count * sizeof(_Atomic uint32_t));
+        if (!new_recovery) {
+            rollback_deques_tail(pool, old_max, count);
+            pthread_mutex_unlock(&pool->lock);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        /* Zero the newly-extended tail: fresh slots have no attempts yet. */
+        memset(new_recovery + old_max, 0, (count - old_max) * sizeof(_Atomic uint32_t));
+        pool->recovery_attempts = new_recovery;
         if (pool->coro_ready != NULL) {
             /* Switch under coro_lock: the timer thread reads the array
              * inside coro_lock to push ready nodes, so replacing the
@@ -3016,34 +3060,43 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
                 atomic_load_explicit(&pool->recovery_attempts[i], memory_order_relaxed);
             uint32_t max_att =
                 atomic_load_explicit(&pool->max_recovery_attempts, memory_order_relaxed);
-            if (attempts < max_att) {
-                /* Attempt to join and restart the worker. */
-                pthread_t       old_thread = pool->threads[i];
-                struct timespec abs_timeout;
-                clock_gettime(CLOCK_MONOTONIC, &abs_timeout);
-                abs_timeout.tv_nsec += (long)(pool->worker_recovery_timeout_ns / 1000000);
-                if (abs_timeout.tv_nsec >= 1000000000L) {
-                    abs_timeout.tv_sec++;
-                    abs_timeout.tv_nsec -= 100000000L;
-                }
-                int rc = pthread_join(old_thread, NULL);
-                if (rc == 0 || rc == ESRCH) {
+            if (attempts >= max_att) {
+                continue; /* recovery budget exhausted for this slot */
+            }
+            /* Non-blocking reap of a *terminated* worker.  EBUSY means the slot
+             * still holds a healthy, running worker (thread_clean_exit is set
+             * only on the shutdown exit path, so a live worker reads !clean);
+             * leave it alone — a blocking pthread_join on it would deadlock
+             * while pool->lock is held, since the live worker must reacquire
+             * pool->lock to make progress.  rc==0 means the thread terminated
+             * and was reaped: safe to restart in the same slot.  In the
+             * POSIX-fallback build LOOMWORKS_TRYJOIN is detection-only (rc=-1)
+             * and never restarts, so it can never deadlock there either. */
+            pthread_t old_thread = pool->threads[i];
+            void     *retval     = NULL;
+            int       rc         = LOOMWORKS_TRYJOIN(old_thread, &retval);
+            if (rc != 0) {
+                continue; /* still running / not re-joinable / unsupported */
+            }
+            /* Terminated worker reaped.  Restart it in the same slot. */
+            worker_arg_t *wa = malloc(sizeof(*wa));
+            if (wa) {
+                wa->pool  = pool;
+                wa->index = i;
+                if (pthread_create(&pool->threads[i], NULL, worker_entry, wa) == 0) {
+                    atomic_store_explicit(&pool->thread_alive[i], true, memory_order_release);
+                    atomic_store_explicit(
+                        &pool->recovery_attempts[i], attempts + 1, memory_order_relaxed);
+                    recovered++;
+                } else {
+                    /* Restart failed (thread-exhaustion / OOM): mark the slot
+                     * dead so the predicate stops flagging it as recoverable.
+                     * Not counted against the attempt budget. */
                     atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
-                    worker_arg_t *wa = (worker_arg_t *)malloc(sizeof(*wa));
-                    if (wa) {
-                        wa->pool  = pool;
-                        wa->index = i;
-                        if (pthread_create(&pool->threads[i], NULL, worker_entry, wa) == 0) {
-                            atomic_store_explicit(
-                                &pool->thread_alive[i], true, memory_order_release);
-                            atomic_store_explicit(
-                                &pool->recovery_attempts[i], attempts + 1, memory_order_relaxed);
-                            recovered++;
-                        } else {
-                            free(wa);
-                        }
-                    }
+                    free(wa);
                 }
+            } else {
+                atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
             }
         }
     }
