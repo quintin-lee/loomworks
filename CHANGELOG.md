@@ -160,6 +160,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fault-injection hook plus 8 tests covering every grow-path allocation
   call site, proving the rollback guarantee and the lane-only degrade
   contract, and locking the fixes above against regression.
+- **Worker recovery OOB + deadlock**: `recovery_attempts` was a fixed `[64]`
+  array indexed by worker slot, so any pool over 64 workers read/wrote out
+  of bounds once recovery ran; it is now a heap array sized to
+  `max_worker_count` (calloc/realloc/free). Recovery also joined live
+  workers with blocking `pthread_join` under `pool->lock`; it now reaps
+  non-blockingly with `pthread_tryjoin_np` (`EBUSY` leaves healthy workers
+  alone), degrading to detection-only on strict-POSIX builds.
+- **Per-coroutine execution timeout actually fires**: `loom_coro_set_timeout()`
+  was a no-op and the budget fields were never written, so the check always
+  saw zero; the pool default is now stored, stamped per coroutine at the
+  worker wrap site, and an over-budget yield force-suspends with `TIMEOUT`
+  for teardown.
+- **Backpressure duplicate fire + real throttle window**: `enqueue_task()` ran
+  two identical `QUEUE_HIGH` fire blocks; the duplicate is gone and the
+  write-once throttle (one callback ever) is now a timestamp enforcing one
+  fire per `queue_wait_timeout_ns` window (default 60 s).
+- **Health uptime is real**: `loom_pool_health_sample()` hardcoded `uptime_ns`
+  to 0; it now reports monotonic now minus the pool-creation stamp.
+- **NUMA bind hardened**: `loom_numa_bind_current_thread()` passed its id to
+  the unchecked `CPU_SET()` macro; the `-1` sentinel and ids `>= CPU_SETSIZE`
+  are now rejected instead of writing out of the stack cpuset.
+- **Abnormal-worker counting is meaningful**: `alive && !clean` counted every
+  healthy running worker; recovery now counts genuine reaped crashes
+  cumulatively, reported by both `loom_pool_abnormal_worker_count()` and
+  health sampling.
+- **Crash no longer leaks active_workers**: a `pthread_exit` mid-task skipped
+  the dispatch epilogue, leaking `+1` active forever (utilization above 1.0
+  possible); a per-slot `worker_executing` flag lets recovery repair the
+  count exactly on reap. Also fixed fault-injection checkpoint numbering
+  drifted by the recovery gate and added the two missing gate tests.
 
 ## [1.0.1] - 2026-08-14
 
