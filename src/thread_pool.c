@@ -1848,18 +1848,12 @@ static loom_result_t enqueue_task(loom_thread_pool_t *pool,
         }
     }
     /* Fire a backpressure hint when the queue exceeds the warn threshold.
-     * Only one callback per 60s window thanks to the throttle flag. */
+     * At most one callback per bp_queue_timeout_ns window (default 60 s);
+     * fire_backpressure() enforces the window via bp_last_fire_ns. */
     if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 && pool->queue_capacity != 0) {
         uint64_t warn = (uint64_t)((double)pool->queue_capacity * pool->bp_queue_warn_ratio);
-        if (pool->queue_len >= warn) {
-            fire_backpressure(pool, LOOM_BACKPRESSURE_QUEUE_HIGH);
-        }
-    }
-    /* Fire a backpressure hint when the queue exceeds the warn threshold.
-     * Only one callback per 60s window thanks to the throttle flag. */
-    if (pool->bp_callback != NULL && pool->bp_queue_warn_ratio > 0.0 && pool->queue_capacity != 0) {
-        uint64_t warn = (uint64_t)((double)pool->queue_capacity * pool->bp_queue_warn_ratio);
-        if (pool->queue_len >= warn) {
+        uint32_t qlen = atomic_load_explicit(&pool->queue_len, memory_order_relaxed);
+        if (qlen >= warn) {
             fire_backpressure(pool, LOOM_BACKPRESSURE_QUEUE_HIGH);
         }
     }
@@ -3192,7 +3186,7 @@ void loom_pool_set_backpressure_callback(loom_thread_pool_t  *pool,
     }
     pool->bp_callback     = cb;
     pool->bp_callback_ctx = ctx;
-    atomic_store_explicit(&pool->bp_callback_throttle, false, memory_order_release);
+    atomic_store_explicit(&pool->bp_last_fire_ns, 0, memory_order_release);
 }
 
 void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event)
@@ -3200,10 +3194,18 @@ void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event
     if (!pool || !pool->bp_callback) {
         return;
     }
-    if (atomic_load_explicit(&pool->bp_callback_throttle, memory_order_relaxed)) {
+    /* Throttle to at most one callback per window.  The window is
+     * bp_queue_timeout_ns as configured (default 60 s when unset); a zero
+     * last-fire timestamp means "never fired" and always passes. */
+    int64_t window_ns = pool->bp_queue_timeout_ns > 0 ? pool->bp_queue_timeout_ns : 60000000000LL;
+    struct timespec ts_now;
+    clock_gettime(CLOCK_MONOTONIC, &ts_now);
+    int64_t now_ns  = (int64_t)ts_now.tv_sec * 1000000000LL + ts_now.tv_nsec;
+    int64_t last_ns = atomic_load_explicit(&pool->bp_last_fire_ns, memory_order_relaxed);
+    if (last_ns != 0 && now_ns - last_ns < window_ns) {
         return;
     }
-    atomic_store_explicit(&pool->bp_callback_throttle, true, memory_order_release);
+    atomic_store_explicit(&pool->bp_last_fire_ns, now_ns, memory_order_release);
     pool->bp_callback(pool->bp_callback_ctx, event);
 }
 

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/pipeline.h"
 #include "loomworks/thread_pool.h"
+#include "loomworks/thread_pool_backpressure.h"
 
 /* Internal struct access for work-stealing deque unit tests. */
 #include "../src/thread_pool_internal.h"
@@ -4148,6 +4149,73 @@ static void test_coro_execution_timeout(void)
            "coro-timeout: shutdown returned — runaway spinner was force-killed");
     ASSERT(g_coro_short_done, "coro-timeout: short coroutine completed within budget");
 }
+
+/* ---- Backpressure QUEUE_HIGH dedup + throttle window ----
+ * Burst across the warn threshold must collapse to exactly one callback
+ * (previously two identical fire blocks ran back-to-back per submit), and
+ * sleeping past the configured window must re-arm it (previously the
+ * write-once throttle stuck at one fire ever).  Both sides are wall-clock,
+ * so the sleep-past-window step is deterministic even under load. */
+static _Atomic int g_bp_high_count = 0;
+static _Atomic int g_bp_last_event = 0;
+
+static void bp_count_cb(void *ctx, loom_backpressure_event_t event)
+{
+    (void)ctx;
+    atomic_store_explicit(&g_bp_last_event, (int)event, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_bp_high_count, 1, memory_order_relaxed);
+}
+
+static void test_backpressure_window(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    /* Bounded capacity 16, single worker parked on a gate so queued depth
+     * stays put while the burst is submitted. */
+    loom_pool_config_t cfg = {.worker_count = 1, .queue_capacity = 16};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "bp: create pool");
+
+    loom_backpressure_config_t bpcfg = {.queue_depth_warn_ratio = 0.25,
+                                        .queue_wait_timeout_ns  = 200000000LL};
+    loom_pool_set_backpressure_config(pool, &bpcfg);
+    atomic_store_explicit(&g_bp_high_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_bp_last_event, -1, memory_order_relaxed);
+    loom_pool_set_backpressure_callback(pool, bp_count_cb, NULL);
+
+    g_gate_started = 0;
+    g_gate_release = 0;
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "bp: submit gate");
+    while (!g_gate_started) {
+        sched_yield();
+    }
+
+    /* Burst 8 tasks across the warn threshold (warn at 4).  The window must
+     * collapse the whole burst to exactly one callback. */
+    int sink = 0;
+    for (int i = 0; i < 8; i++) {
+        ASSERT(loom_pool_submit(pool, simple_task, &sink, NULL) == LOOMWORKS_OK,
+               "bp: submit burst");
+    }
+    ASSERT(atomic_load_explicit(&g_bp_high_count, memory_order_relaxed) == 1,
+           "bp: burst collapsed to exactly one QUEUE_HIGH");
+    ASSERT(atomic_load_explicit(&g_bp_last_event, memory_order_relaxed) ==
+               LOOM_BACKPRESSURE_QUEUE_HIGH,
+           "bp: event is QUEUE_HIGH");
+
+    /* Sleep past the 200 ms window, then submit once more while still above
+     * warn.  The window must have re-armed: second fire.  Under the old
+     * write-once throttle the count stays stuck at 1. */
+    struct timespec bp_delay = {0, 400000000L};
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &bp_delay, NULL);
+    ASSERT(loom_pool_submit(pool, simple_task, &sink, NULL) == LOOMWORKS_OK,
+           "bp: submit after window");
+    ASSERT(atomic_load_explicit(&g_bp_high_count, memory_order_relaxed) == 2,
+           "bp: window re-armed, second QUEUE_HIGH fired");
+
+    g_gate_release = 1;
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -4284,6 +4352,7 @@ int main(void)
     test_pool_coro_sleep();
     test_coro_cancel_sleeping();
     test_coro_execution_timeout();
+    test_backpressure_window();
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
 }
