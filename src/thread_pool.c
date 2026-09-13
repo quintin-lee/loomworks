@@ -317,6 +317,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     }
     /* Initialize worker recovery defaults (0 = disabled). */
     pool->worker_recovery_timeout_ns = 0;
+    atomic_store_explicit(&pool->abnormal_total, 0u, memory_order_relaxed);
     atomic_store_explicit(&pool->coro_timeout_ns, 0, memory_order_relaxed);
     atomic_store_explicit(&pool->max_recovery_attempts, 3u, memory_order_relaxed);
     pool->recovery_attempts =
@@ -3093,6 +3094,10 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
             if (rc != 0) {
                 continue; /* still running / not re-joinable / unsupported */
             }
+            /* A terminated worker reached here with !clean (outer predicate),
+             * so this is a genuine abnormal exit: count it.  Cumulative —
+             * a later successful restart does not erase the crash. */
+            atomic_fetch_add_explicit(&pool->abnormal_total, 1u, memory_order_relaxed);
             /* Terminated worker reaped.  Restart it in the same slot. */
             worker_arg_t *wa = malloc(sizeof(*wa));
             if (wa) {
@@ -3148,22 +3153,22 @@ void loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns)
     atomic_store_explicit(&pool->coro_timeout_ns, timeout_ns, memory_order_relaxed);
 }
 
+/**
+ * Cumulative abnormal worker exits observed by worker recovery.
+ *
+ * The old alive && !clean predicate counted every healthy running worker
+ * (thread_clean_exit is set only on the shutdown exit path), so this
+ * reported worker_count on a healthy pool.  Instead, recovery increments
+ * abnormal_total exactly when it reaps a terminated, non-clean worker —
+ * the only point where "crashed" is observable without blocking.
+ * Requires a nonzero worker-recovery timeout; 0 when recovery never ran.
+ */
 uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool)
 {
     if (!pool) {
         return 0;
     }
-    pthread_mutex_lock((pthread_mutex_t *)&pool->lock);
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < pool->worker_count; i++) {
-        bool alive = atomic_load_explicit(&pool->thread_alive[i], memory_order_relaxed);
-        bool clean = atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_relaxed);
-        if (alive && !clean) {
-            count++;
-        }
-    }
-    pthread_mutex_unlock((pthread_mutex_t *)&pool->lock);
-    return count;
+    return atomic_load_explicit(&pool->abnormal_total, memory_order_relaxed);
 }
 
 /* ================================================================
@@ -3230,13 +3235,10 @@ loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool, loom_health_stat
     uint32_t ac = atomic_load_explicit(&pool->active_workers, memory_order_relaxed);
     uint32_t pc = atomic_load_explicit(&pool->queue_len, memory_order_relaxed);
 
-    uint32_t abnormal = 0;
-    for (uint32_t i = 0; i < pool->max_worker_count; i++) {
-        if (atomic_load_explicit(&pool->thread_alive[i], memory_order_relaxed) &&
-            !atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_relaxed)) {
-            abnormal++;
-        }
-    }
+    /* Cumulative abnormal exits observed by recovery (see
+     * loom_pool_abnormal_worker_count): the old alive && !clean scan
+     * counted healthy running workers, so it is gone. */
+    uint32_t abnormal = atomic_load_explicit(&pool->abnormal_total, memory_order_relaxed);
     pthread_mutex_unlock(&pool->lock);
 
     double util = (wc > 0) ? (double)ac / (double)wc : 0.0;

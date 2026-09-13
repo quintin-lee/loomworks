@@ -11,7 +11,7 @@ typedef struct loom_health_status {
     uint32_t worker_count;     /**< Total configured workers. */
     uint32_t active_count;     /**< Workers currently executing a task. */
     uint32_t pending_count;    /**< Tasks waiting in queue. */
-    uint32_t abnormal_workers; /**< Workers that exited abnormally. */
+    uint32_t abnormal_workers; /**< Cumulative abnormal exits (0 if recovery off). */
     int64_t  uptime_ns;        /**< Pool uptime in nanoseconds (CLOCK_MONOTONIC). */
     double   utilization;      /**< active_count / worker_count (0.0-1.0). */
 } loom_health_status_t;

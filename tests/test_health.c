@@ -83,16 +83,12 @@ static void test_recovery_large_pool(void)
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 72};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "large pool create");
-    /* NOTE: abnormal_worker_count/health.abnormal_workers uses the predicate
-     * alive && !clean, and thread_clean_exit is set only on the shutdown
-     * exit path — so a healthy running worker reads !clean and is *counted*.
-     * We therefore do NOT assert abnormal_workers==0 here (that is a separate,
-     * pre-existing semantic quirk, not what this test guards).  What this
-     * test guards: the recovery scan reading recovery_attempts[i] for
-     * i < 72.  Under the old fixed recovery_attempts[64] array that is a
-     * heap out-of-bounds read; the heap array sized to max_worker_count is
-     * clean.  The non-blocking tryjoin returns EBUSY for each live worker,
-     * so no restart is attempted and no join-under-lock deadlock occurs. */
+    /* abnormal_workers is the cumulative crash count observed by recovery.
+     * No worker crashes in this test, so it must read 0 even with 72 live
+     * workers and recovery enabled — previously the alive && !clean
+     * predicate counted every healthy running worker here.  This test also
+     * guards the recovery scan reading recovery_attempts[i] for i < 72
+     * (heap OOB under the old fixed [64] array). */
 
     loom_pool_set_worker_recovery_timeout(pool, 1000000000LL); /* 1 s; enables the path */
 
@@ -105,6 +101,8 @@ static void test_recovery_large_pool(void)
     loom_health_status_t status;
     ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK, "health sample on large pool");
     ASSERT(status.worker_count == 72, "health sample reports full worker count");
+    ASSERT(status.abnormal_workers == 0, "no crashes: abnormal count is 0");
+    ASSERT(loom_pool_abnormal_worker_count(pool) == 0, "abnormal_worker_count is 0");
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);

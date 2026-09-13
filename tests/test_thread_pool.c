@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/pipeline.h"
 #include "loomworks/thread_pool.h"
+#include "loomworks/thread_pool_health.h"
 #include "loomworks/thread_pool_backpressure.h"
 
 /* Internal struct access for work-stealing deque unit tests. */
@@ -2331,6 +2332,49 @@ static void test_worker_crash_detected(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: recovery counts a crashed worker ----------
+ * A worker that pthread_exits mid-task never sets clean_exit.  With worker
+ * recovery enabled, the timer-thread scan must reap it, count exactly one
+ * abnormal exit, restart the worker, and leave the pool functional.
+ * Previously abnormal_worker_count() reported worker_count on any live
+ * pool, so no value here was meaningful. */
+static void test_recovery_counts_crashed_worker(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "crash-count: create pool");
+
+    /* Start the timer thread (recovery scans run on it) with a trivial
+     * coroutine, then enable worker recovery. */
+    ASSERT(loom_pool_submit_coroutine(pool, pool_coro_yield_once, NULL, 0, NULL) == LOOMWORKS_OK,
+           "crash-count: submit timer-starting coroutine");
+    struct timespec warmup = {0, 200000000L}; /* 200 ms */
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &warmup, NULL);
+
+    loom_pool_set_worker_recovery_timeout(pool, 1000000000LL); /* 1 s */
+    ASSERT(loom_pool_abnormal_worker_count(pool) == 0, "crash-count: no crashes yet");
+
+    /* Crash the only worker: pthread_exit mid-task, clean_exit never set. */
+    ASSERT(loom_pool_submit(pool, crash_task, NULL, NULL) == LOOMWORKS_OK,
+           "crash-count: submit crash task");
+    WAIT_UNTIL(10, loom_pool_abnormal_worker_count(pool) == 1);
+    ASSERT(loom_pool_abnormal_worker_count(pool) == 1, "crash-count: crash observed");
+
+    loom_health_status_t status;
+    ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK, "crash-count: health sample");
+    ASSERT(status.abnormal_workers == 1, "crash-count: health agrees");
+
+    /* The restarted worker must still process work: the pool survived. */
+    int sink = 0;
+    ASSERT(loom_pool_submit(pool, simple_task, &sink, NULL) == LOOMWORKS_OK,
+           "crash-count: submit after crash");
+    WAIT_UNTIL(5, sink == 1);
+    ASSERT(sink == 1, "crash-count: pool functional after recovery");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ---------- Test: submit_blocking with unbounded queue ---------- */
 static void test_submit_blocking_unbounded(void)
 {
@@ -4348,6 +4392,7 @@ int main(void)
     test_future_destroy_pending_rejected();
     test_pool_destroy_without_shutdown();
     test_worker_crash_detected();
+    test_recovery_counts_crashed_worker();
     test_pool_submit_coroutine();
     test_pool_coro_sleep();
     test_coro_cancel_sleeping();
