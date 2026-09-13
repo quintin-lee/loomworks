@@ -195,6 +195,21 @@ static void test_numa_null_safety(void)
     loom_pool_destroy(&pool);
 }
 
+/* Out-of-range CPU ids must be rejected, never passed to the unchecked
+ * CPU_SET() macro (stack out-of-bounds write).  On the strict-POSIX
+ * fallback path binding is a no-op that reports success, so the
+ * expectations are inverted there by design. */
+static void test_bind_cpu_id_bounds(void)
+{
+#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
+    ASSERT(!loom_numa_bind_current_thread((uint32_t)-1), "bind: sentinel rejected");
+    ASSERT(!loom_numa_bind_current_thread(1000000u), "bind: huge id rejected");
+    ASSERT(!loom_numa_bind_current_thread(UINT32_MAX), "bind: UINT32_MAX rejected");
+#else
+    ASSERT(loom_numa_bind_current_thread((uint32_t)-1), "bind: fallback no-op ok");
+#endif
+}
+
 int main(void)
 {
     printf("Running NUMA affinity tests...\n");
@@ -205,6 +220,7 @@ int main(void)
     test_pool_numa_virtual_domains();
     test_pool_numa_resize();
     test_numa_null_safety();
+    test_bind_cpu_id_bounds();
 
     printf("\nNUMA Tests Results: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

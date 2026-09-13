@@ -308,6 +308,13 @@ void loom_numa_map_worker(const loom_numa_topology_t *topo,
 bool loom_numa_bind_current_thread(uint32_t cpu_id)
 {
 #if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
+    /* CPU_SET() has no bounds checking: an id >= CPU_SETSIZE (or one that
+     * goes negative through the (int) cast) writes out of the stack cpuset.
+     * Reject instead of binding nothing — callers treat false as "no
+     * affinity" and continue unpinned. */
+    if (cpu_id == (uint32_t)-1 || cpu_id >= (uint32_t)CPU_SETSIZE) {
+        return false;
+    }
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET((int)cpu_id, &cpuset);
