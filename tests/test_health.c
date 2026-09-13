@@ -109,6 +109,27 @@ static void test_recovery_large_pool(void)
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
+
+/* Uptime must be CLOCK_MONOTONIC nanoseconds since pool creation, not a
+ * hardcoded 0.  Both stamps are wall-clock, so a 100 ms sleep guarantees
+ * a >= 50 ms growth (robust margin for scheduling jitter). */
+static void test_health_uptime(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 2};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "uptime: pool create");
+
+    loom_health_status_t s1, s2;
+    ASSERT(loom_pool_health_sample(pool, &s1) == LOOMWORKS_OK, "uptime: first sample");
+    ASSERT(s1.uptime_ns >= 0, "uptime: non-negative at start");
+    sleep_ms(100);
+    ASSERT(loom_pool_health_sample(pool, &s2) == LOOMWORKS_OK, "uptime: second sample");
+    ASSERT(s2.uptime_ns > s1.uptime_ns, "uptime: monotonic growth");
+    ASSERT(s2.uptime_ns - s1.uptime_ns >= 50000000LL, "uptime: grew by the sleep window");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
 static void test_health_null_safety(void)
 {
     ASSERT(loom_pool_health_sample(NULL, NULL) == LOOMWORKS_ERR_INVALID, "null pool rejected");
@@ -120,6 +141,7 @@ int main(void)
     test_health_during_work();
     test_health_null_safety();
     test_recovery_large_pool();
+    test_health_uptime();
 
     fprintf(stderr, "Passes: %d, Failures: %d\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

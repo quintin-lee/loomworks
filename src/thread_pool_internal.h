@@ -218,6 +218,7 @@ struct loom_thread_pool {
     _Atomic bool
             *thread_clean_exit; /**< Parallel to threads[]: true once a worker exits normally. */
     uint32_t max_worker_count;  /**< Max capacity of threads array. */
+    int64_t  created_ns;        /**< CLOCK_MONOTONIC ns when the pool was created (uptime base). */
 
     /* Worker recovery configuration. Default disabled (timeout_ns=0). */
     int64_t          worker_recovery_timeout_ns; /**< Recovery timeout in ns (0=disabled). */
@@ -229,7 +230,6 @@ struct loom_thread_pool {
     int64_t              bp_queue_timeout_ns; /* default 60s */
     loom_backpressure_fn bp_callback;         /* NULL = no callback */
     void                *bp_callback_ctx;
-    _Atomic bool         bp_callback_throttle; /* prevent spam */
     _Atomic int64_t    bp_last_fire_ns;  /* CLOCK_MONOTONIC ns of last QUEUE_HIGH fire (0 = never). */
     _Atomic int64_t    coro_timeout_ns; /*< Per-coroutine execution timeout (0 = disabled). */
     _Atomic uint64_t     next_task_id;    /**< Monotonically increasing task ID counter. */

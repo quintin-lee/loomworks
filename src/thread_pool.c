@@ -308,6 +308,13 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->node_stack, 0, memory_order_relaxed);
 
     pool->max_worker_count = pool->worker_count;
+    /* Creation timestamp for health uptime (CLOCK_MONOTONIC, write-once
+     * before workers spawn, so plain store is safe). */
+    {
+        struct timespec ts_created;
+        clock_gettime(CLOCK_MONOTONIC, &ts_created);
+        pool->created_ns = (int64_t)ts_created.tv_sec * 1000000000LL + ts_created.tv_nsec;
+    }
     /* Initialize worker recovery defaults (0 = disabled). */
     pool->worker_recovery_timeout_ns = 0;
     atomic_store_explicit(&pool->coro_timeout_ns, 0, memory_order_relaxed);
@@ -3234,11 +3241,17 @@ loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool, loom_health_stat
 
     double util = (wc > 0) ? (double)ac / (double)wc : 0.0;
 
+    /* Uptime since pool creation (both CLOCK_MONOTONIC; created_ns is
+     * write-once at init, so the lock-free read here is safe). */
+    struct timespec ts_now;
+    clock_gettime(CLOCK_MONOTONIC, &ts_now);
+    int64_t now_ns = (int64_t)ts_now.tv_sec * 1000000000LL + ts_now.tv_nsec;
+
     out->worker_count     = wc;
     out->active_count     = ac;
     out->pending_count    = pc;
     out->abnormal_workers = abnormal;
-    out->uptime_ns        = 0;
+    out->uptime_ns        = now_ns - pool->created_ns;
     out->utilization      = util;
 
     return LOOMWORKS_OK;
