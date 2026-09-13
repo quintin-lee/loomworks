@@ -4075,6 +4075,79 @@ static void test_coro_cancel_sleeping(void)
     ASSERT(atomic_load(&g_coro_tasks_done) == 0, "cancel-sleep: task never ran to completion");
 }
 
+/* ---- Per-coroutine execution timeout (loom_coro_set_timeout) ----
+ * Differential regression.  A forever-spinning coroutine under a tight
+ * 50 ms execution budget must be force-killed at its next yield point, while
+ * a coroutine that finishes in microseconds completes normally.  Before the
+ * timeout was wired up, loom_coro_set_timeout() was a no-op, the spinner
+ * wedged its worker in an infinite yield loop, and loom_pool_shutdown()
+ * blocked forever because shutdown must drain every worker.  The watchdog
+ * thread below catches that hang: with a working timeout the spinner is
+ * reaped within ~50 ms and shutdown returns promptly.
+ *
+ * Why not just drain a burst of tasks?  Only ONE worker is stuck by a single
+ * spinner; the other three keep draining anything submitted, so a burst
+ * would pass even with the timeout broken.  The shutdown drain is the only
+ * observable that discriminates, because shutdown joins every worker. */
+static _Atomic int g_coro_short_done  = 0;
+static _Atomic int g_coro_shutdown_ok = 0;
+
+static void pool_coro_spin_forever(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        loom_coro_yield();
+    }
+}
+
+static void pool_coro_short_finish(void *arg)
+{
+    (void)arg;
+    loom_coro_yield();
+    loom_coro_yield();
+    atomic_store_explicit(&g_coro_short_done, 1, memory_order_relaxed);
+}
+
+static void *timeout_shutdown_thread(void *arg)
+{
+    loom_thread_pool_t *pool = (loom_thread_pool_t *)arg;
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+    atomic_store_explicit(&g_coro_shutdown_ok, 1, memory_order_relaxed);
+    return NULL;
+}
+
+static void test_coro_execution_timeout(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg   = {.worker_count = 4, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "coro-timeout: create pool");
+    ASSERT(pool != NULL, "coro-timeout: pool non-NULL");
+
+    /* 50 ms per-coroutine budget.  Both coroutines share it: the spinner
+     * exceeds it at its next yield and is force-killed; the two-yield
+     * coroutine finishes in microseconds, far inside the budget. */
+    atomic_store_explicit(&g_coro_short_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_coro_shutdown_ok, 0, memory_order_relaxed);
+    loom_coro_set_timeout(pool, 50000000LL);
+    loom_pool_submit_coroutine(pool, pool_coro_spin_forever, NULL, 0, NULL);
+    loom_pool_submit_coroutine(pool, pool_coro_short_finish, NULL, 0, NULL);
+
+    /* Shutdown on a watchdog thread so a wedged worker (broken/absent
+     * timeout) is caught instead of hanging the binary.  With the timeout
+     * wired up the spinner is reaped within ~50 ms and shutdown returns
+     * quickly.  Join only once finished so the failure path exits cleanly. */
+    pthread_t wt;
+    ASSERT(pthread_create(&wt, NULL, timeout_shutdown_thread, pool) == 0,
+           "coro-timeout: start shutdown watchdog");
+    WAIT_UNTIL(5, atomic_load_explicit(&g_coro_shutdown_ok, memory_order_relaxed));
+    if (atomic_load_explicit(&g_coro_shutdown_ok, memory_order_relaxed)) {
+        pthread_join(wt, NULL); /* thread finished; join is instant and safe */
+    }
+    ASSERT(g_coro_shutdown_ok,
+           "coro-timeout: shutdown returned — runaway spinner was force-killed");
+    ASSERT(g_coro_short_done, "coro-timeout: short coroutine completed within budget");
+}
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -4210,6 +4283,7 @@ int main(void)
     test_pool_submit_coroutine();
     test_pool_coro_sleep();
     test_coro_cancel_sleeping();
+    test_coro_execution_timeout();
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
 }

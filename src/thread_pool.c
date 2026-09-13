@@ -310,6 +310,7 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     pool->max_worker_count = pool->worker_count;
     /* Initialize worker recovery defaults (0 = disabled). */
     pool->worker_recovery_timeout_ns = 0;
+    atomic_store_explicit(&pool->coro_timeout_ns, 0, memory_order_relaxed);
     atomic_store_explicit(&pool->max_recovery_attempts, 3u, memory_order_relaxed);
     pool->recovery_attempts =
         (_Atomic uint32_t *)calloc(pool->max_worker_count, sizeof(_Atomic uint32_t));
@@ -1025,6 +1026,19 @@ static void *worker_entry(void *arg)
             coro->sleep_reg_ctx = pool;
             coro->task_node     = task;
             coro->worker_idx    = idx;
+            /* Per-coroutine execution timeout (default: 0 = disabled).
+             * execution_start_ns is CLOCK_MONOTONIC absolute;
+             * max_execution_ns = 0 means the check_coro_timeout()
+             * guard in coroutine.c returns false and the timeout is
+             * disabled for this coroutine. */
+            coro->max_execution_ns   =
+                atomic_load_explicit(&pool->coro_timeout_ns, memory_order_relaxed);
+            {
+                struct timespec ts_now;
+                clock_gettime(CLOCK_MONOTONIC, &ts_now);
+                coro->execution_start_ns =
+                    (int64_t)ts_now.tv_sec * 1000000000LL + ts_now.tv_nsec;
+            }
             task->user_data     = coro;
             crc                 = loom_coro_resume(coro);
             if (crc == LOOMWORKS_CORO_OK) {
@@ -3113,6 +3127,24 @@ void loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t tim
         return;
     }
     pool->worker_recovery_timeout_ns = timeout_ns;
+}
+
+/* ================================================================
+ *  Public API — Coroutine execution timeout
+ * ================================================================ */
+/**
+ * Set the per-coroutine execution budget for coroutine tasks submitted to
+ * this pool.  The value is captured at submission time and stamped onto
+ * each coroutine at the worker wrap site; the timeout check then fires at
+ * the next yield/sleep point inside the coroutine.  0 (or a negative
+ * value) disables the timeout.
+ */
+void loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns)
+{
+    if (!pool) {
+        return;
+    }
+    atomic_store_explicit(&pool->coro_timeout_ns, timeout_ns, memory_order_relaxed);
 }
 
 uint32_t loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool)

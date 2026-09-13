@@ -609,8 +609,20 @@ void loom_coro_yield(void)
     if (cur == NULL || cur->state != LOOMWORKS_CORO_RUNNING) {
         return;
     }
-    /* Check execution timeout. */
+    /* Check execution timeout.  When the budget is exceeded, force-suspend
+     * at this yield point: mark TIMEOUT and hand control back to the
+     * scheduler so the owning worker observes the state and tears the task
+     * down (wrap site / Step C0).  Without the swap the coroutine would run
+     * on to completion and clobber TIMEOUT back to DONE, making the timeout
+     * unobservable.  Standalone coroutines leave max_execution_ns == 0, so
+     * this path stays inert for them. */
     if (check_coro_timeout(cur)) {
+        cur->state = LOOMWORKS_CORO_TIMEOUT;
+        ASAN_SWITCH_TO_SCHEDULER();
+        if (loom_coro_ctx_swap(&cur->ctx, &g_scheduler) != 0) {
+            cur->state = LOOMWORKS_CORO_ERROR;
+        }
+        ASAN_SWITCH_BACK_TO_CORO();
         return;
     }
     /* Pause here: save our context, switch to the scheduler, and
@@ -798,14 +810,6 @@ static void free_all_pooled_stacks(void)
         free(cur);
         cur = next;
     }
-}
-
-void loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns)
-{
-    if (!pool || timeout_ns <= 0) {
-        return;
-    }
-    /* Timeout is applied by the pool worker loop via coro->max_execution_ns. */
 }
 
 /* Runs at process exit (via __attribute__((destructor))).  By then every
