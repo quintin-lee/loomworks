@@ -107,6 +107,7 @@ enable_testing()
 
 add_executable(test_thread_pool tests/test_thread_pool.c)
 target_link_libraries(test_thread_pool PRIVATE loomworks_static)
+target_compile_definitions(test_thread_pool PRIVATE ${LOOMWORKS_CTX_DEFINES})
 add_test(NAME ThreadPoolTests COMMAND test_thread_pool)
 set_tests_properties(ThreadPoolTests PROPERTIES TIMEOUT 900)
 
@@ -137,6 +138,7 @@ set_tests_properties(RuntimeTests PROPERTIES TIMEOUT 120)
 
 add_executable(test_numa tests/test_numa.c)
 target_include_directories(test_numa PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(test_numa PRIVATE ${LOOMWORKS_CTX_DEFINES})
 target_link_libraries(test_numa PRIVATE loomworks_static)
 add_test(NAME NumaTests COMMAND test_numa)
 set_tests_properties(NumaTests PROPERTIES TIMEOUT 120)

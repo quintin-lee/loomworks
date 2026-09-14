@@ -3114,6 +3114,10 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
              * and never restarts, so it can never deadlock there either. */
             pthread_t old_thread = pool->threads[i];
             void     *retval     = NULL;
+            /* Under LOOMWORKS_POSIX_FALLBACK the macro below is detection-only
+             * and ignores its arguments, so these stay unread there by design. */
+            (void)old_thread;
+            (void)retval;
             int       rc         = LOOMWORKS_TRYJOIN(old_thread, &retval);
             if (rc != 0) {
                 continue; /* still running / not re-joinable / unsupported */

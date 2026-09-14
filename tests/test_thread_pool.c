@@ -2357,6 +2357,7 @@ static void test_recovery_counts_crashed_worker(void)
     /* Crash the only worker: pthread_exit mid-task, clean_exit never set. */
     ASSERT(loom_pool_submit(pool, crash_task, NULL, NULL) == LOOMWORKS_OK,
            "crash-count: submit crash task");
+#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
     WAIT_UNTIL(10, loom_pool_abnormal_worker_count(pool) == 1);
     ASSERT(loom_pool_abnormal_worker_count(pool) == 1, "crash-count: crash observed");
 
@@ -2377,6 +2378,15 @@ static void test_recovery_counts_crashed_worker(void)
     ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK, "crash-count: resample");
     ASSERT(status.active_count == 0, "crash-count: leaked active repaired");
     ASSERT(status.utilization == 0.0, "crash-count: idle pool reads zero utilization");
+#else
+    /* Strict-POSIX builds have no non-blocking reap, so recovery is
+     * detection-only by design: the crashed worker is never restarted
+     * and nothing is counted.  Shutdown must still join the terminated
+     * worker cleanly instead of hanging. */
+    struct timespec fb_delay = {1, 0}; /* let timer scans run */
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &fb_delay, NULL);
+    ASSERT(loom_pool_abnormal_worker_count(pool) == 0, "crash-count: fallback counts nothing");
+#endif
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
