@@ -2732,6 +2732,16 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         return LOOMWORKS_ERR_SHUTDOWN;
     }
     if (count > pool->max_worker_count) {
+        /* FAULT-INJECTION CHECKPOINT ORDER (contract): every
+         * test_alloc_fail_next() consult below fires in fixed execution
+         * order, and tests/test_thread_pool.c arms them by index
+         * (arm N fails the (N+1)th check).  Current sequence for a grow:
+         * 1 deques array, 2-7 per-deque slots, 8 threads, 9 thread_alive,
+         * 10 thread_clean_exit, 11 recovery_attempts, 12 worker_executing,
+         * 13+ per-worker args.  ADDING A GATE HERE RENUMBERS EVERYTHING
+         * AFTER IT — update the arm() values and comments in the
+         * test_resize_alloc_fail_* tests to match (a stale number passes
+         * vacuously against the wrong gate). */
         /* Need to grow the threads array.  The deques array must grow in
          * lockstep: workers index it by slot id, and realloc may move it,
          * so do it FIRST — on failure nothing else has been touched yet. */

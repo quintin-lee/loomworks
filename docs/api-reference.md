@@ -178,7 +178,37 @@ double   loom_pool_utilization(const loom_thread_pool_t *pool);
 - `idle_count()`: `worker_count - active_count`, clamped at 0.
 - `utilization()`: `active_count / worker_count` in `[0.0, 1.0]` (`0.0` when `worker_count == 0`).
 
----
+### 1.9 Health, backpressure, and timeouts
+
+```c
+loom_result_t loom_pool_health_sample(loom_thread_pool_t *pool, loom_health_status_t *out);
+uint32_t      loom_pool_abnormal_worker_count(const loom_thread_pool_t *pool);
+void          loom_pool_set_backpressure_config(loom_thread_pool_t *pool,
+                                                const loom_backpressure_config_t *cfg);
+void          loom_pool_set_backpressure_callback(loom_thread_pool_t *pool,
+                                                  loom_backpressure_fn cb, void *ctx);
+void          loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
+void          loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
+```
+
+- `health_sample()`: fills worker/active/pending counts plus `abnormal_workers`
+  (cumulative abnormal worker exits observed by recovery or the shutdown join;
+  0 unless worker recovery ran) and `uptime_ns` (CLOCK_MONOTONIC nanoseconds
+  since pool creation).
+- `abnormal_worker_count()`: the same cumulative crash count without the full
+  snapshot; 0 for a NULL pool.
+- Backpressure: `set_backpressure_config()` sets `queue_depth_warn_ratio`
+  (default 0.8) and `queue_wait_timeout_ns` (default 60 s, doubles as the
+  callback throttle window). The callback fires `QUEUE_HIGH` when depth
+  crosses the warn threshold and `QUEUE_BLOCKED` when a blocking submit
+  actually waits — at most one callback per window, invoked lock-free from
+  the submitting thread, so it must be async-signal-safe and quick.
+- `loom_coro_set_timeout()`: per-coroutine execution budget in ns (0
+  disables); a coroutine past budget is force-suspended with `TIMEOUT` at
+  its next yield point and torn down.
+- `loom_pool_set_worker_recovery_timeout()`: nonzero enables the timer-thread
+  scan that reaps terminated workers and restarts them (bounded attempts);
+  on strict-POSIX builds recovery is detection-only.
 
 ## 2. Coroutine API
 
