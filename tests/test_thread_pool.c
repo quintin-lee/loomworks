@@ -2328,6 +2328,13 @@ static void test_worker_crash_detected(void)
     ASSERT(loom_pool_abnormal_worker_count(pool) == 1, "shutdown join counted the crash");
     ASSERT(loom_metrics_failed(metrics) == 1, "metrics_failed counter reflects crash");
 
+    /* Recovery was never enabled here, so the shutdown join is the only
+     * repair path: the leaked active count must read 0 on the idle pool. */
+    loom_health_status_t st;
+    ASSERT(loom_pool_health_sample(pool, &st) == LOOMWORKS_OK, "crash health sample");
+    ASSERT(st.active_count == 0, "shutdown join repaired leaked active");
+    ASSERT(st.utilization == 0.0, "idle pool reads zero utilization");
+
     loom_metrics_destroy(&metrics);
     loom_pool_destroy(&pool);
 }

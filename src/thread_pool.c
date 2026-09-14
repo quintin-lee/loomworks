@@ -2284,6 +2284,14 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
                  * replacement exits clean) or was marked dead (alive=false,
                  * skipped by the loop above). */
                 atomic_fetch_add_explicit(&pool->abnormal_total, 1u, memory_order_relaxed);
+                /* The crash may also have leaked active_workers if the worker
+                 * died mid-task (join success synchronizes with termination,
+                 * so the flag read is exact).  Repair it here so a pool that
+                 * never enabled recovery still reports a true idle state. */
+                if (atomic_load_explicit(&pool->worker_executing[i], memory_order_relaxed)) {
+                    atomic_store_explicit(&pool->worker_executing[i], false, memory_order_relaxed);
+                    atomic_fetch_sub(&pool->active_workers, 1);
+                }
             }
             atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
         }
