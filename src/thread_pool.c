@@ -2274,6 +2274,12 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
             if (jrc != 0 ||
                 !atomic_load_explicit(&pool->thread_clean_exit[i], memory_order_acquire)) {
                 metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
+                /* Same crash the recovery scan would count: a worker that
+                 * exited without the clean flag.  No double count is
+                 * possible — a recovery-reaped slot either restarted (its
+                 * replacement exits clean) or was marked dead (alive=false,
+                 * skipped by the loop above). */
+                atomic_fetch_add_explicit(&pool->abnormal_total, 1u, memory_order_relaxed);
             }
             atomic_store_explicit(&pool->thread_alive[i], false, memory_order_release);
         }

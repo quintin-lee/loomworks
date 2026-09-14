@@ -2323,9 +2323,9 @@ static void test_worker_crash_detected(void)
 
     /* The single worker runs the crash task and dies abnormally. */
     ASSERT(loom_pool_submit(pool, crash_task, NULL, NULL) == LOOMWORKS_OK, "crash task submitted");
-
     loom_pool_shutdown(pool);
     ASSERT(ctx.failed == 1, "worker crash reported as FAILED metric");
+    ASSERT(loom_pool_abnormal_worker_count(pool) == 1, "shutdown join counted the crash");
     ASSERT(loom_metrics_failed(metrics) == 1, "metrics_failed counter reflects crash");
 
     loom_metrics_destroy(&metrics);
