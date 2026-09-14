@@ -4309,6 +4309,64 @@ static void test_backpressure_window(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---- Backpressure QUEUE_BLOCKED fires when a submit blocks ----
+ * The QUEUE_BLOCKED enum existed but nothing ever fired it (dead API
+ * surface, same class as the no-op timeout).  A blocking submit against
+ * a full queue must fire exactly one BLOCKED event, then land once space
+ * frees.  Warn-ratio config is deliberately left unset so QUEUE_HIGH
+ * cannot interfere. */
+static int           g_bp_block_sink = 0;
+static loom_result_t g_bp_block_rc   = LOOMWORKS_ERR_INVALID;
+
+static void *bp_blocking_thread(void *arg)
+{
+    g_bp_block_rc = loom_pool_submit_blocking(
+        (loom_thread_pool_t *)arg, simple_task, &g_bp_block_sink, NULL);
+    return NULL;
+}
+
+static void test_backpressure_blocked(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 8};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "bp-block: create pool");
+
+    atomic_store_explicit(&g_bp_high_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_bp_last_event, -1, memory_order_relaxed);
+    loom_pool_set_backpressure_callback(pool, bp_count_cb, NULL);
+
+    g_gate_started = 0;
+    g_gate_release = 0;
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "bp-block: submit gate");
+    while (!g_gate_started) {
+        sched_yield();
+    }
+    int sink = 0;
+    for (int i = 0; i < 8; i++) {
+        ASSERT(loom_pool_submit(pool, simple_task, &sink, NULL) == LOOMWORKS_OK,
+               "bp-block: fill queue to capacity");
+    }
+    /* Queue is full with the worker parked: the blocking submit must block
+     * and fire exactly one QUEUE_BLOCKED. */
+    g_bp_block_rc = LOOMWORKS_ERR_INVALID;
+    pthread_t bt;
+    ASSERT(pthread_create(&bt, NULL, bp_blocking_thread, pool) == 0, "bp-block: start blocker");
+    struct timespec bp_delay = {0, 200000000L}; /* 200 ms: must be blocked + fired by now */
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &bp_delay, NULL);
+    ASSERT(atomic_load_explicit(&g_bp_high_count, memory_order_relaxed) == 1,
+           "bp-block: exactly one BLOCKED fire");
+    ASSERT(atomic_load_explicit(&g_bp_last_event, memory_order_relaxed) ==
+               LOOM_BACKPRESSURE_QUEUE_BLOCKED,
+           "bp-block: event is QUEUE_BLOCKED");
+
+    g_gate_release = 1;
+    pthread_join(bt, NULL);
+    ASSERT(g_bp_block_rc == LOOMWORKS_OK, "bp-block: blocked submit landed after release");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -4449,6 +4507,7 @@ int main(void)
     test_coro_cancel_sleeping();
     test_coro_execution_timeout();
     test_backpressure_window();
+    test_backpressure_blocked();
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
 }

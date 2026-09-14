@@ -1859,6 +1859,10 @@ static loom_result_t enqueue_task(loom_thread_pool_t *pool,
     if (pool->queue_capacity != 0 &&
         atomic_load_explicit(&pool->queue_len, memory_order_relaxed) >= pool->queue_capacity) {
         if (block) {
+            /* The queue is full and this submitter is about to block.
+             * Fired lock-free before waiting (never under pool->lock),
+             * throttled by the shared backpressure window. */
+            fire_backpressure(pool, LOOM_BACKPRESSURE_QUEUE_BLOCKED);
             loom_result_t rc = wait_for_space(pool);
             if (rc != LOOMWORKS_OK) {
                 return rc;
