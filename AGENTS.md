@@ -8,9 +8,9 @@
 - **Unified runtime** routing thread/coroutine submissions through one API
 - **Pipeline**, **task group**, and **metrics** subsystems built on the core
 
-Zero external dependencies beyond POSIX pthreads + mmap. CI covers gcc/clang × Debug/Release, ASan/UBSan, TSan, valgrind memcheck, aarch64 QEMU cross-execution, and asm/ucontext backend parity.
+Zero external dependencies beyond POSIX pthreads + mmap. CI covers gcc/clang × Debug/Release, ASan/UBSan, TSan, valgrind memcheck, aarch64 QEMU cross-execution, asm/ucontext backend parity, and POSIX-fallback parity.
 
-Test count: ~21,874 pool + ~5,627 coroutine + ~79,288 integration + ~200,014 ctx_smoke assertions — all passing.
+Test count: ~21,930 pool + ~5,627 coroutine + ~79,332 integration + ~200,014 ctx_smoke assertions — all passing.
 
 ## Architecture & Data Flow
 
@@ -25,7 +25,8 @@ loom_runtime_t              ← single-entry routing layer (THREAD vs CORO flag)
 │   ├── Task node pool (ABA-tagged Treiber stack)
 │   ├── Cancel index (open addressing)
 │   ├── Coroutine ready FIFO + timer min-heap + lazy timer thread
-│   └── Metrics wiring + future wrapping
+│   ├── Worker auto-recovery (non-blocking reap + bounded restart) + NUMA pinning
+│   └── Metrics wiring + future wrapping + health sampling
 ├── loom_coroutine_t        ← per-coroutine mmap stack, SIGSEGV/SIGBUS longjmp recovery
 ├── loom_pc_t               ← bounded FIFO pipeline (optional internal pool)
 ├── loom_task_group_t       ← grouped lifecycle with timed wait + self-deadlock guard

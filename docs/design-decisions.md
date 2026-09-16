@@ -435,3 +435,30 @@ thread-safety surface, and breaks every existing synchronous counting
 consumer. Instead the contract is locked by three regression tests:
 worker-thread delivery, lock-free delivery (probes `pending_count` from
 inside the callback), and exact once-per-event lifecycle counts.
+
+## 22. Non-blocking worker auto-recovery via `pthread_tryjoin_np` (2026-09-14)
+
+The timer thread reaps workers whose slot reads alive-but-never-cleanly-exited
+and restarts them in place (bounded attempts per slot). The reap must be
+non-blocking: a blocking `pthread_join` on a live worker deadlocks, because
+the live worker needs `pool->lock` to make progress while the reaper holds it.
+`pthread_tryjoin_np` self-disambiguates — `EBUSY` means a healthy running
+worker (leave it alone; `thread_clean_exit` is set only on the shutdown exit
+path, so liveness and health cannot be told apart from the flags), `0` means
+a terminated worker that is safe to restart. Attempt counts live in a heap
+array sized to `max_worker_count` (a fixed `[64]` array went out of bounds
+past 64 workers). On strict-POSIX builds without the GNU extension, recovery
+degrades to detection-only rather than risking the deadlock.
+
+## 23. Crash accounting via per-slot reclaim info, not flags (2026-09-14)
+
+`alive && !clean` cannot count abnormal workers — it matches every healthy
+running worker. Instead `abnormal_total` counts genuine reaps cumulatively,
+and a per-slot reclaim word (future ctx, plain-task sentinel, or NULL)
+published at dispatch lets the reaper repair `active_workers` exactly and
+unblock future waiters as `CANCELLED`. A bare task pointer was tried first
+and falsified by ASan: nodes are recycled at dispatch, so it dangles for
+the whole execution window. Coroutine tasks never publish (their nodes may
+be referenced by the timer heap); plain-task user data that died with the
+node is an accepted residual leak. The shutdown join path mirrors the same
+teardown, so crashes count with recovery disabled too.

@@ -3,7 +3,7 @@
 Industrial-grade C11 concurrency library featuring a **thread pool**, a **stackful coroutine** subsystem, and higher-level **pipeline**, **task group**, and **metrics** layers.
 
 ```
-Tests: ~21874 pool + ~5627 coroutine + ~79288 integration + ~200014 ctx_smoke — all passing
+Tests: ~21930 pool + ~5627 coroutine + ~79332 integration + ~200014 ctx_smoke — all passing
 Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 ```
 
@@ -22,6 +22,9 @@ Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 | Cancellation | `loom_pool_cancel()` / `cancel_by_id()` / `cancel_all()` via an open-addressing cancel index |
 | Task node pooling | Lock-free ABA-tagged Treiber stack recycles `loom_task_t` nodes |
 | Bounded queue with back-pressure | `queue_capacity > 0` waits up to 60 s on submit, then `ERR_TIMEOUT` |
+| Worker auto-recovery | Crashed workers are reaped non-blockingly and restarted (bounded attempts; detection-only on strict-POSIX) |
+| Coroutine execution timeouts | `loom_coro_set_timeout()` budget enforced at yield points (`TIMEOUT` + teardown) |
+| Health sampling | `loom_pool_health_sample()` uptime plus cumulative abnormal-exit count |
 | Graceful shutdown | `loom_pool_shutdown()` drains all pending tasks before exiting; resize-safe |
 | Cache-line alignment | Locks and queue pointers aligned to 64B to prevent false sharing |
 
@@ -82,10 +85,13 @@ loomworks/
 ├── include/loomworks/
 │   ├── loomworks.h            # Convenience single-header include
 │   ├── thread_pool.h          # Thread pool public API
+│   ├── thread_pool_backpressure.h  # Backpressure config/callback API
+│   ├── thread_pool_health.h   # Health sampling API
 │   ├── coroutine.h            # Coroutine public API
 │   ├── pipeline.h             # Pipeline public API
 │   ├── task_group.h           # Task group public API
 │   ├── metrics.h              # Metrics public API
+│   ├── metrics_shm.h          # Shared-memory metrics API
 │   └── runtime.h              # Unified runtime (thread + coroutine) API
 ├── src/
 │   ├── thread_pool.c          # Thread pool implementation
@@ -97,11 +103,20 @@ loomworks/
 │   ├── ctx_aarch64.S          # asm backend (aarch64, AAPCS64)
 │   ├── pipeline.c             # Pipeline implementation
 │   ├── task_group.c           # Task group implementation
-│   └── metrics.c              # Metrics implementation
+│   ├── metrics.c              # Metrics implementation
+│   ├── metrics_shm.c          # Shared-memory metrics
+│   ├── runtime.c              # Unified runtime
+│   ├── timer.c                # Coroutine timer heap
+│   ├── numa.c                 # NUMA topology + pinning
+│   ├── numa_internal.h
+│   └── portability.h          # Feature-test macros, POSIX shims
 ├── tests/
-│   ├── test_thread_pool.c     # ~21874 assertions
+│   ├── test_thread_pool.c     # ~21930 assertions
 │   ├── test_coroutine.c       # ~5627 assertions
-│   ├── test_integration.c     # ~79288 assertions
+│   ├── test_integration.c     # ~79332 assertions
+│   ├── test_runtime.c         # ~330 runtime assertions
+│   ├── test_health.c          # ~23 health assertions
+│   ├── test_numa.c            # ~168 NUMA assertions
 │   └── ctx_smoke.c            # ~200014 context-switch smoke checks
 ├── examples/
 │   ├── basic_pool.c           # Minimal pool usage
@@ -143,8 +158,9 @@ cd build_cmake && ctest --output-on-failure
 ### Using GCC Directly
 
 ```bash
-# Each test needs all five implementation translation units:
-SRCS="src/thread_pool.c src/coroutine.c src/pipeline.c src/task_group.c src/metrics.c"
+# Each test needs the implementation translation units it references
+# (seven for the pool suite: + numa.c/timer.c for topology and timers):
+SRCS="src/thread_pool.c src/coroutine.c src/pipeline.c src/task_group.c src/metrics.c src/numa.c src/timer.c"
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
     -I include $SRCS \
     tests/test_thread_pool.c -o test_thread_pool && ./test_thread_pool

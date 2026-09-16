@@ -208,7 +208,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   locals); platform feature macros are now propagated to the test targets
   so tests agree with the library, and the crash test asserts the
   documented detection-only behavior there.
-
+- **CI gates the fallback build**: new `parity-posix-fallback` job
+  (Debug configure + full `ctest`) mirrors the ucontext-parity job, so
+  fallback-only code paths cannot regress silently.
 ## [1.0.1] - 2026-08-14
 
 ### Added
