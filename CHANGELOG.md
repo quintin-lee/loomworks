@@ -187,9 +187,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   health sampling.
 - **Crash no longer leaks active_workers**: a `pthread_exit` mid-task skipped
   the dispatch epilogue, leaking `+1` active forever (utilization above 1.0
-  possible); a per-slot `worker_executing` flag lets recovery repair the
-  count exactly on reap. Also fixed fault-injection checkpoint numbering
-  drifted by the recovery gate and added the two missing gate tests.
+  possible); a per-slot reclaim slot (future ctx, or a plain-task sentinel)
+  lets the reap path repair the count exactly. Also fixed fault-injection
+  checkpoint numbering drifted by the recovery gate and added the two
+  missing gate tests.
+- **Shutdown join counts and reclaims crashes too**: abnormal exits and
+  leaked active counts are now repaired on the shutdown join path as well,
+  so pools that never enabled recovery still report true crash and idle
+  state (no double count with recovery-handled slots).
+- **Backpressure QUEUE_BLOCKED fires**: the event existed in the public enum
+  but nothing ever fired it; a blocking submit against a full queue now
+  fires exactly once on entry to the wait (throttled by the shared window).
+- **Crashed tasks are reclaimed**: a worker dying mid-task orphaned its
+  future context (waiters hung forever) and leaked it; the reclaim slot
+  now unblocks future waiters as `CANCELLED`, frees the ctx, and reports
+  `FAILED`. Plain-task user data that died with the recycled node remains
+  an accepted residual leak, bounded by crash count.
+- **POSIX fallback build is green**: `LOOMWORKS_POSIX_FALLBACK=ON` had never
+  compiled the new recovery paths (`-Werror` on unused detection-only
+  locals); platform feature macros are now propagated to the test targets
+  so tests agree with the library, and the crash test asserts the
+  documented detection-only behavior there.
 
 ## [1.0.1] - 2026-08-14
 
