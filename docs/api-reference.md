@@ -190,13 +190,15 @@ void          loom_pool_set_backpressure_callback(loom_thread_pool_t *pool,
 void          loom_coro_set_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
 void          loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
 ```
-
 - `health_sample()`: fills worker/active/pending counts plus `abnormal_workers`
-  (cumulative abnormal worker exits observed by recovery or the shutdown join;
-  0 unless worker recovery ran) and `uptime_ns` (CLOCK_MONOTONIC nanoseconds
-  since pool creation).
+  (cumulative abnormal worker exits observed by recovery scans or the
+  shutdown join — nonzero even with recovery disabled) and `uptime_ns`
+  (CLOCK_MONOTONIC nanoseconds since pool creation).
 - `abnormal_worker_count()`: the same cumulative crash count without the full
   snapshot; 0 for a NULL pool.
+- Crash reclamation: a worker that dies mid-task has its in-flight task
+  reclaimed — future waiters complete with `LOOMWORKS_ERR_CANCELLED`,
+  the leaked active count is repaired, and a `FAILED` event fires.
 - Backpressure: `set_backpressure_config()` sets `queue_depth_warn_ratio`
   (default 0.8) and `queue_wait_timeout_ns` (default 60 s, doubles as the
   callback throttle window). The callback fires `QUEUE_HIGH` when depth
