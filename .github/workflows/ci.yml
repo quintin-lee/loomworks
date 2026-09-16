@@ -42,6 +42,20 @@ jobs:
         run: cd build && ctest --output-on-failure
         timeout-minutes: 10
 
+  parity-posix-fallback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang-tools
+      - name: Configure (POSIX fallback)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DLOOMWORKS_POSIX_FALLBACK=ON
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: cd build && ctest --output-on-failure
+        timeout-minutes: 10
+
   sanitize:
     runs-on: ubuntu-latest
     strategy:
