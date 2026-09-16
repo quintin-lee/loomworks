@@ -2310,6 +2310,18 @@ static void crash_task(void *arg)
     pthread_exit(NULL); /* abnormal exit — worker never sets clean_exit */
 }
 
+/* Only used by the GNU-branch crash-recovery test below; guard the
+ * definition so fallback builds (which take the #else path) do not
+ * trip -Wunused-function. */
+#if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
+static void *crash_result_task(void *arg)
+{
+    (void)arg;
+    pthread_exit(NULL); /* abnormal exit mid-future-task; never returns */
+    return NULL;
+}
+#endif
+
 static void test_worker_crash_detected(void)
 {
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 16};
@@ -2351,6 +2363,11 @@ static void test_recovery_counts_crashed_worker(void)
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "crash-count: create pool");
 
+    metrics_event_ctx_t mctx  = {0};
+    loom_metrics_t     *mets  = NULL;
+    ASSERT(loom_metrics_create(pool, metrics_event_callback, &mctx, &mets) == LOOMWORKS_OK,
+           "crash-count: metrics");
+
     /* Start the timer thread (recovery scans run on it) with a trivial
      * coroutine, then enable worker recovery. */
     ASSERT(loom_pool_submit_coroutine(pool, pool_coro_yield_once, NULL, 0, NULL) == LOOMWORKS_OK,
@@ -2380,11 +2397,29 @@ static void test_recovery_counts_crashed_worker(void)
     ASSERT(sink == 1, "crash-count: pool functional after recovery");
 
     /* The crashed worker died mid-task (+1 leaked); recovery must have
-     * repaired it via the executing flag.  Without the repair, active
+     * repaired it via the published task slot.  Without the repair, active
      * stays 1 forever and utilization reports 1.0 on an idle pool. */
     ASSERT(loom_pool_health_sample(pool, &status) == LOOMWORKS_OK, "crash-count: resample");
     ASSERT(status.active_count == 0, "crash-count: leaked active repaired");
     ASSERT(status.utilization == 0.0, "crash-count: idle pool reads zero utilization");
+    WAIT_UNTIL(5, mctx.failed == 1);
+    ASSERT(mctx.failed == 1, "crash-count: recovered crash fired FAILED");
+
+    /* A crashed future task must unblock its waiter as CANCELLED rather
+     * than hanging it, recycle its node, and count as the second crash. */
+    loom_future_t *ffut = NULL;
+    ASSERT(loom_pool_submit_future(pool, crash_result_task, NULL, &ffut, NULL) == LOOMWORKS_OK,
+           "crash-count: submit crashing future");
+    struct timespec fdeadline;
+    clock_gettime(CLOCK_MONOTONIC, &fdeadline);
+    fdeadline.tv_sec += 10;
+    void *fresult = NULL;
+    ASSERT(loom_future_wait_timeout(ffut, &fresult, &fdeadline) == LOOMWORKS_ERR_CANCELLED,
+           "crash-count: crashed future completes as CANCELLED");
+    ASSERT(fresult == NULL, "crash-count: cancelled future leaves result NULL");
+    ASSERT(loom_future_destroy(ffut) == LOOMWORKS_OK, "crash-count: destroy future");
+    WAIT_UNTIL(10, loom_pool_abnormal_worker_count(pool) == 2);
+    ASSERT(loom_pool_abnormal_worker_count(pool) == 2, "crash-count: second crash counted");
 #else
     /* Strict-POSIX builds have no non-blocking reap, so recovery is
      * detection-only by design: the crashed worker is never restarted
@@ -2396,6 +2431,7 @@ static void test_recovery_counts_crashed_worker(void)
 #endif
 
     loom_pool_shutdown(pool);
+    loom_metrics_destroy(&mets);
     loom_pool_destroy(&pool);
 }
 
@@ -2659,15 +2695,15 @@ static void test_resize_alloc_fail_recovery_realloc(void)
     loom_pool_destroy(&pool);
 }
 
-static void test_resize_alloc_fail_executing_realloc(void)
+static void test_resize_alloc_fail_reclaim_realloc(void)
 {
     loom_test_arm_alloc_failure(-1);
     loom_thread_pool_t *pool = NULL;
     loom_pool_config_t  cfg  = {.worker_count = 2, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create pool");
 
-    loom_test_arm_alloc_failure(11); /* 12th check = worker_executing realloc */
-    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "executing realloc fails");
+    loom_test_arm_alloc_failure(11); /* 12th check = worker_reclaim realloc */
+    ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_ERR_ALLOC, "reclaim slot realloc fails");
     ASSERT(loom_pool_worker_count(pool) == 2, "worker count unchanged");
 
     ASSERT(loom_pool_resize(pool, 8) == LOOMWORKS_OK, "unarmed resize succeeds");
@@ -4476,7 +4512,7 @@ int main(void)
     test_resize_alloc_fail_alive_realloc();
     test_resize_alloc_fail_clean_exit_realloc();
     test_resize_alloc_fail_recovery_realloc();
-    test_resize_alloc_fail_executing_realloc();
+    test_resize_alloc_fail_reclaim_realloc();
     test_resize_alloc_fail_worker_arg_first();
     test_resize_alloc_fail_worker_arg_mid();
     test_resize_fail_then_worker_crash_detected();

@@ -225,7 +225,13 @@ struct loom_thread_pool {
     _Atomic uint32_t max_recovery_attempts;      /**< Max rebuild attempts per worker. */
     _Atomic uint32_t abnormal_total;            /**< Cumulative abnormal worker exits observed by recovery. */
     _Atomic uint32_t *recovery_attempts; /**< Per-slot attempt count (heap; sized to max_worker_count). */
-    _Atomic bool     *worker_executing;  /**< Per-slot: true while the worker runs a task (heap; sized to max_worker_count). */
+    /* Per-slot crash-reclaim info (NULL = idle): the future ctx for a
+     * future task in flight, &g_plain_task_marker for a plain task.
+     * Published after the active increment, cleared before its decrement
+     * (normal dispatch only), so a set slot on reap both proves a crash
+     * mid-task and identifies what to reclaim.  Heap array sized to
+     * max_worker_count. */
+    _Atomic(void *) *worker_reclaim;
 
     /* Backpressure configuration. */
     double               bp_queue_warn_ratio; /* default 0.8 */

@@ -326,9 +326,9 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
     }
-    pool->worker_executing =
-        (_Atomic bool *)calloc(pool->max_worker_count, sizeof(_Atomic bool));
-    if (pool->worker_executing == NULL) {
+    pool->worker_reclaim =
+        (_Atomic(void *) *)calloc(pool->max_worker_count, sizeof(_Atomic(void *)));
+    if (pool->worker_reclaim == NULL) {
         pool_destroy_internal(pool);
         return LOOMWORKS_ERR_ALLOC;
     }
@@ -516,7 +516,7 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     free(pool->thread_alive);
     free(pool->thread_clean_exit);
     free(pool->recovery_attempts);
-    free(pool->worker_executing);
+    free(pool->worker_reclaim);
 
     if (pool->numa_topo != NULL) {
         loom_numa_topology_free(pool->numa_topo);
@@ -696,6 +696,12 @@ static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64
     sem_post(&pool->timer_sem);
     return LOOMWORKS_CORO_OK;
 }
+
+/* Sentinel stored in worker_reclaim[] for a plain (non-future) task in
+ * flight.  Never dereferenced — compared only.  A bare task pointer
+ * cannot serve this role: the node is recycled at dispatch, so it would
+ * dangle for the whole execution window. */
+static char g_plain_task_marker;
 
 static void *worker_entry(void *arg)
 {
@@ -1095,6 +1101,10 @@ static void *worker_entry(void *arg)
         }
         loom_task_fn fn   = task->fn;
         void        *data = task->user_data;
+        /* Save reclaim info before the node is recycled below: the future
+         * ctx for future tasks, the plain marker otherwise.  task->user_data
+         * dies with the node at dispatch and is unreadable afterwards. */
+        void *reclaim = task->is_future ? task->user_data : (void *)&g_plain_task_marker;
         /* Return the node to the pool under the lock (the free-list is
          * lock-protected); the task function runs outside the lock. */
         task_destroy(pool, task);
@@ -1110,10 +1120,11 @@ static void *worker_entry(void *arg)
         pthread_mutex_unlock(&pool->lock);
         if (task) {
             atomic_fetch_add(&pool->active_workers, 1);
-            /* Mark this slot executing so a crash mid-task is observable:
-             * if the worker never returns (pthread_exit/signal), recovery
-             * sees the set flag on reap and repairs active_workers. */
-            atomic_store_explicit(&pool->worker_executing[idx], true, memory_order_relaxed);
+            /* Publish reclaim info so a crash mid-task is observable:
+             * join success synchronizes with termination, so the reap read
+             * is exact.  Stored AFTER the active increment: a crash in
+             * between leaves NULL, so recovery correctly does nothing. */
+            atomic_store_explicit(&pool->worker_reclaim[idx], reclaim, memory_order_relaxed);
             metrics_fire(pool, LOOMWORKS_METRIC_STARTED);
             if (pool->metrics) {
                 struct timespec ts_start;
@@ -1133,7 +1144,14 @@ static void *worker_entry(void *arg)
                 fn(data);
             }
             metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
-            atomic_store_explicit(&pool->worker_executing[idx], false, memory_order_relaxed);
+            /* Clear BEFORE freeing and decrementing: a crash in between
+             * leaves NULL (same as today's leak); the reverse order could
+             * double-repair.  Coroutine tasks never publish here, so their
+             * timer-entangled nodes are left alone (see recovery). */
+            atomic_store_explicit(&pool->worker_reclaim[idx], NULL, memory_order_relaxed);
+            if (reclaim != (void *)&g_plain_task_marker) {
+                free(reclaim);
+            }
             atomic_fetch_sub(&pool->active_workers, 1);
         }
     }
@@ -1654,7 +1672,10 @@ static void future_task_wrapper(void *arg)
     fut->ready      = true;
     pthread_cond_signal(&fut->cond);
     pthread_mutex_unlock(&fut->mutex);
-    free(ctx);
+    /* NOTE: ctx is NOT freed here.  Ownership passes to the worker
+     * epilogue (freed after the reclaim slot is cleared), so a crash
+     * mid-task leaves a reclaimable pointer instead of a leak.  Cancel
+     * and submit-failure paths still free it via free_data as before. */
 }
 
 /* ================================================================
@@ -2284,12 +2305,18 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
                  * replacement exits clean) or was marked dead (alive=false,
                  * skipped by the loop above). */
                 atomic_fetch_add_explicit(&pool->abnormal_total, 1u, memory_order_relaxed);
-                /* The crash may also have leaked active_workers if the worker
-                 * died mid-task (join success synchronizes with termination,
-                 * so the flag read is exact).  Repair it here so a pool that
-                 * never enabled recovery still reports a true idle state. */
-                if (atomic_load_explicit(&pool->worker_executing[i], memory_order_relaxed)) {
-                    atomic_store_explicit(&pool->worker_executing[i], false, memory_order_relaxed);
+                /* Reclaim crash state as above.  The mark-cancelled call
+                 * takes pool->lock per its documented order, around that
+                 * call only — never across a join. */
+                void *slot = atomic_load_explicit(&pool->worker_reclaim[i], memory_order_relaxed);
+                if (slot != NULL) {
+                    atomic_store_explicit(&pool->worker_reclaim[i], NULL, memory_order_relaxed);
+                    if (slot != (void *)&g_plain_task_marker) {
+                        pthread_mutex_lock(&pool->lock);
+                        future_mark_cancelled((future_task_ctx_t *)slot);
+                        pthread_mutex_unlock(&pool->lock);
+                        free(slot);
+                    }
                     atomic_fetch_sub(&pool->active_workers, 1);
                 }
             }
@@ -2745,7 +2772,7 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
          * order, and tests/test_thread_pool.c arms them by index
          * (arm N fails the (N+1)th check).  Current sequence for a grow:
          * 1 deques array, 2-7 per-deque slots, 8 threads, 9 thread_alive,
-         * 10 thread_clean_exit, 11 recovery_attempts, 12 worker_executing,
+         * 10 thread_clean_exit, 11 recovery_attempts, 12 worker_reclaim,
          * 13+ per-worker args.  ADDING A GATE HERE RENUMBERS EVERYTHING
          * AFTER IT — update the arm() values and comments in the
          * test_resize_alloc_fail_* tests to match (a stale number passes
@@ -2845,18 +2872,18 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         /* Zero the newly-extended tail: fresh slots have no attempts yet. */
         memset(new_recovery + old_max, 0, (count - old_max) * sizeof(_Atomic uint32_t));
         pool->recovery_attempts = new_recovery;
-        _Atomic bool *new_executing =
+        _Atomic(void *) *new_reclaim =
             test_alloc_fail_next()
                 ? NULL
-                : (_Atomic bool *)realloc(pool->worker_executing, count * sizeof(_Atomic bool));
-        if (!new_executing) {
+                : (_Atomic(void *) *)realloc(pool->worker_reclaim, count * sizeof(_Atomic(void *)));
+        if (!new_reclaim) {
             rollback_deques_tail(pool, old_max, count);
             pthread_mutex_unlock(&pool->lock);
             return LOOMWORKS_ERR_ALLOC;
         }
-        /* Zero the newly-extended tail: fresh slots are not executing. */
-        memset(new_executing + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
-        pool->worker_executing = new_executing;
+        /* Zero the newly-extended tail: fresh slots name no reclaim info. */
+        memset(new_reclaim + old_max, 0, (count - old_max) * sizeof(_Atomic(void *)));
+        pool->worker_reclaim = new_reclaim;
         if (pool->coro_ready != NULL) {
             /* Switch under coro_lock: the timer thread reads the array
              * inside coro_lock to push ready nodes, so replacing the
@@ -3118,6 +3145,7 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
     }
     pthread_mutex_lock(&pool->lock);
     uint32_t recovered = 0;
+    uint32_t crashed_tasks = 0;
 
     for (uint32_t i = 0; i < pool->worker_count; i++) {
         bool alive = atomic_load_explicit(&pool->thread_alive[i], memory_order_relaxed);
@@ -3154,13 +3182,21 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
              * so this is a genuine abnormal exit: count it.  Cumulative —
              * a later successful restart does not erase the crash. */
             atomic_fetch_add_explicit(&pool->abnormal_total, 1u, memory_order_relaxed);
-            /* The reaped worker died mid-task iff its executing flag is still
-             * set (join success synchronizes with thread termination, so the
-             * flag read is exact).  Repair the leaked active_workers +1 and
-             * clear the flag so a restarted worker starts clean. */
-            if (atomic_load_explicit(&pool->worker_executing[i], memory_order_relaxed)) {
-                atomic_store_explicit(&pool->worker_executing[i], false, memory_order_relaxed);
+            /* A set slot proves a crash mid-task (published after the
+             * active increment; the node itself died at dispatch and is
+             * never touched here).  A future ctx unblocks its waiter as
+             * CANCELLED and is freed; a plain marker means only the
+             * active count is owed (its user_data died with the node —
+             * accepted residual leak, bounded by crash count). */
+            void *slot = atomic_load_explicit(&pool->worker_reclaim[i], memory_order_relaxed);
+            if (slot != NULL) {
+                atomic_store_explicit(&pool->worker_reclaim[i], NULL, memory_order_relaxed);
+                if (slot != (void *)&g_plain_task_marker) {
+                    future_mark_cancelled((future_task_ctx_t *)slot);
+                    free(slot);
+                }
                 atomic_fetch_sub(&pool->active_workers, 1);
+                crashed_tasks++;
             }
             /* Terminated worker reaped.  Restart it in the same slot. */
             worker_arg_t *wa = malloc(sizeof(*wa));
@@ -3185,6 +3221,12 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
         }
     }
     pthread_mutex_unlock(&pool->lock);
+    /* Report reaped crashes through the standard failure channel.  Deferred
+     * past the unlock: metric callbacks run outside pool->lock by contract
+     * and must never fire under it. */
+    for (uint32_t k = 0; k < crashed_tasks; k++) {
+        metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
+    }
     return recovered;
 }
 
