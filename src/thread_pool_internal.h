@@ -234,8 +234,8 @@ struct loom_thread_pool {
     _Atomic(void *) *worker_reclaim;
 
     /* Backpressure configuration. */
-    double               bp_queue_warn_ratio; /* default 0.8 */
-    int64_t              bp_queue_timeout_ns; /* default 60s */
+    _Atomic double  bp_queue_warn_ratio; /* default 0.8 */
+    _Atomic int64_t bp_queue_timeout_ns; /* default 60s */
     loom_backpressure_fn bp_callback;         /* NULL = no callback */
     void                *bp_callback_ctx;
     _Atomic int64_t    bp_last_fire_ns;  /* CLOCK_MONOTONIC ns of last QUEUE_HIGH fire (0 = never). */
