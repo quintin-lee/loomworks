@@ -211,6 +211,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI gates the fallback build**: new `parity-posix-fallback` job
   (Debug configure + full `ctest`) mirrors the ucontext-parity job, so
   fallback-only code paths cannot regress silently.
+- **Sleeping-coro timer registration no longer misdiagnoses success as OOM**: `coro_sleep_reg_hook`
+  inferred a `loom_timer_push` failure from "is my entry at the heap root?", but the root holds the
+  *earliest-deadline* entry, so any coroutine that slept while an earlier-deadline sleeper was already
+  registered got a spurious `LOOMWORKS_CORO_ERR_TIMER` — its task node was recycled while the
+  (successfully inserted) timer entry still referenced it, and at the deadline the timer thread
+  published a ready-FIFO node with the dangling pointer (use-after-free on the next worker pop).
+  `loom_timer_push` now returns `bool` and the hook reacts to the real result; a genuine realloc OOM
+  still leaves nothing dangling in the heap.
+- **Reclaim-slot claim is atomic**: the timer-thread recovery scan and the shutdown join loop could both
+  load a crashed worker's future ctx, both clear the slot, and both `free()` it (double free); the
+  claim is now an `atomic_exchange` in both paths so exactly one claimer frees.
+- **Crash-count test is no longer racy**: `test_recovery_counts_crashed_worker` asserted
+  `active_count == 0` the instant the task's sink was stored, i.e. before the worker epilogue could
+  clear the reclaim slot and decrement `active_workers`; it now waits for the idle state first.
 ## [1.0.1] - 2026-08-14
 
 ### Added

@@ -296,10 +296,13 @@ double loom_pool_utilization(loom_thread_pool_t *pool);
 void loom_pool_broadcast(loom_thread_pool_t *pool);
 void loom_pool_set_worker_recovery_timeout(loom_thread_pool_t *pool, int64_t timeout_ns);
 /**
- * @brief Cumulative abnormal worker exits observed by worker recovery.
+ * @brief Cumulative abnormal worker exits observed since pool creation.
  *
- * Counts workers the recovery scan reaped as terminated without a clean
- * exit. Requires a nonzero worker-recovery timeout, otherwise always 0.
+ * Counts two independent sources: (1) the worker auto-recovery scan,
+ * which reaps a terminated, non-clean worker when a nonzero
+ * worker-recovery timeout is configured; and (2) the shutdown join
+ * loop, which counts every worker that exited without a clean flag.
+ * Returns 0 when no abnormal exit has been observed.
  *
  * @param pool The pool handle (NULL returns 0).
  * @return Total abnormal exits since pool creation.

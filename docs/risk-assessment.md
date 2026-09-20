@@ -40,6 +40,7 @@ Risk ratings use the conventional 3×3 grid:
 | R20 | Thread Pool | `loom_pool_resize` grow path leaked per-deque slot arrays when a later realloc failed (12288B) and in the lane-only degrade path (4096B); the deques array used `calloc`/`realloc` despite `_Alignas(64)` members (misaligned access under UBSan) | Medium | Medium | **Medium** — ✅ closed (2026-08-18): `deques_alloc` (posix_memalign 64B) + `rollback_deques_tail` on later-realloc failure + slots_failed frees all slots; ASan (detect_leaks) + UBSan (halt_on_error) now clean across all suites |
 | R21 | Thread Pool | Pool timer-thread lifecycle: a drain-time `sleep_until` can register fresh heap entries while workers are still exiting — stopping the timer *before* the worker join stranded those entries forever, so workers spun in the drain and the join hung (observed as an ASan-only ~37% hang in `test_pool_coro_sleep`) | High | Medium | **Medium** — ✅ closed (2026-08-21): timer teardown moved strictly after the worker join loop in `loom_pool_shutdown`; the timer drains-until-empty once `timer_thread_alive` drops so sleeping coroutines still resume and finish during shutdown; all heap mutations serialized by `timer_lock`; covered by the ASan/UBSan hard gates |
 | R22 | Coroutine | `loom_pool_submit_coroutine` is fire-and-forget: there is no completion handle or result code per task — failures surface only through `LOOMWORKS_METRIC_FAILED`; the returned `task_id` supports cancellation of queued tasks and of sleeping ones (timer-heap removal path in `cancel_by_id`), but a running coroutine cannot be preempted | Medium | Low | **Low** — documented behavior (2026-08-21): callers needing results use standalone coroutines or futures around shared state |
+| R23 | Thread Pool | `coro_sleep_reg_hook` inferred a `loom_timer_push` OOM from "is my entry at the heap root?" — the root holds the earliest-deadline entry, so any registration with an earlier-deadline sleeper already present spuriously failed, recycled the task node, and left a live heap entry dangling → use-after-free on the timer-thread's ready-FIFO publication, plus glibc double-free from the corrupted node free stack; the crash-recovery and shutdown join loops could also double-free the same reclaim slot concurrently | Medium | High | **High** — ✅ closed (2026-09-20): `loom_timer_push` returns `bool` (real insertion result); both reclaim-claim sites use `atomic_exchange`; crash-count test waits for idle before resampling; ASan suite clean |
 
 ---
 
@@ -373,6 +374,34 @@ pending (before completion) is rejected with `ERR_INVALID` — the worker
 would otherwise write into freed memory. Regression tests:
 `test_future_cancel_pending`, destroy-pending-future.
 
+
+### R23 — Timer-heap registration misdiagnosis and reclaim double-free (closed)
+
+Two independent defects in the coroutine-sleep + crash-recovery path:
+
+1. **`coro_sleep_reg_hook` misdiagnosed success as OOM.** After
+   `loom_timer_push`, it checked `timer_heap[0].task_id != task_id` to
+   infer "was the entry inserted?" — but the min-heap root holds the
+   *earliest-deadline* entry, not the just-pushed one. Any registration
+   that ran while an earlier-deadline sleeper was already registered
+   spuriously returned `LOOMWORKS_CORO_ERR_TIMER`: the worker marked the
+   coroutine `ERROR` and recycled the task node, while the live heap entry
+   (which *was* inserted) still referenced that node. At the deadline the
+   timer thread published a ready-FIFO node with the dangling pointer, and
+   the worker's next Step C0 read `ctask->cancelled` on freed memory — a
+   use-after-free under ASan, and a corrupted node free stack (double-pushed
+   nodes) that surfaced later as a glibc tcache double-free.
+2. **Concurrent reclaim-slot claims double-freed the future ctx.** The
+   timer-thread recovery scan and the shutdown join loop both claimed a
+   crashed worker's `worker_reclaim[i]` via non-atomic load → store NULL →
+   free, so both could load the same ctx and free it twice.
+
+**Status: ✅ CLOSED (2026-09-20).** `loom_timer_push` now returns `bool`
+(the real insertion result; OOM re-arms are retried by the timer thread);
+the hook reacts only to that. Both claim sites use
+`atomic_exchange_explicit` so exactly one claimer frees. The crash-count
+test now waits for `active_count == 0` before resampling health. Verified
+clean under ASan and UBSan full suites.
 ---
 
 ## Verification method
