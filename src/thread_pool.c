@@ -25,9 +25,9 @@
  * LOOMWORKS_POSIX_FALLBACK we drop the GNU extension and recovery
  * degrades to detection-only — see check_and_recover_workers. */
 #if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
-#  ifndef _GNU_SOURCE
-#    define _GNU_SOURCE
-#  endif
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #endif
 #include "portability.h" /* must precede system headers: owns _GNU_SOURCE */
 #include "loomworks/thread_pool.h"
@@ -57,10 +57,10 @@
  * recovery can still flag + count abnormal workers but never restart one,
  * and it can never deadlock. */
 #if defined(__linux__) && !defined(LOOMWORKS_POSIX_FALLBACK)
-#  define LOOMWORKS_TRYJOIN(thread, out) pthread_tryjoin_np((thread), (out))
+#define LOOMWORKS_TRYJOIN(thread, out) pthread_tryjoin_np((thread), (out))
 #else
-#  define LOOMWORKS_TRYJOIN(thread, out) (-1)
-#  define LOOMWORKS_TRYJOIN_UNSUPPORTED 1
+#define LOOMWORKS_TRYJOIN(thread, out) (-1)
+#define LOOMWORKS_TRYJOIN_UNSUPPORTED 1
 #endif
 
 /* ================================================================
@@ -107,9 +107,11 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
     /* Path 1: metrics collector attached — update counters and fire cb.
      * When a collector is present, loom_metrics_create() wires BOTH the
      * collector AND the standalone callback; skip the standalone path to
-     * avoid firing the callback twice. */
-    if (pool->metrics) {
-        loom_metrics_fire((loom_metrics_t *)pool->metrics, event);
+     * avoid firing the callback twice.  Snapshot both pointers up front so
+     * an in-flight detach on the caller thread cannot tear the fire. */
+    loom_metrics_t *m = atomic_load_explicit(&pool->metrics, memory_order_acquire);
+    if (m) {
+        loom_metrics_fire(m, event);
         /* Also write to the shared-memory region if one is attached. */
         if (pool->shm && pool->shm_update) {
             pool->shm_update(event, pool->shm);
@@ -120,8 +122,10 @@ static void metrics_fire(loom_thread_pool_t *pool, loom_metric_event_t event)
      * This lets callers register a callback via
      * loom_pool_set_metrics_callback() without also creating a
      * loom_metrics_t collector. */
-    if (pool->metric_cb) {
-        pool->metric_cb(event, pool, pool->metric_user_data);
+    loom_metric_fn cb      = atomic_load_explicit(&pool->metric_cb, memory_order_acquire);
+    void          *cb_data = atomic_load_explicit(&pool->metric_user_data, memory_order_relaxed);
+    if (cb) {
+        cb(event, pool, cb_data);
     }
     /* Always write to shm when available, even without a collector. */
     if (pool->shm && pool->shm_update) {
@@ -256,18 +260,18 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->shutdown, false, memory_order_relaxed);
     pool->draining = false;
     pool->joined   = false;
-    for (int b = 0; b < 256; b++) {
+    for (int b = 0; b < LOOMWORKS_PRIORITY_BUCKETS; b++) {
         pool->buckets_head[b] = NULL;
         pool->buckets_tail[b] = NULL;
     }
-    for (int w = 0; w < 4; w++) {
+    for (int w = 0; w < LOOMWORKS_NONEMPTY_WORDS; w++) {
         atomic_store_explicit(&pool->nonempty_bits[w], 0, memory_order_relaxed);
     }
     atomic_store_explicit(&pool->queue_len, 0, memory_order_relaxed);
     atomic_store_explicit(&pool->active_workers, 0, memory_order_relaxed);
-    pool->metric_cb        = NULL;
-    pool->metric_user_data = NULL;
-    pool->metrics          = NULL;
+    atomic_store_explicit(&pool->metric_cb, NULL, memory_order_relaxed);
+    atomic_store_explicit(&pool->metric_user_data, NULL, memory_order_relaxed);
+    atomic_store_explicit(&pool->metrics, NULL, memory_order_relaxed);
     atomic_store_explicit(&pool->next_task_id, 1, memory_order_relaxed);
 
     /* --- Lock-free ring + cancel index + node pool --- */
@@ -461,7 +465,7 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
         return;
     }
     /* Free any tasks still pending across all priority buckets. */
-    for (int b = 0; b < 256; b++) {
+    for (int b = 0; b < LOOMWORKS_PRIORITY_BUCKETS; b++) {
         loom_task_t *t = pool->buckets_head[b];
         while (t) {
             loom_task_t *n = t->next;
@@ -507,10 +511,15 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     pthread_mutex_destroy(&pool->lock);
 
     /* Clear metrics so no worker accesses freed pool via metric_cb / metrics.
-     * The metrics object itself is owned by the caller and destroyed separately. */
-    pool->metric_cb        = NULL;
-    pool->metric_user_data = NULL;
-    pool->metrics          = NULL;
+     * The metrics object itself is owned by the caller and destroyed separately.
+     * Before nulling the pool-side pointer, sever the collector's m->pool
+     * back-reference so that a collector outliving the pool can be freed
+     * later by loom_metrics_destroy() without touching freed pool memory.
+     * Safe: all workers have been joined by the time teardown reaches here. */
+    loom_metrics_clear_pool(atomic_load_explicit(&pool->metrics, memory_order_acquire));
+    atomic_store_explicit(&pool->metric_cb, NULL, memory_order_relaxed);
+    atomic_store_explicit(&pool->metric_user_data, NULL, memory_order_relaxed);
+    atomic_store_explicit(&pool->metrics, NULL, memory_order_relaxed);
 
     free(pool->threads);
     free(pool->thread_alive);
@@ -578,20 +587,32 @@ static void    *timer_thread_fn(void *arg)
         if (!alive && empty) {
             break;
         }
+        /* Decide how long to block.  The heap deadlines are monotonic,
+         * so the wait duration is a monotonic delta; when the heap is
+         * empty (or the root is already due) fall back to a ~1 s tick so
+         * the worker-recovery scan keeps running even with no pushes. */
+        int64_t wait_ns;
         if (has && deadline > now) {
-            int64_t wait_ns = deadline - now;
-            abs.tv_sec += wait_ns / 1000000000;
-            abs.tv_nsec = (long)(wait_ns % 1000000000);
+            wait_ns = deadline - now;
         } else {
-            /* Heap is empty or all deadlines have passed: wait on the
-             * semaphore — coro_sleep_reg_hook posts it on every push, so
-             * this wakes immediately when the next coroutine sleeps. */
-            abs.tv_sec  = 0;
-            abs.tv_nsec = 1000000000ULL; /* 1 s safety net for signals */
+            wait_ns = 1000000000LL; /* 1 s recovery tick */
+        }
+        /* sem_timedwait on a default-attribute sem_t (glibc) interprets
+         * its absolute deadline in CLOCK_REALTIME, so anchor the wait
+         * duration on a real-time base.  Feeding it a monotonic value
+         * (always in the past from realtime's view) makes it return
+         * ETIME instantly every pass and spin this loop at 100 % CPU. */
+        struct timespec rt;
+        clock_gettime(CLOCK_REALTIME, &rt);
+        rt.tv_sec += (time_t)(wait_ns / 1000000000LL);
+        rt.tv_nsec += (long)(wait_ns % 1000000000LL);
+        while (rt.tv_nsec >= 1000000000L) {
+            rt.tv_nsec -= 1000000000L;
+            rt.tv_sec += 1;
         }
         /* sem_timedwait returns EINTR on signals; retry unless shutting
          * down.  A spurious timeout just re-checks the heap. */
-        while (sem_timedwait(&pool->timer_sem, &abs) != 0 && errno == EINTR) {
+        while (sem_timedwait(&pool->timer_sem, &rt) != 0 && errno == EINTR) {
             if (!atomic_load_explicit(&pool->timer_thread_alive, memory_order_acquire)) {
                 break;
             }
@@ -612,8 +633,11 @@ static void    *timer_thread_fn(void *arg)
                 (struct loom_coro_ready *)calloc(1, sizeof(struct loom_coro_ready));
             if (rn == NULL) {
                 /* OOM: re-arm the entry so the next pass retries it.  A
-                 * sleeping coroutine must never be lost silently. */
-                loom_timer_push(pool, e);
+                 * sleeping coroutine must never be lost silently.  The
+                 * post below forces an immediate retry pass; if the
+                 * re-arm push above itself OOM'd (realloc failed) the
+                 * entry is dropped and the post is a harmless no-op spin. */
+                (void)loom_timer_push(pool, e);
                 pthread_mutex_unlock(&pool->timer_lock);
                 sem_post(&pool->timer_sem);
                 break;
@@ -671,8 +695,9 @@ static loom_result_t ensure_timer_thread(loom_thread_pool_t *pool)
  * coroutine, whose sleep_reg_ctx points back at the pool.
  *
  * Returns LOOMWORKS_CORO_OK on success, LOOMWORKS_CORO_ERR_TIMER if the
- * heap is unrecoverably full.  The caller (loom_coro_sleep_until) marks
- * the coroutine ERROR on failure so the worker loop cleans it up. */
+ * heap could not grow to fit the entry (OOM in loom_timer_push).  The
+ * caller (loom_coro_sleep_until) marks the coroutine ERROR on failure
+ * so the worker loop cleans it up. */
 static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64_t deadline_ns)
 {
     struct loom_coroutine *coro = (struct loom_coroutine *)ctx;
@@ -687,12 +712,13 @@ static loom_coro_result_t coro_sleep_reg_hook(void *ctx, uint64_t task_id, int64
     e.coro_ctx    = coro;
     e.task        = coro->task_node;
     pthread_mutex_lock(&pool->timer_lock);
-    loom_timer_push(pool, e);
-    if (pool->timer_len == 0 || pool->timer_heap[0].task_id != task_id) {
-        pthread_mutex_unlock(&pool->timer_lock);
+    bool inserted = loom_timer_push(pool, e);
+    pthread_mutex_unlock(&pool->timer_lock);
+    if (!inserted) {
+        /* realloc failed: the entry was NOT inserted, so nothing dangles
+         * in the heap and it is safe to mark the coroutine ERROR. */
         return LOOMWORKS_CORO_ERR_TIMER;
     }
-    pthread_mutex_unlock(&pool->timer_lock);
     sem_post(&pool->timer_sem);
     return LOOMWORKS_CORO_OK;
 }
@@ -1025,16 +1051,13 @@ static void *worker_entry(void *arg)
             loom_coro_result_t crc =
                 loom_coro_create(task->coro_fn, task->user_data, task->stack_size, &coro);
             if (crc != LOOMWORKS_CORO_OK) {
-                metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
                 /* task->user_data still holds the original caller pointer
                  * (task->free_data == false for pool-coroutine tasks).
-                 * Save it here before we overwrite task->user_data below,
-                 * so we can free it on this failure path. */
-                void *saved_ud = task->user_data;
+                 * The pool never frees the caller's opaque arg — that is
+                 * the documented ownership contract for submit_coroutine —
+                 * so on a create failure we recycle the node and signal
+                 * space, but we do NOT free user_data. */
                 task_destroy(pool, task);
-                if (saved_ud) {
-                    free(saved_ud);
-                }
                 if (pool->queue_capacity > 0) {
                     pthread_mutex_lock(&pool->lock);
                     pthread_cond_signal(&pool->space_cond);
@@ -1052,16 +1075,15 @@ static void *worker_entry(void *arg)
              * max_execution_ns = 0 means the check_coro_timeout()
              * guard in coroutine.c returns false and the timeout is
              * disabled for this coroutine. */
-            coro->max_execution_ns   =
+            coro->max_execution_ns =
                 atomic_load_explicit(&pool->coro_timeout_ns, memory_order_relaxed);
             {
                 struct timespec ts_now;
                 clock_gettime(CLOCK_MONOTONIC, &ts_now);
-                coro->execution_start_ns =
-                    (int64_t)ts_now.tv_sec * 1000000000LL + ts_now.tv_nsec;
+                coro->execution_start_ns = (int64_t)ts_now.tv_sec * 1000000000LL + ts_now.tv_nsec;
             }
-            task->user_data     = coro;
-            crc                 = loom_coro_resume(coro);
+            task->user_data = coro;
+            crc             = loom_coro_resume(coro);
             if (crc == LOOMWORKS_CORO_OK) {
                 loom_coro_state_t st = loom_coro_state(coro);
                 if (st == LOOMWORKS_CORO_SUSPENDED) {
@@ -1126,7 +1148,8 @@ static void *worker_entry(void *arg)
              * between leaves NULL, so recovery correctly does nothing. */
             atomic_store_explicit(&pool->worker_reclaim[idx], reclaim, memory_order_relaxed);
             metrics_fire(pool, LOOMWORKS_METRIC_STARTED);
-            if (pool->metrics) {
+            loom_metrics_t *lat_m = atomic_load_explicit(&pool->metrics, memory_order_acquire);
+            if (lat_m) {
                 struct timespec ts_start;
                 clock_gettime(CLOCK_MONOTONIC, &ts_start);
                 fn(data);
@@ -1139,7 +1162,7 @@ static void *worker_entry(void *arg)
                     nsec_diff += 1000000000;
                 }
                 uint64_t latency_ns = (uint64_t)(sec_diff * 1000000000LL + nsec_diff);
-                loom_metrics_record_latency((loom_metrics_t *)pool->metrics, latency_ns);
+                loom_metrics_record_latency(lat_m, latency_ns);
             } else {
                 fn(data);
             }
@@ -1602,7 +1625,7 @@ static loom_task_t *dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool,
 {
     /* Find the lowest non-empty bucket via the 256-bit bitmap.
      * Bucket index == priority; numerically smaller runs first. */
-    for (int w = 0; w < 4; w++) {
+    for (int w = 0; w < LOOMWORKS_NONEMPTY_WORDS; w++) {
         uint64_t bits = atomic_load_explicit(&pool->nonempty_bits[w], memory_order_relaxed);
         if (bits != 0) {
             int b = w * 64 + __builtin_ctzll(bits);
@@ -1629,7 +1652,7 @@ static loom_task_t *dequeue_lowest_priority_unlocked(loom_thread_pool_t *pool,
  * still has work (strict NORMAL FIFO drain order). */
 static bool lane_has_priority(loom_thread_pool_t *pool, unsigned max_priority)
 {
-    for (int w = 0; w < 4; w++) {
+    for (int w = 0; w < LOOMWORKS_NONEMPTY_WORDS; w++) {
         uint64_t bits = atomic_load_explicit(&pool->nonempty_bits[w], memory_order_acquire);
         if (bits != 0) {
             int b = w * 64 + __builtin_ctzll(bits);
@@ -1896,7 +1919,8 @@ static loom_result_t enqueue_task(loom_thread_pool_t *pool,
      * At most one callback per bp_queue_timeout_ns window (default 60 s);
      * fire_backpressure() enforces the window via bp_last_fire_ns. */
     double warn_ratio = atomic_load_explicit(&pool->bp_queue_warn_ratio, memory_order_relaxed);
-    if (pool->bp_callback != NULL && warn_ratio > 0.0 && pool->queue_capacity != 0) {
+    loom_backpressure_fn bp_cb = atomic_load_explicit(&pool->bp_callback, memory_order_acquire);
+    if (bp_cb != NULL && warn_ratio > 0.0 && pool->queue_capacity != 0) {
         uint64_t warn = (uint64_t)((double)pool->queue_capacity * warn_ratio);
         uint32_t qlen = atomic_load_explicit(&pool->queue_len, memory_order_relaxed);
         if (qlen >= warn) {
@@ -2308,10 +2332,13 @@ void loom_pool_shutdown(loom_thread_pool_t *pool)
                 atomic_fetch_add_explicit(&pool->abnormal_total, 1u, memory_order_relaxed);
                 /* Reclaim crash state as above.  The mark-cancelled call
                  * takes pool->lock per its documented order, around that
-                 * call only — never across a join. */
-                void *slot = atomic_load_explicit(&pool->worker_reclaim[i], memory_order_relaxed);
+                 * call only — never across a join.  The claim is an
+                 * atomic exchange so the timer-thread recovery scan can
+                 * never free the same ctx we are about to (a non-atomic
+                 * load+clear raced into a double free of the future ctx). */
+                void *slot =
+                    atomic_exchange_explicit(&pool->worker_reclaim[i], NULL, memory_order_acq_rel);
                 if (slot != NULL) {
-                    atomic_store_explicit(&pool->worker_reclaim[i], NULL, memory_order_relaxed);
                     if (slot != (void *)&g_plain_task_marker) {
                         pthread_mutex_lock(&pool->lock);
                         future_mark_cancelled((future_task_ctx_t *)slot);
@@ -2402,7 +2429,7 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
     }
     pthread_mutex_unlock(&pool->timer_lock);
     /* Walk every bucket; the match set is expected to be tiny. */
-    for (int b = 0; b < 256; b++) {
+    for (int b = 0; b < LOOMWORKS_PRIORITY_BUCKETS; b++) {
         loom_task_t *prev = NULL;
         loom_task_t *cur  = pool->buckets_head[b];
         while (cur) {
@@ -2511,7 +2538,7 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
         metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
         return LOOMWORKS_OK;
     }
-    for (int b = 0; b < 256; b++) {
+    for (int b = 0; b < LOOMWORKS_PRIORITY_BUCKETS; b++) {
         loom_task_t *prev = NULL;
         loom_task_t *cur  = pool->buckets_head[b];
         while (cur) {
@@ -2586,11 +2613,10 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
                     slot->task = NULL;
                     atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
                     cancelled++;
-                    metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
                 }
             }
         }
-        for (int b = 0; b < 256; b++) {
+        for (int b = 0; b < LOOMWORKS_PRIORITY_BUCKETS; b++) {
             loom_task_t *cur      = pool->buckets_head[b];
             pool->buckets_head[b] = NULL;
             pool->buckets_tail[b] = NULL;
@@ -2606,14 +2632,22 @@ void loom_pool_cancel_all(loom_thread_pool_t *pool, uint32_t *count)
                 cur = next;
                 cancelled++;
                 atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
-                metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
             }
         }
-        for (int w = 0; w < 4; w++) {
+        for (int w = 0; w < LOOMWORKS_NONEMPTY_WORDS; w++) {
             atomic_store_explicit(&pool->nonempty_bits[w], 0, memory_order_relaxed);
         }
     }
     pthread_mutex_unlock(&pool->lock);
+    /* Fire the CANCELLED metric AFTER releasing pool->lock.  The callback
+     * contract (metrics.h) forbids a callback from touching the same pool
+     * while pool->lock is held; firing here (rather than inside the
+     * cancel loops above) preserves that contract.  The total fired count
+     * is unchanged: `cancelled` already tallies every claimed ring slot and
+     * every freed bucket task. */
+    for (uint32_t f = 0; f < cancelled; f++) {
+        metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+    }
     if (count) {
         *count = cancelled;
     }
@@ -2628,12 +2662,15 @@ void loom_pool_set_metrics_callback(loom_thread_pool_t *pool, loom_metric_fn cb,
         return;
     }
     if (cb == NULL) {
-        /* Unregister only — do not clobber an existing callback. */
-        pool->metric_user_data = NULL;
+        /* Unregister: clear both the callback and its user data so the fire
+         * path fully stops invoking the callback (a stale cb with NULL data
+         * would otherwise keep firing on every event). */
+        atomic_store_explicit(&pool->metric_cb, NULL, memory_order_relaxed);
+        atomic_store_explicit(&pool->metric_user_data, NULL, memory_order_relaxed);
         return;
     }
-    pool->metric_cb        = cb;
-    pool->metric_user_data = user_data;
+    atomic_store_explicit(&pool->metric_user_data, user_data, memory_order_relaxed);
+    atomic_store_explicit(&pool->metric_cb, cb, memory_order_release);
 }
 
 /* ================================================================
@@ -2644,7 +2681,7 @@ void loom_pool_set_metrics(loom_thread_pool_t *pool, loom_metrics_t *metrics)
     if (!pool) {
         return;
     }
-    pool->metrics = metrics;
+    atomic_store_explicit(&pool->metrics, metrics, memory_order_release);
 }
 
 /* ================================================================
@@ -2861,10 +2898,9 @@ loom_result_t loom_pool_resize(loom_thread_pool_t *pool, uint32_t count)
         memset(new_clean_exit + old_max, 0, (count - old_max) * sizeof(_Atomic bool));
         pool->thread_clean_exit = new_clean_exit;
         _Atomic uint32_t *new_recovery =
-            test_alloc_fail_next()
-                ? NULL
-                : (_Atomic uint32_t *)realloc(pool->recovery_attempts,
-                                               count * sizeof(_Atomic uint32_t));
+            test_alloc_fail_next() ? NULL
+                                   : (_Atomic uint32_t *)realloc(pool->recovery_attempts,
+                                                                 count * sizeof(_Atomic uint32_t));
         if (!new_recovery) {
             rollback_deques_tail(pool, old_max, count);
             pthread_mutex_unlock(&pool->lock);
@@ -3145,7 +3181,7 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
         return 0;
     }
     pthread_mutex_lock(&pool->lock);
-    uint32_t recovered = 0;
+    uint32_t recovered     = 0;
     uint32_t crashed_tasks = 0;
 
     for (uint32_t i = 0; i < pool->worker_count; i++) {
@@ -3175,7 +3211,7 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
              * and ignores its arguments, so these stay unread there by design. */
             (void)old_thread;
             (void)retval;
-            int       rc         = LOOMWORKS_TRYJOIN(old_thread, &retval);
+            int rc = LOOMWORKS_TRYJOIN(old_thread, &retval);
             if (rc != 0) {
                 continue; /* still running / not re-joinable / unsupported */
             }
@@ -3189,9 +3225,11 @@ static uint32_t check_and_recover_workers(loom_thread_pool_t *pool)
              * CANCELLED and is freed; a plain marker means only the
              * active count is owed (its user_data died with the node —
              * accepted residual leak, bounded by crash count). */
-            void *slot = atomic_load_explicit(&pool->worker_reclaim[i], memory_order_relaxed);
+            /* Claim atomically so the shutdown join loop (which also claims)
+             * can never free the same ctx concurrently. */
+            void *slot =
+                atomic_exchange_explicit(&pool->worker_reclaim[i], NULL, memory_order_acq_rel);
             if (slot != NULL) {
-                atomic_store_explicit(&pool->worker_reclaim[i], NULL, memory_order_relaxed);
                 if (slot != (void *)&g_plain_task_marker) {
                     future_mark_cancelled((future_task_ctx_t *)slot);
                     free(slot);
@@ -3288,10 +3326,10 @@ void loom_pool_set_backpressure_config(loom_thread_pool_t               *pool,
         return;
     }
     if (cfg) {
-        atomic_store_explicit(&pool->bp_queue_warn_ratio, cfg->queue_depth_warn_ratio,
-                              memory_order_relaxed);
-        atomic_store_explicit(&pool->bp_queue_timeout_ns, cfg->queue_wait_timeout_ns,
-                              memory_order_relaxed);
+        atomic_store_explicit(
+            &pool->bp_queue_warn_ratio, cfg->queue_depth_warn_ratio, memory_order_relaxed);
+        atomic_store_explicit(
+            &pool->bp_queue_timeout_ns, cfg->queue_wait_timeout_ns, memory_order_relaxed);
     } else {
         atomic_store_explicit(&pool->bp_queue_warn_ratio, 0.8, memory_order_relaxed);
         atomic_store_explicit(&pool->bp_queue_timeout_ns, 60000000000LL, memory_order_relaxed);
@@ -3305,14 +3343,18 @@ void loom_pool_set_backpressure_callback(loom_thread_pool_t  *pool,
     if (!pool) {
         return;
     }
-    pool->bp_callback     = cb;
-    pool->bp_callback_ctx = ctx;
+    atomic_store_explicit(&pool->bp_callback, cb, memory_order_release);
+    atomic_store_explicit(&pool->bp_callback_ctx, ctx, memory_order_relaxed);
     atomic_store_explicit(&pool->bp_last_fire_ns, 0, memory_order_release);
 }
 
 void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event)
 {
-    if (!pool || !pool->bp_callback) {
+    if (!pool) {
+        return;
+    }
+    loom_backpressure_fn cb = atomic_load_explicit(&pool->bp_callback, memory_order_acquire);
+    if (cb == NULL) {
         return;
     }
     /* Throttle to at most one callback per window.  The window is
@@ -3328,7 +3370,13 @@ void fire_backpressure(loom_thread_pool_t *pool, loom_backpressure_event_t event
         return;
     }
     atomic_store_explicit(&pool->bp_last_fire_ns, now_ns, memory_order_release);
-    pool->bp_callback(pool->bp_callback_ctx, event);
+    /* cb was snapshotted at the top of the function; re-snapshot ctx now so
+     * the fired callback sees the current user data.  Between the top load
+     * and here the caller may have swapped the callback — at worst we fire
+     * the pre-swap cb with the post-swap ctx, a harmless one-event race
+     * (the backpressure contract is a best-effort hint, not a guarantee). */
+    void *ctx = atomic_load_explicit(&pool->bp_callback_ctx, memory_order_relaxed);
+    cb(ctx, event);
 }
 
 /* ================================================================

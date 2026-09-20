@@ -52,15 +52,17 @@ static void sift_down(loom_timer_entry_t *h, size_t n, size_t i)
 
 /* Insert a new entry and restore the heap invariant via sift-up.
  * The heap doubles in capacity when full (64 -> 128 -> ...).
- * Returns without changing the heap on allocation failure; the caller
- * (coro_sleep_reg_hook) marks the coroutine ERROR in that case. */
-void loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e)
+ * Returns true when the entry was inserted; false when the realloc
+ * above failed and the entry was NOT inserted. Callers (coro_sleep_reg_hook,
+ * the timer thread's re-arm path) must handle the false case. */
+bool loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e)
 {
     if (pool->timer_len == pool->timer_cap) {
-        size_t new_cap = pool->timer_cap == 0 ? 64 : pool->timer_cap * 2;
-        loom_timer_entry_t *nh = (loom_timer_entry_t *)realloc(pool->timer_heap, new_cap * sizeof(*nh));
+        size_t              new_cap = pool->timer_cap == 0 ? 64 : pool->timer_cap * 2;
+        loom_timer_entry_t *nh =
+            (loom_timer_entry_t *)realloc(pool->timer_heap, new_cap * sizeof(*nh));
         if (nh == NULL) {
-            return;
+            return false;
         }
         pool->timer_heap = nh;
         pool->timer_cap  = new_cap;
@@ -68,6 +70,7 @@ void loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e)
     pool->timer_heap[pool->timer_len] = e;
     sift_up(pool->timer_heap, pool->timer_len);
     pool->timer_len++;
+    return true;
 }
 
 /* Return the earliest deadline without removing the entry. */

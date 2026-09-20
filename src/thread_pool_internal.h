@@ -23,6 +23,13 @@
  * residency after bursts; excess nodes are freed normally). */
 #define LOOMWORKS_NODE_POOL_CAP 4096
 
+/* Priority-lane occupancy: one bucket per 8-bit priority value (256
+ * buckets); the non-empty bitmap is one uint64_t word per 64 buckets,
+ * so 256/64 = 4 words.  A word index for bucket b is b/64; the bit
+ * position is b%64. */
+#define LOOMWORKS_PRIORITY_BUCKETS 256
+#define LOOMWORKS_NONEMPTY_WORDS (LOOMWORKS_PRIORITY_BUCKETS / 64)
+
 /* Ring size for unbounded-mode pools (queue_capacity == 0). */
 #define LOOMWORKS_RING_DEFAULT_SLOTS 4096u
 
@@ -171,10 +178,11 @@ struct loom_thread_pool {
      * Numerically smaller priority runs first.  Enqueue appends to the
      * bucket tail (O(1)); dequeue pops the lowest non-empty bucket via the
      * occupancy bitmap (O(1), ~4 loads + ctz). */
-    loom_task_t     *buckets_head[256]; /**< Per-priority bucket heads. */
-    loom_task_t     *buckets_tail[256]; /**< Per-priority bucket tails. */
-    _Atomic uint64_t nonempty_bits[4];  /**< Bit b set <=> buckets_head[b] != NULL. */
-    _Atomic uint32_t queue_len;         /**< Current pending tasks (ring + lanes). */
+    loom_task_t *buckets_head[LOOMWORKS_PRIORITY_BUCKETS]; /**< Per-priority bucket heads. */
+    loom_task_t *buckets_tail[LOOMWORKS_PRIORITY_BUCKETS]; /**< Per-priority bucket tails. */
+    _Atomic uint64_t
+        nonempty_bits[LOOMWORKS_NONEMPTY_WORDS]; /**< Bit b set <=> buckets_head[b] != NULL. */
+    _Atomic uint32_t queue_len;                  /**< Current pending tasks (ring + lanes). */
 
     /* Lock-free Vyukov ring (NORMAL fast path). */
     _Atomic uint64_t ring_head;  /**< Consumer position (monotonic). */
@@ -223,8 +231,9 @@ struct loom_thread_pool {
     /* Worker recovery configuration. Default disabled (timeout_ns=0). */
     _Atomic int64_t  worker_recovery_timeout_ns; /**< Recovery timeout in ns (0=disabled). */
     _Atomic uint32_t max_recovery_attempts;      /**< Max rebuild attempts per worker. */
-    _Atomic uint32_t abnormal_total;            /**< Cumulative abnormal worker exits observed by recovery. */
-    _Atomic uint32_t *recovery_attempts; /**< Per-slot attempt count (heap; sized to max_worker_count). */
+    _Atomic uint32_t abnormal_total; /**< Cumulative abnormal worker exits observed by recovery. */
+    _Atomic uint32_t
+        *recovery_attempts; /**< Per-slot attempt count (heap; sized to max_worker_count). */
     /* Per-slot crash-reclaim info (NULL = idle): the future ctx for a
      * future task in flight, &g_plain_task_marker for a plain task.
      * Published after the active increment, cleared before its decrement
@@ -236,16 +245,18 @@ struct loom_thread_pool {
     /* Backpressure configuration. */
     _Atomic double  bp_queue_warn_ratio; /* default 0.8 */
     _Atomic int64_t bp_queue_timeout_ns; /* default 60s */
-    loom_backpressure_fn bp_callback;         /* NULL = no callback */
-    void                *bp_callback_ctx;
-    _Atomic int64_t    bp_last_fire_ns;  /* CLOCK_MONOTONIC ns of last QUEUE_HIGH fire (0 = never). */
-    _Atomic int64_t    coro_timeout_ns; /*< Per-coroutine execution timeout (0 = disabled). */
-    _Atomic uint64_t     next_task_id;    /**< Monotonically increasing task ID counter. */
-    void                *metrics;         /**< Optional metrics collector (loom_metrics_t*). */
+    _Atomic(loom_backpressure_fn)
+        bp_callback; /* NULL = no callback; atomic: set on caller thread, read on workers. */
+    _Atomic(void *)  bp_callback_ctx;
+    _Atomic int64_t  bp_last_fire_ns;  /* CLOCK_MONOTONIC ns of last QUEUE_HIGH fire (0 = never). */
+    _Atomic int64_t  coro_timeout_ns;  /*< Per-coroutine execution timeout (0 = disabled). */
+    _Atomic uint64_t next_task_id;     /**< Monotonically increasing task ID counter. */
+    _Atomic(loom_metrics_t *) metrics; /**< Optional metrics collector; atomic: set/cleared on
+                                          caller thread, read on workers. */
     /* Inline metrics callback — stores loom_metric_fn directly to avoid
      * union-cast UB.  The callback runs on worker threads under no lock. */
-    loom_metric_fn metric_cb;
-    void          *metric_user_data;
+    _Atomic(loom_metric_fn) metric_cb;
+    _Atomic(void *)         metric_user_data;
     /* Shared-memory metrics region (NULL unless a name was configured).
      * Updated synchronously on every metrics_fire() call from the worker
      * thread that fired the event — no lock needed, the counters are
@@ -277,6 +288,12 @@ loom_task_t *loom_dequeue_unlocked(loom_thread_pool_t *pool);
  * @return The current pool, or NULL outside a worker thread.
  */
 loom_thread_pool_t *loom_pool_current(void);
+
+/* Detach a metrics collector's back-reference to its pool without freeing
+ * the collector.  Called from pool teardown (all workers joined) so that a
+ * collector outliving the pool can later be freed by loom_metrics_destroy()
+ * without touching freed pool memory.  Implemented in metrics.c. */
+void loom_metrics_clear_pool(loom_metrics_t *m);
 
 /* Test-only fault injection: armed with n, the (n+1)-th allocation check in
  * loom_pool_resize fails once, then disarms. n < 0 disarms immediately. */
@@ -319,7 +336,7 @@ size_t ring_bulk_try_dequeue(loom_thread_pool_t *pool, loom_task_t **out, size_t
 /* ================================================================
  *  Timer heap (src/timer.c).  Internal, pool-scoped.
  * ================================================================ */
-void loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e);
+bool loom_timer_push(loom_thread_pool_t *pool, loom_timer_entry_t e);
 bool loom_timer_peek(const loom_thread_pool_t *pool, int64_t *deadline_ns);
 bool loom_timer_pop_due(loom_thread_pool_t *pool, loom_timer_entry_t *out);
 bool loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id, loom_timer_entry_t *out);
