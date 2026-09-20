@@ -62,12 +62,16 @@ if(ENABLE_CLANG_FORMAT)
   if(CLANG_FORMAT_BIN)
     message(STATUS "clang-format found: ${CLANG_FORMAT_BIN}")
 
-    # Collect all C source and header files
+    # Collect all C source and header files.
+    # NOTE: GLOB_RECURSE "**/" requires at least one directory level, so
+    # "src/**/*.c" matched nothing (files sit directly under src/) and the
+    # entire library + tests were silently outside the format gate.
+    # A single "*" under GLOB_RECURSE recurses across directory levels.
     file(GLOB_RECURSE ALL_C_FILES
-      "include/**/*.h"
-      "src/**/*.c"
-      "src/**/*.h"
-      "tests/**/*.c"
+      "include/*.h"
+      "src/*.c"
+      "src/*.h"
+      "tests/*.c"
     )
 
   else()
