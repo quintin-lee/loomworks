@@ -189,21 +189,25 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
 
     loom_coroutine_t *c = g_current;
     if (c != NULL && c->mmap_base != NULL) {
-        size_t ps = (size_t)sysconf(_SC_PAGESIZE);
-        if (ps == 0) {
-            ps = 4096;
-        }
+        /* Guard-band test.  The mapping layout is [GUARD][GUARD][usable]
+         * (see allocate_stack), so a stack-overflow fault lands anywhere in
+         * the [base, stack_start) region.  A range test (not a two-point
+         * "first or top page" test) catches the fault wherever it lands in
+         * the band, and it deliberately does NOT treat a fault on the top
+         * usable page (end - ps) as a guard hit: that page is RW and a real
+         * bug, which must die, not longjmp.  No sysconf() here — the range
+         * needs only the already-known addresses — keeping the handler
+         * async-signal-safe (sysconf may take a malloc-internal lock and
+         * can deadlock if the fault interrupted an allocation). */
         uintptr_t fault = (uintptr_t)info->si_addr;
         uintptr_t base  = (uintptr_t)c->mmap_base;
-        uintptr_t end   = base + c->mmap_size;
-        if (fault >= base && fault < end) {
-            uintptr_t fp = (fault / ps) * ps;
-            if (fp == base || fp == end - ps) {
-                c->state  = LOOMWORKS_CORO_ERROR;
-                g_current = NULL;
-                atomic_fetch_sub_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed);
-                siglongjmp(g_guard_jmp, 1);
-            }
+        uintptr_t ss =
+            (c->stack_start != NULL) ? (uintptr_t)c->stack_start : (uintptr_t)c->mmap_base;
+        if (fault >= base && fault < ss) {
+            c->state  = LOOMWORKS_CORO_ERROR;
+            g_current = NULL;
+            atomic_fetch_sub_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed);
+            siglongjmp(g_guard_jmp, 1);
         }
     }
     /* Not our guard page — terminate the process immediately.
@@ -333,12 +337,13 @@ static loom_coro_result_t allocate_stack(loom_coroutine_t *c)
     c->stack_end     = (char *)base + offset + usable_sz;
 #ifdef VALGRIND_STACK_REGISTER
     c->valgrind_stack_id = (uintptr_t)VALGRIND_STACK_REGISTER(c->stack_start, c->stack_end);
-#else
-    (void)c->stack_start;
-    (void)c->stack_end;
 #endif
-
     if (mprotect(c->stack_start, usable_sz, PROT_READ | PROT_WRITE) != 0) {
+        /* Roll back the budget we charged above: the mapping is going away
+         * and must not keep reserving LOOMWORKS_CORO_MAX_TOTAL_STACK_BYTES
+         * forever.  A failure here means a leaked budget that permanently
+         * shrinks (or exhausts) the pool's stack budget on later creates. */
+        atomic_fetch_sub_explicit(&g_total_stack_mapped, total_sz, memory_order_relaxed);
         munmap(base, total_sz);
         c->mmap_base = NULL;
         return LOOMWORKS_CORO_ERR_MPROTECT;
@@ -650,8 +655,18 @@ loom_coro_result_t loom_coro_sleep_until(int64_t deadline_ns)
     cur->wake_deadline_ns = deadline_ns;
     if (cur->sleep_reg != NULL) {
         /* Pool coroutine task: register the deadline with the pool timer
-         * heap. The timer thread resumes us via the owner worker. */
-        cur->sleep_reg(cur, cur->task_id, deadline_ns);
+         * heap. The timer thread resumes us via the owner worker.  On
+         * failure (LOOMWORKS_CORO_ERR_TIMER — the heap is unrecoverably
+         * full / OOM) the deadline can never fire, so we must NOT leave
+         * the coroutine parked in SLEEPING with no timer entry: the owner
+         * worker's exit-check would then wait on a ready node that never
+         * arrives and spin.  Mark ERROR instead; the dispatch path
+         * (Step C0 / the resume wrap site) observes ERROR, skips the
+         * SLEEPING branch, and destroys the coroutine + task. */
+        loom_coro_result_t rr = cur->sleep_reg(cur, cur->task_id, deadline_ns);
+        if (rr != LOOMWORKS_CORO_OK) {
+            cur->state = LOOMWORKS_CORO_ERROR;
+        }
     }
     /* Return control to the scheduler. The resume() that eventually runs
      * us again validates the deadline (SLEEPING branch above). */

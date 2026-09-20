@@ -208,42 +208,42 @@ loom_result_t loom_runtime_metrics_snapshot(const loom_runtime_t *rt, loom_metri
 /**
  * @brief Return the number of worker threads configured in the runtime.
  */
- uint32_t loom_runtime_worker_count(const loom_runtime_t *rt)
- {
-     return rt ? loom_pool_worker_count(rt->pool) : 0;
- }
+uint32_t loom_runtime_worker_count(const loom_runtime_t *rt)
+{
+    return rt ? loom_pool_worker_count(rt->pool) : 0;
+}
 /**
  * @brief Return the total number of tasks currently queued across all
  *        queues (ring + lanes + per-worker deques).
  */
- uint32_t loom_runtime_pending_count(const loom_runtime_t *rt)
- {
-     return rt ? loom_pool_pending_count(rt->pool) : 0;
- }
+uint32_t loom_runtime_pending_count(const loom_runtime_t *rt)
+{
+    return rt ? loom_pool_pending_count(rt->pool) : 0;
+}
 /**
  * @brief Return the number of workers currently executing a task.
  */
- uint32_t loom_runtime_active_count(const loom_runtime_t *rt)
- {
-     return rt ? loom_pool_active_count(rt->pool) : 0;
- }
+uint32_t loom_runtime_active_count(const loom_runtime_t *rt)
+{
+    return rt ? loom_pool_active_count(rt->pool) : 0;
+}
 /**
  * @brief Return the number of idle workers (worker_count - active).
  */
- uint32_t loom_runtime_idle_count(const loom_runtime_t *rt)
- {
-     return rt ? loom_pool_idle_count(rt->pool) : 0;
- }
+uint32_t loom_runtime_idle_count(const loom_runtime_t *rt)
+{
+    return rt ? loom_pool_idle_count(rt->pool) : 0;
+}
 /**
  * @brief Return current utilization as active / worker_count (0.0 when
  *        worker_count is zero).
  */
- double loom_runtime_utilization(const loom_runtime_t *rt)
- {
-     return rt ? loom_pool_utilization(rt->pool) : 0.0;
- }
+double loom_runtime_utilization(const loom_runtime_t *rt)
+{
+    return rt ? loom_pool_utilization(rt->pool) : 0.0;
+}
 
- void loom_runtime_shutdown(loom_runtime_t *rt)
+void loom_runtime_shutdown(loom_runtime_t *rt)
 {
     if (rt && rt->pool) {
         loom_pool_shutdown(rt->pool);
@@ -253,16 +253,15 @@ loom_result_t loom_runtime_metrics_snapshot(const loom_runtime_t *rt, loom_metri
  * @brief Return the backing thread pool handle (useful for low-level
  *        diagnostics or direct pool API usage).
  */
- loom_thread_pool_t *loom_runtime_pool(const loom_runtime_t *rt)
- {
-     return rt ? rt->pool : NULL;
- }
+loom_thread_pool_t *loom_runtime_pool(const loom_runtime_t *rt)
+{
+    return rt ? rt->pool : NULL;
+}
 /**
  * @brief Return the shared-memory metrics region, or NULL if no name
  *        was configured at creation time.
  */
- loom_metrics_shm_t *loom_runtime_shm(const loom_runtime_t *rt)
- {
-     return rt ? rt->shm : NULL;
- }
-
+loom_metrics_shm_t *loom_runtime_shm(const loom_runtime_t *rt)
+{
+    return rt ? rt->shm : NULL;
+}

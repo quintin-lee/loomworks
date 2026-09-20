@@ -62,8 +62,8 @@ struct loom_coroutine {
     loom_coro_result_t (*sleep_reg)(void *ctx, uint64_t task_id, int64_t deadline_ns);
 
     /* Execution timeout fields (0 = disabled). Set by loom_coro_set_timeout(). */
-    int64_t execution_start_ns;  /**< CLOCK_MONOTONIC time when coroutine started running. */
-    int64_t max_execution_ns;    /**< Maximum allowed execution time (0 = unlimited). */
+    int64_t execution_start_ns; /**< CLOCK_MONOTONIC time when coroutine started running. */
+    int64_t max_execution_ns;   /**< Maximum allowed execution time (0 = unlimited). */
 
     uint64_t padding[2]; /**< Pad to 64-byte cache-line boundary. */
 };
