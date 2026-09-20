@@ -1,8 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/pipeline.h"
 #include "loomworks/thread_pool.h"
-#include "loomworks/thread_pool_health.h"
 #include "loomworks/thread_pool_backpressure.h"
+#include "loomworks/thread_pool_health.h"
 
 /* Internal struct access for work-stealing deque unit tests. */
 #include "../src/thread_pool_internal.h"
@@ -27,24 +27,21 @@
 /* Spin-wait with moderate limit + clock-based safety valve.
  * Moderate spin limit avoids consuming CI time before the clock timeout kicks in.
  * Under valgrind, 100M spins takes ~1-2 min; clock fallback gives 60s more. */
-#define WAIT_UNTIL(_sec, _cond)                                                    \
-    for (uint64_t _wt_spins = 0;                                                   \
-         !(_cond) && _wt_spins < 2000000000ULL;                                     \
-         ++_wt_spins)                                                              \
-        ;                                                                           \
-    if (!(_cond)) {                                                                \
-        struct timespec _wt_deadline;                                              \
-        clock_gettime(CLOCK_MONOTONIC, &_wt_deadline);                             \
-        _wt_deadline.tv_sec += (_sec) + 60;                                        \
-        while (!(_cond)) {                                                         \
-            struct timespec _wt_now;                                               \
-            clock_gettime(CLOCK_MONOTONIC, &_wt_now);                              \
-            if (_wt_now.tv_sec > _wt_deadline.tv_sec ||                           \
-                (_wt_now.tv_sec == _wt_deadline.tv_sec &&                         \
-                 _wt_now.tv_nsec >= _wt_deadline.tv_nsec))                        \
-                break;                                                             \
-            sched_yield();                                                         \
-        }                                                                          \
+#define WAIT_UNTIL(_sec, _cond)                                                                    \
+    for (uint64_t _wt_spins = 0; !(_cond) && _wt_spins < 2000000000ULL; ++_wt_spins)               \
+        ;                                                                                          \
+    if (!(_cond)) {                                                                                \
+        struct timespec _wt_deadline;                                                              \
+        clock_gettime(CLOCK_MONOTONIC, &_wt_deadline);                                             \
+        _wt_deadline.tv_sec += (_sec) + 60;                                                        \
+        while (!(_cond)) {                                                                         \
+            struct timespec _wt_now;                                                               \
+            clock_gettime(CLOCK_MONOTONIC, &_wt_now);                                              \
+            if (_wt_now.tv_sec > _wt_deadline.tv_sec || (_wt_now.tv_sec == _wt_deadline.tv_sec &&  \
+                                                         _wt_now.tv_nsec >= _wt_deadline.tv_nsec)) \
+                break;                                                                             \
+            sched_yield();                                                                         \
+        }                                                                                          \
     }
 
 static int g_passes   = 0;
@@ -2363,8 +2360,8 @@ static void test_recovery_counts_crashed_worker(void)
     loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "crash-count: create pool");
 
-    metrics_event_ctx_t mctx  = {0};
-    loom_metrics_t     *mets  = NULL;
+    metrics_event_ctx_t mctx = {0};
+    loom_metrics_t     *mets = NULL;
     ASSERT(loom_metrics_create(pool, metrics_event_callback, &mctx, &mets) == LOOMWORKS_OK,
            "crash-count: metrics");
 
@@ -2395,6 +2392,11 @@ static void test_recovery_counts_crashed_worker(void)
            "crash-count: submit after crash");
     WAIT_UNTIL(5, sink == 1);
     ASSERT(sink == 1, "crash-count: pool functional after recovery");
+    /* The worker's epilogue clears the reclaim slot and decrements
+     * active_workers after the task function returns; wait for idle so
+     * the resample below is not racy. */
+    WAIT_UNTIL(5, loom_pool_active_count(pool) == 0);
+    ASSERT(loom_pool_active_count(pool) == 0, "crash-count: worker idle");
 
     /* The crashed worker died mid-task (+1 leaked); recovery must have
      * repaired it via the published task slot.  Without the repair, active
@@ -4257,7 +4259,7 @@ static void *timeout_shutdown_thread(void *arg)
 static void test_coro_execution_timeout(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg   = {.worker_count = 4, .queue_capacity = 0};
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "coro-timeout: create pool");
     ASSERT(pool != NULL, "coro-timeout: pool non-NULL");
 
@@ -4363,8 +4365,8 @@ static loom_result_t g_bp_block_rc   = LOOMWORKS_ERR_INVALID;
 
 static void *bp_blocking_thread(void *arg)
 {
-    g_bp_block_rc = loom_pool_submit_blocking(
-        (loom_thread_pool_t *)arg, simple_task, &g_bp_block_sink, NULL);
+    g_bp_block_rc =
+        loom_pool_submit_blocking((loom_thread_pool_t *)arg, simple_task, &g_bp_block_sink, NULL);
     return NULL;
 }
 
