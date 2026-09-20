@@ -54,8 +54,10 @@ typedef struct {
  *
  * Creates `/dev/shm/loomworks_<name>` (or `/loomworks_<name>` on
  * platforms without /dev/shm) with exactly one mapping per unique name.
- * Calling this multiple times with the same name returns the existing
- * region; calling with a different name creates a new segment.
+ * Calling this again with the same name re-creates the segment: the
+ * object is re-truncated to its fixed size and every counter is
+ * re-zeroed, so a stale reader observing the region mid-call sees
+ * reset values.
  *
  * The returned pointer must be passed to every subsequent
  * loom_metrics_shm_* call and eventually to
@@ -65,7 +67,8 @@ typedef struct {
  *               Must be non-NULL and contain only [a-zA-Z0-9_].
  *               Max length: 127 chars (leaves room for prefix + NUL).
  * @param out    Output pointer for the mapped region.
- * @return       LOOMWORKS_OK on success, LOOMWORKS_ERR_ALLOC on failure.
+ * @return       0 on success, -1 on failure (invalid name, allocation,
+ *               or mmap/shm_open error).
  */
 int loom_metrics_shm_create(const char *name, loom_metrics_shm_t **out);
 
@@ -89,11 +92,12 @@ void loom_metrics_shm_destroy(const char *name, loom_metrics_shm_t *ptr);
 void loom_metrics_shm_write(loom_metric_event_t event, loom_metrics_shm_t *shm);
 
 /**
- * @brief Read a consistent cross-section of all counters.
+ * @brief Read an eventually-consistent snapshot of all counters.
  *
- * Uses the internal mutex (see metrics.h) to serialise reads.  All
- * fields in @p out are mutually consistent at the instant the lock is
- * released.
+ * Performs a single lock-free `memcpy` of the mapped region; no lock is
+ * taken.  Each counter reads as a valid (monotonic) value, but the
+ * fields may reflect slightly different instants.  This is the
+ * documented trade-off and is sufficient for monitoring.
  *
  * @param shm    The shared-memory region.
  * @param out    Output snapshot (caller-allocated).

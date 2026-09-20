@@ -11,6 +11,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/metrics.h"
+#include "thread_pool_internal.h" /* loom_metrics_clear_pool prototype */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -69,14 +70,31 @@ void loom_metrics_destroy(loom_metrics_t **metrics)
         return;
     }
     loom_metrics_t *m = *metrics;
-    /* Clear pool reference first so subsequent cleanup calls
-     * see a NULL pool and skip the UAF-prone API calls. */
+    /* Detach from the owning pool before freeing, so the pool's fire path
+     * can no longer reference the collector.  Only safe while the pool is
+     * alive: when the pool was destroyed first, pool teardown already ran
+     * loom_metrics_clear_pool() and set m->pool to NULL, so the pool-side
+     * setters are skipped and this is a plain free. */
+    if (m->pool != NULL) {
+        loom_pool_set_metrics(m->pool, NULL);
+        loom_pool_set_metrics_callback(m->pool, NULL, NULL);
+    }
     m->pool = NULL;
     pthread_mutex_destroy(&m->lock);
     free(m);
     *metrics = NULL;
 }
 
+/* Pool-side half of the two-sided collector/pool detach (see
+ * thread_pool_internal.h): sever the collector's back-reference without
+ * freeing the collector, so a collector that outlives its pool can still
+ * be freed by loom_metrics_destroy() without touching freed memory. */
+void loom_metrics_clear_pool(loom_metrics_t *m)
+{
+    if (m != NULL) {
+        m->pool = NULL;
+    }
+}
 uint64_t loom_metrics_submitted(const loom_metrics_t *metrics)
 {
     if (!metrics) {
