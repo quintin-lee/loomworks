@@ -117,15 +117,17 @@ Only costs ≥ 10 % and line-attributable count toward Target:
 
 | Cost | Share pᵢ | Conservative removable eᵢ |
 |---|---|---|
-| A: cancel-index pair (insert + remove) | 0.103 | 0.09 (typical-case probe is already ~1–2 slots; the removable share is the saturated-window cost) |
+| A: cancel-index pair (insert + remove) | 0.103 | 0.05 (striped/tighter-load table cuts cross-core probe-bounce by ~half; a full removal would need the two-level redesign, which was declined on risk) |
 
 `worker_entry` self (4.15 %), `metrics_fire` (1.00 %), and the
 deque/ring push+pop cluster (~5 %) are each < 10 % individually →
 opportunistic only, NOT counted toward Target (supersedes any earlier
 larger figure).
 
-**Target = 0.5 × Σ eᵢ = 0.5 × 0.09 ≈ 4.5 % primary gain** on the w=4 × t=100k
-cell.
+**Target = 0.5 × Σ eᵢ = 0.5 × 0.05 ≈ 2.5 % primary gain** on the w=4 × t=100k
+cell. (Re-derived from the two-level figure of 4.5 % when candidate 4.8 was
+deliberately narrowed to the low-risk striped-table variant, user decision
+2026-10-18; the two-level move/5–6-call-site bookkeeping was declined.)
 
 **Acceptance (all must hold):** primary gain ≥ Target on the acceptance
 cell; no T1 metric cell below baseline −5 %; `tail_latency_ns.p99` and
@@ -141,30 +143,33 @@ change just to hit a number. Stop after 2 consecutive disproven candidates.
 ## 5. Candidate List (each first proven by the baseline; one commit per
 change; per-item verification protocol (a)–(e) below)
 
-**4.8 — Two-level cancel index (PRIMARY; user-chosen; counts toward Target).**
-Replace the single shared 8192-slot table with:
-- **Level 1 (local, per-worker):** each worker owns a small open-addressed
-  table sized `LOOMWORKS_DEQUE_CAPACITY` (256, power of two) × 32 B =
-  8 KB/worker = 32 KB total — L2-resident, zero cross-core sharing. Tasks
-  pushed to that worker's deque are indexed there (the pushing worker is
-  known at push time: self-push or steal).
-- **Level 2 (shared):** the existing table **resized to `ring_size`
-  (4096)** = 128 KB shared — covers ring-enqueued tasks only.
-- `loom_task_t` gains a 1-byte index tag (0 = shared/ring, 1..N = local
-  worker N, reusing the stamped owner). `cancel_index_remove`
-  (`worker_entry`, src:732) probes the tagged local table first, then
-  shared. `cancel_index_find`/`cancel_index_claim` (user-side cancel,
-  rare — R5) probe all local tables + shared: cancel cost grows by a small
-  bounded constant, cancel semantics unchanged.
-- Net memory: 32 + 128 = 160 KB (vs 256 KB today) — a small win.
-- Zero observable behaviour change: a task findable today stays findable
-  (its tag routes to exactly one of the two tables).
-- Internal-header edit only (`thread_pool_internal.h`, `loom_thread_pool_t`
-  / `loom_task_t` layouts) — allowed by invariant 1.
+**4.8 — Cancel-index contention reduction (PRIMARY; user-chosen low-risk
+variant "A"; counts toward Target).** The two-level (per-worker local
+table + move bookkeeping) design was **declined on risk**: moving each
+task's index entry shared→local at every `deque_push` and re-removing it
+at every drain/spill/lane-completion site is ~5–6 subtle concurrency
+call-sites where one missed move reproduces the slot-leak/CI-hang class
+of bug the `cancel_index_remove` tombstone comment (`src/thread_pool.c`
+:1413-1427) warns about. Instead, the same 10.34 % cost is attacked with
+the minimal, zero-call-site-change **tighter-load single table**:
+- **Double the table headroom:** `pool_init` sizes `cancel_cap` to
+  `next_pow2(need * 2)` (was `next_pow2(need)`), dropping the open-addressed
+  load factor from ~63 % to ~31 %. Shorter probe chains (~1–2 slots vs
+  ~3–4) mean each relaxed atomic load touches far fewer shared cache lines,
+  cutting the cross-core MESI bounce that is the measured cost. The table
+  still bounds every live entry (`need` unchanged), so **no task is ever
+  dropped or made unfindable** — cancel semantics are byte-for-byte
+  identical.
+- **`__builtin_expect` hot-branch hints** on the insert/remove probe loops
+  (the common "first slot is empty/occupied" cases) to remove the two
+  branch mispredicts that a 63 %-loaded chain adds.
+- No new field, no tag, no move, no new test location: the existing
+  cancel-by-id tests already pin the contract.
+- Net: ~2× the shared table (256 KB → 512 KB at w=4, still L2-fits in
+  aggregate, lower per-line traffic).
 - **Keep criterion:** cancel-index self-share on the acceptance cell drops
-  from ~10.3 % to < 5 % with no gate regression.
-- Risk: medium (insert/remove/find/claim all touched); mitigated by the
-  full contract test suite + ASan/UBSan.
+  from ~10.3 % toward ~5 % (a ≈2.5 % primary gain) with no gate regression.
+- Risk: low (one sizing constant + two hint macros; no structural change).
 
 **4.1 — Slim `worker_entry` fast path** (opportunistic): move/hint the cold
 drain/shutdown/resize/timer/health checks out of the per-iteration decision
