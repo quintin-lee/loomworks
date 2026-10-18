@@ -73,6 +73,94 @@ static loom_result_t count_task(void *ud)
     return LOOMWORKS_OK;
 }
 
+static void sleep_ms(int ms)
+{
+    struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
+
+/* Park gate: a worker running gate_task holds the pool hostage so that DAG
+ * roots submitted while it is parked stay pending for state assertions. */
+static atomic_int g_gate_parked;
+static atomic_int g_gate_release;
+
+static void gate_task(void *ud)
+{
+    (void)ud;
+    atomic_fetch_add(&g_gate_parked, 1);
+    while (atomic_load(&g_gate_release) == 0) {
+        sleep_ms(1);
+    }
+}
+
+static void gate_reset(void)
+{
+    atomic_store(&g_gate_parked, 0);
+    atomic_store(&g_gate_release, 0);
+}
+
+static int wait_parked(int want)
+{
+    for (int i = 0; i < 2000; i++) {
+        if (atomic_load(&g_gate_parked) >= want) {
+            return 1;
+        }
+        sleep_ms(1);
+    }
+    return 0;
+}
+
+/* Node task that reports a failure: the graph must keep draining. */
+static loom_result_t fail_task(void *ud)
+{
+    (void)ud;
+    return LOOMWORKS_ERR_TIMEOUT;
+}
+
+typedef struct {
+    atomic_int *counter;
+    int         delay_ms;
+} slow_arg_t;
+
+static loom_result_t slow_task(void *ud)
+{
+    const slow_arg_t *a = (const slow_arg_t *)ud;
+    sleep_ms(a->delay_ms);
+    atomic_fetch_add(a->counter, 1);
+    return LOOMWORKS_OK;
+}
+
+typedef struct {
+    atomic_int *seq;
+    atomic_int *slot;
+} seq_arg_t;
+
+static loom_result_t seq_task(void *ud)
+{
+    seq_arg_t *a = (seq_arg_t *)ud;
+    atomic_store(a->slot, atomic_fetch_add(a->seq, 1));
+    return LOOMWORKS_OK;
+}
+
+static void normal_probe_task(void *ud)
+{
+    seq_arg_t *a = (seq_arg_t *)ud;
+    atomic_store(a->slot, atomic_fetch_add(a->seq, 1));
+}
+
+typedef struct {
+    loom_thread_pool_t *pool;
+    int                 delay_ms;
+} shutdown_arg_t;
+
+static void *shutdown_worker(void *ud)
+{
+    const shutdown_arg_t *a = (const shutdown_arg_t *)ud;
+    sleep_ms(a->delay_ms);
+    loom_pool_shutdown(a->pool);
+    return NULL;
+}
+
 /* ============================ category 1: lifecycle ==================== */
 
 static void test_lifecycle_happy(void)
@@ -340,6 +428,236 @@ static void test_errors_mutation_after_submit(void)
     kill_pool(&pool);
 }
 
+/* ============ categories 4-7: semantics, integration, failure, timeout ============ */
+
+static void test_semantics_report_only_failure(void)
+{
+    loom_thread_pool_t *pool = make_pool(2, 0);
+    ASSERT(pool != NULL, "report pool create");
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 2, &dag) == LOOMWORKS_OK, "report dag create");
+
+    atomic_int       ran = 0;
+    loom_dag_node_t *n0  = NULL;
+    loom_dag_node_t *n1  = NULL;
+    ASSERT(loom_dag_add_node(dag, 0, fail_task, NULL, 5, &n0) == LOOMWORKS_OK, "report add n0");
+    ASSERT(loom_dag_add_node(dag, 1, count_task, &ran, 5, &n1) == LOOMWORKS_OK, "report add n1");
+    ASSERT(loom_dag_add_edge(dag, 0, 1) == LOOMWORKS_OK, "report edge 0->1");
+
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "report submit");
+    struct timespec dl = SAFE_DEADLINE();
+    ASSERT(loom_dag_wait_timeout(dag, &dl) == LOOMWORKS_OK, "report wait ok");
+
+    ASSERT(atomic_load(&ran) == 1, "successor ran despite predecessor failure");
+    ASSERT(loom_dag_node_status(n0) == LOOMWORKS_ERR_TIMEOUT, "n0 keeps its own result");
+    ASSERT(loom_dag_node_status(n1) == LOOMWORKS_OK, "n1 status OK");
+
+    loom_dag_destroy(dag);
+    kill_pool(&pool);
+}
+
+static void test_semantics_node_status_lifecycle(void)
+{
+    loom_thread_pool_t *pool = make_pool(1, 0);
+    ASSERT(pool != NULL, "status pool create");
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 2, &dag) == LOOMWORKS_OK, "status dag create");
+
+    atomic_int       ran = 0;
+    loom_dag_node_t *n0  = NULL;
+    loom_dag_node_t *n1  = NULL;
+    ASSERT(loom_dag_add_node(dag, 0, count_task, &ran, 5, &n0) == LOOMWORKS_OK, "status add n0");
+    ASSERT(loom_dag_add_node(dag, 1, count_task, &ran, 5, &n1) == LOOMWORKS_OK, "status add n1");
+    ASSERT(loom_dag_add_edge(dag, 0, 1) == LOOMWORKS_OK, "status edge 0->1");
+
+    ASSERT(loom_dag_node_future(n0) == NULL, "no future before release");
+    ASSERT(loom_dag_node_status(n0) == LOOMWORKS_ERR_INVALID, "no status before release");
+
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "status submit");
+    struct timespec dl = SAFE_DEADLINE();
+    ASSERT(loom_dag_wait_timeout(dag, &dl) == LOOMWORKS_OK, "status wait ok");
+
+    ASSERT(loom_dag_node_future(n0) != NULL, "future present after release");
+    ASSERT(loom_dag_node_status(n0) == LOOMWORKS_OK, "n0 status OK");
+    ASSERT(loom_dag_node_status(n1) == LOOMWORKS_OK, "n1 status OK");
+
+    loom_dag_destroy(dag);
+    kill_pool(&pool);
+}
+
+static void test_semantics_priority_routing(void)
+{
+    gate_reset();
+    loom_thread_pool_t *pool = make_pool(1, 0);
+    ASSERT(pool != NULL, "prio pool create");
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "prio gate submit");
+    ASSERT(wait_parked(1), "prio worker parked");
+
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 1, &dag) == LOOMWORKS_OK, "prio dag create");
+
+    atomic_int seq      = 0;
+    atomic_int normal   = 0;
+    atomic_int low      = 0;
+    seq_arg_t  low_arg  = {&seq, &low};
+    seq_arg_t  norm_arg = {&seq, &normal};
+
+    loom_dag_node_t *root = NULL;
+    ASSERT(loom_dag_add_node(dag, 0, seq_task, &low_arg, LOOMWORKS_PRIORITY_LOW, &root) ==
+               LOOMWORKS_OK,
+           "prio add root");
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "prio submit");
+    ASSERT(loom_pool_submit(pool, normal_probe_task, &norm_arg, NULL) == LOOMWORKS_OK,
+           "prio normal submit");
+
+    atomic_store(&g_gate_release, 1);
+
+    struct timespec dl = SAFE_DEADLINE();
+    ASSERT(loom_dag_wait_timeout(dag, &dl) == LOOMWORKS_OK, "prio wait ok");
+    ASSERT(atomic_load(&normal) == 0, "normal task ran first");
+    ASSERT(atomic_load(&low) == 1, "low-priority root ran second");
+
+    loom_dag_destroy(dag);
+    kill_pool(&pool);
+}
+
+static void test_integration_destroy_with_inflight(void)
+{
+    loom_thread_pool_t *pool = make_pool(2, 0);
+    ASSERT(pool != NULL, "destroy pool create");
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 3, &dag) == LOOMWORKS_OK, "destroy dag create");
+
+    atomic_int done = 0;
+    slow_arg_t slow = {&done, 40};
+    ASSERT(loom_dag_add_node(dag, 0, slow_task, &slow, 5, NULL) == LOOMWORKS_OK, "destroy add n0");
+    ASSERT(loom_dag_add_node(dag, 1, slow_task, &slow, 5, NULL) == LOOMWORKS_OK, "destroy add n1");
+    ASSERT(loom_dag_add_node(dag, 2, slow_task, &slow, 5, NULL) == LOOMWORKS_OK, "destroy add n2");
+    ASSERT(loom_dag_add_edge(dag, 0, 1) == LOOMWORKS_OK, "destroy edge 0->1");
+    ASSERT(loom_dag_add_edge(dag, 1, 2) == LOOMWORKS_OK, "destroy edge 1->2");
+
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "destroy submit");
+    ASSERT(loom_dag_destroy(dag) == LOOMWORKS_OK, "destroy joins in-flight runners");
+    ASSERT(atomic_load(&done) == 3, "all nodes completed before destroy returned");
+
+    kill_pool(&pool);
+}
+
+static void test_integration_shutdown_mid_graph(void)
+{
+    gate_reset();
+    loom_thread_pool_t *pool = make_pool(1, 0);
+    ASSERT(pool != NULL, "shutdown pool create");
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "shutdown gate submit");
+    ASSERT(wait_parked(1), "shutdown worker parked");
+
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 2, &dag) == LOOMWORKS_OK, "shutdown dag create");
+
+    atomic_int       ran = 0;
+    loom_dag_node_t *n1  = NULL;
+    ASSERT(loom_dag_add_node(dag, 0, count_task, &ran, 5, NULL) == LOOMWORKS_OK, "shutdown add n0");
+    ASSERT(loom_dag_add_node(dag, 1, count_task, &ran, 5, &n1) == LOOMWORKS_OK, "shutdown add n1");
+    ASSERT(loom_dag_add_edge(dag, 0, 1) == LOOMWORKS_OK, "shutdown edge 0->1");
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "shutdown submit");
+
+    shutdown_arg_t sh = {pool, 60};
+    pthread_t      th;
+    ASSERT(pthread_create(&th, NULL, shutdown_worker, &sh) == 0, "shutdown thread create");
+    sleep_ms(sh.delay_ms + 20);
+    atomic_store(&g_gate_release, 1);
+    ASSERT(pthread_join(th, NULL) == 0, "shutdown thread join");
+
+    struct timespec dl = SAFE_DEADLINE();
+    ASSERT(loom_dag_wait_timeout(dag, &dl) == LOOMWORKS_ERR_SHUTDOWN, "wait reports shutdown");
+    ASSERT(atomic_load(&ran) == 1, "only the queued root ran");
+    ASSERT(loom_dag_node_future(n1) != NULL, "failed release still attaches a future");
+    ASSERT(loom_dag_node_status(n1) == LOOMWORKS_ERR_SHUTDOWN,
+           "successor release reports shutdown");
+
+    loom_dag_destroy(dag);
+    loom_pool_destroy(&pool);
+}
+
+static void test_release_failure_bounded_queue(void)
+{
+    gate_reset();
+    loom_thread_pool_t *pool = make_pool(1, 1);
+    ASSERT(pool != NULL, "bounded pool create");
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "bounded gate submit");
+    ASSERT(wait_parked(1), "bounded worker parked");
+
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 3, &dag) == LOOMWORKS_OK, "bounded dag create");
+
+    atomic_int       ran  = 0;
+    loom_dag_node_t *root = NULL;
+    loom_dag_node_t *a    = NULL;
+    loom_dag_node_t *b    = NULL;
+    ASSERT(loom_dag_add_node(dag, 0, count_task, &ran, 5, &root) == LOOMWORKS_OK,
+           "bounded add root");
+    ASSERT(loom_dag_add_node(dag, 1, count_task, &ran, 5, &a) == LOOMWORKS_OK, "bounded add a");
+    ASSERT(loom_dag_add_node(dag, 2, count_task, &ran, 5, &b) == LOOMWORKS_OK, "bounded add b");
+    ASSERT(loom_dag_add_edge(dag, 0, 1) == LOOMWORKS_OK, "bounded edge 0->1");
+    ASSERT(loom_dag_add_edge(dag, 0, 2) == LOOMWORKS_OK, "bounded edge 0->2");
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "bounded submit");
+
+    atomic_store(&g_gate_release, 1);
+
+    struct timespec dl = SAFE_DEADLINE();
+    ASSERT(loom_dag_wait_timeout(dag, &dl) == LOOMWORKS_ERR_INVALID, "sticky release failure");
+    ASSERT(loom_dag_node_future(root) != NULL, "root was released");
+    ASSERT(loom_dag_node_future(a) != NULL, "first successor was released");
+    ASSERT(loom_dag_node_future(b) != NULL, "failed release still attaches a future");
+    ASSERT(loom_dag_node_status(b) == LOOMWORKS_ERR_INVALID, "second successor release failed");
+    ASSERT(atomic_load(&ran) == 2, "root and the released successor ran");
+
+    loom_dag_destroy(dag);
+    kill_pool(&pool);
+}
+
+static void test_wait_timeout_expiry_then_resume(void)
+{
+    loom_thread_pool_t *pool = make_pool(1, 0);
+    ASSERT(pool != NULL, "expiry pool create");
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 1, &dag) == LOOMWORKS_OK, "expiry dag create");
+
+    atomic_int       done = 0;
+    slow_arg_t       slow = {&done, 200};
+    loom_dag_node_t *n0   = NULL;
+    ASSERT(loom_dag_add_node(dag, 0, slow_task, &slow, 5, &n0) == LOOMWORKS_OK, "expiry add n0");
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "expiry submit");
+
+    struct timespec dl = deadline_ms(50);
+    ASSERT(loom_dag_wait_timeout(dag, &dl) == LOOMWORKS_ERR_TIMEOUT, "deadline expires first");
+    ASSERT(loom_dag_node_status(n0) == LOOMWORKS_ERR_INVALID, "node not finished at expiry");
+
+    ASSERT(loom_dag_wait(dag) == LOOMWORKS_OK, "unbounded wait resumes to completion");
+    ASSERT(atomic_load(&done) == 1, "slow node ran to completion");
+
+    loom_dag_destroy(dag);
+    kill_pool(&pool);
+}
+
+static void test_wait_timeout_null_waits_forever(void)
+{
+    loom_thread_pool_t *pool = make_pool(1, 0);
+    ASSERT(pool != NULL, "null-deadline pool create");
+    loom_dag_t *dag = NULL;
+    ASSERT(loom_dag_create(pool, 1, &dag) == LOOMWORKS_OK, "null-deadline dag create");
+
+    atomic_int ran = 0;
+    ASSERT(loom_dag_add_node(dag, 0, count_task, &ran, 5, NULL) == LOOMWORKS_OK,
+           "null-deadline add");
+    ASSERT(loom_dag_submit(dag) == LOOMWORKS_OK, "null-deadline submit");
+    ASSERT(loom_dag_wait_timeout(dag, NULL) == LOOMWORKS_OK, "NULL deadline waits forever");
+    ASSERT(atomic_load(&ran) == 1, "node ran");
+
+    loom_dag_destroy(dag);
+    kill_pool(&pool);
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -356,6 +674,14 @@ int main(void)
     test_errors_unknown_and_duplicate();
     test_errors_sparse_ids();
     test_errors_mutation_after_submit();
+    test_semantics_report_only_failure();
+    test_semantics_node_status_lifecycle();
+    test_semantics_priority_routing();
+    test_integration_destroy_with_inflight();
+    test_integration_shutdown_mid_graph();
+    test_release_failure_bounded_queue();
+    test_wait_timeout_expiry_then_resume();
+    test_wait_timeout_null_waits_forever();
 
     fprintf(stdout, "PASS %d  FAIL %d\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
