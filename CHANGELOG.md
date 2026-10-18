@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Task DAG (`loom_dag_t`)** — submit a dependency graph in which every node runs
+  only after all of its predecessors have completed. Includes per-node embedded
+  futures (`loom_dag_node_future`), per-node result inspection
+  (`loom_dag_node_status`), graph-wide `loom_dag_wait` /
+  `loom_dag_wait_timeout`, and a joint, NULL-safe `loom_dag_destroy` that joins
+  in-flight work. Release back-pressure (bounded queue) and pool shutdown are
+  reported to waiters as `LOOMWORKS_ERR_INVALID` / `LOOMWORKS_ERR_SHUTDOWN`
+  instead of being lost.
 - **Unified runtime (`loom_runtime_t`)**: single-entry-point abstraction that
   routes thread and coroutine submissions through one API. `loom_runtime_submit()`
   takes a `loom_submit_flag_t` (THREAD / CORO) and a `loom_fn_union_t` to avoid

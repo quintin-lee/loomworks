@@ -661,3 +661,55 @@ loom_coro_exit() / coro_atexit()
 | Bounded queue full, 60 s wait | Return `LOOMWORKS_ERR_TIMEOUT` |
 
 All error paths guarantee correct resource cleanup with no memory leaks.
+
+---
+
+## 11. Task DAG (`loom_dag_t`)
+
+A task DAG is a set of nodes (each bound to a `loom_user_fn`) plus directed edges
+declaring "B runs after A". `loom_dag_submit` runs Kahn's algorithm once to
+detect cycles, seeds `pending_preds` per node, then releases every root. A node's
+runner decrements each successor's `pending_preds`; the successor is released the
+moment that counter reaches zero. There is no scheduler thread and no fixed
+topological order - the DAG is driven entirely by completion callbacks.
+
+```
+                      loom_dag_submit
+                            |
+                   Kahn pass (cycle check)
+                            |
+                 root release -> in_flight++
+                            |
+                 pool_submit_internal(node runner)
+                            |
+       node fn runs  ---> runner epilogue: in_flight--
+                            |
+       for each successor: pending_preds-- (0 -> release,
+                            in_flight++ before submit)
+                            |
+       drained(d) <=> in_flight == 0 && (failed || released_total == added_count)
+```
+
+### Data model
+
+| Field | Role |
+|-------|------|
+| `in_degree` (`uint32_t`) | Immutable, set at build time; used by the Kahn pass and the root scan. |
+| `pending_preds` (`_Atomic uint32_t`) | Live countdown seeded from `in_degree` at submit. |
+| `future_owner` (`_Atomic bool`) | Set once a node's embedded future exists; makes destroy safe. |
+| `in_flight` (`uint32_t`, under `done_mu`) | Runners submitted but not yet finished. |
+| `failed` / `fail_error` | Sticky release failure (spec D3); successors are never started. |
+
+### Why two counters (`in_degree` + `pending_preds`)
+
+Collapsing them is wrong: the build phase needs a stable number for the Kahn pass
+and the root scan, while the run phase needs a mutable countdown. Sharing one
+field would let a live decrement race build-phase reads; `in_degree` is read-only
+after `loom_dag_submit`.
+
+### Destroy semantics
+
+`loom_dag_destroy` waits (via the same predicate `loom_dag_wait` uses) for all
+in-flight runners, destroys only the futures whose `future_owner` flag is set, and
+always returns `LOOMWORKS_OK`. It is safe from any thread, including immediately
+after a submit.

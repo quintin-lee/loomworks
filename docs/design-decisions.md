@@ -462,3 +462,55 @@ the whole execution window. Coroutine tasks never publish (their nodes may
 be referenced by the timer heap); plain-task user data that died with the
 node is an accepted residual leak. The shutdown join path mirrors the same
 teardown, so crashes count with recovery disabled too.
+
+---
+
+## 24. Task DAG: release-failure semantics, embedded futures and joint destroy (2026-10-18)
+
+**Status:** Accepted
+
+**Context.** A DAG node is handed to the pool only when its last predecessor
+finishes. That hand-off can fail — the bounded queue may be full, or the pool may
+be shutting down. Two questions follow: does a failed hand-off abort the graph,
+and who owns the per-node result?
+
+**Decision.**
+
+1. **Release failure is sticky, not fatal.** The first refused release records
+   `failed` + `fail_error` under `done_mu` (incrementing `in_flight` *before*
+   attempting the submit, so a waiter can never observe a transient zero). The
+   successors of a failed node are simply never started; already-started nodes
+   drain normally. `loom_dag_wait` returns the recorded error.
+
+2. **Futures are embedded by value and initialised at release.** Each node carries
+   a `loom_future_t` by value, initialised — and `future_owner` published —
+   immediately before the node's submit is attempted. A node whose release is
+   refused therefore still owns a future, which is completed with the release
+   error (see 3) so a waiter cannot hang; a node that was never attempted (a
+   successor behind a failed node) has no future at all, and `loom_dag_destroy`
+   frees nothing it does not own.
+
+3. **If the submit fails after the future was initialised, the future is
+   completed with the error code** before `failed` is recorded. A waiter that
+   reached the node's future must not hang on a node that will never run.
+
+4. **`loom_dag_destroy` always returns `LOOMWORKS_OK`** and is NULL-safe. It joins
+   in-flight work, then frees. Reporting a transient destroy failure would force
+   callers into retry loops with no useful action available.
+
+**Alternatives considered.**
+
+- *Abort the whole graph on the first release failure* — rejected: tasks already
+  running cannot be un-run, and killing the queue loses the partial progress that
+  makes a DAG useful for fan-out work.
+- *Latched `all_done` flag* — rejected: it needs a second synchronisation point
+  and can be observed set while a runner is still finishing; the derived predicate
+  `in_flight == 0 && (failed || released_total == added_count)` is checkable at
+  every state flip under one mutex.
+- *Heap-allocate per-node futures* — rejected: an extra allocation on the hot
+  release path, and a third owner (the DAG) to track.
+
+**Consequences.** Waiters see `ERR_INVALID` (back-pressure) or `ERR_SHUTDOWN`
+(pool shutting down) instead of hanging. Failed graphs leave unstarted successors
+untouched, so `loom_dag_node_status` on those nodes reports
+`LOOMWORKS_ERR_INVALID`.
