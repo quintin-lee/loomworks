@@ -7,6 +7,7 @@
  */
 
 #include "loomworks/coroutine.h"
+#include "loomworks/dag.h"
 #include "loomworks/pipeline.h"
 #include "loomworks/runtime.h"
 #include "loomworks/task_group.h"
