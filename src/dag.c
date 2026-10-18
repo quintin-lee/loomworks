@@ -254,7 +254,7 @@ loom_result_t loom_dag_add_node(loom_dag_t       *dag,
                                 uint8_t           priority,
                                 loom_dag_node_t **out_node)
 {
-    if (!dag || !fn || !out_node) {
+    if (!dag || !fn) {
         return LOOMWORKS_ERR_INVALID;
     }
     if (node_id >= dag->node_capacity) {
@@ -290,7 +290,9 @@ loom_result_t loom_dag_add_node(loom_dag_t       *dag,
     atomic_init(&node->pending_preds, 0);
     atomic_init(&node->future_owner, false);
     atomic_fetch_add_explicit(&dag->added_count, 1, memory_order_relaxed);
-    *out_node = node;
+    if (out_node) {
+        *out_node = node;
+    }
     pthread_mutex_unlock(&dag->lock);
     return LOOMWORKS_OK;
 }

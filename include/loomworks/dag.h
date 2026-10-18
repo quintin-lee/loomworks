@@ -86,9 +86,10 @@ loom_result_t loom_dag_destroy(loom_dag_t *dag);
  * @param user_data   Opaque argument passed to fn.
  * @param priority    A loom_task_priority_t value (uint8_t, lower runs
  *                    first).
- * @param out_node    Output pointer for the node handle.
+ * @param out_node    Optional output pointer for the node handle; may be
+ *                    NULL when the caller does not need it.
  * @return            LOOMWORKS_OK on success, LOOMWORKS_ERR_INVALID for
- *                    NULL dag/out_node, NULL fn, an out-of-range or
+ *                    NULL dag, NULL fn, an out-of-range or
  *                    duplicate id, or a mutation after submit,
  *                    LOOMWORKS_ERR_ALLOC if the node array could not be
  *                    allocated.
