@@ -90,8 +90,8 @@ static loom_result_t dag_release_node(loom_dag_t *dag, loom_dag_node_t *node)
     atomic_fetch_add_explicit(&dag->in_flight, 1, memory_order_relaxed);
     pthread_mutex_unlock(&dag->done_mu);
 
-    loom_result_t subrc = loom_pool_submit_internal(dag->pool, (loom_task_fn)dag_runner_fn, ctx,
-                                                    (uint8_t)node->priority);
+    loom_result_t subrc = loom_pool_submit_internal(
+        dag->pool, (loom_task_fn)dag_runner_fn, ctx, (uint8_t)node->priority);
     if (subrc != LOOMWORKS_OK) {
         /* D6: the future exists, so complete it with the release error. */
         node->status = subrc;
@@ -247,8 +247,12 @@ loom_result_t loom_dag_create(loom_thread_pool_t *pool, uint32_t node_capacity, 
 /* ------------------------------------------------------------
  * loom_dag_add_node
  * ------------------------------------------------------------ */
-loom_result_t loom_dag_add_node(loom_dag_t *dag, uint32_t node_id, loom_dag_task_fn fn,
-                                void *user_data, uint8_t priority, loom_dag_node_t **out_node)
+loom_result_t loom_dag_add_node(loom_dag_t       *dag,
+                                uint32_t          node_id,
+                                loom_dag_task_fn  fn,
+                                void             *user_data,
+                                uint8_t           priority,
+                                loom_dag_node_t **out_node)
 {
     if (!dag || !fn || !out_node) {
         return LOOMWORKS_ERR_INVALID;
@@ -273,16 +277,16 @@ loom_result_t loom_dag_add_node(loom_dag_t *dag, uint32_t node_id, loom_dag_task
         pthread_mutex_unlock(&dag->lock);
         return LOOMWORKS_ERR_INVALID;
     }
-    node->node_id      = node_id;
-    node->dag          = dag;
-    node->fn           = fn;
-    node->user_data    = user_data;
-    node->priority     = (int)priority;
-    node->in_degree    = 0;
-    node->status       = LOOMWORKS_OK;
-    node->succs        = NULL;
-    node->succs_cap    = 0;
-    node->succs_len    = 0;
+    node->node_id   = node_id;
+    node->dag       = dag;
+    node->fn        = fn;
+    node->user_data = user_data;
+    node->priority  = (int)priority;
+    node->in_degree = 0;
+    node->status    = LOOMWORKS_OK;
+    node->succs     = NULL;
+    node->succs_cap = 0;
+    node->succs_len = 0;
     atomic_init(&node->pending_preds, 0);
     atomic_init(&node->future_owner, false);
     atomic_fetch_add_explicit(&dag->added_count, 1, memory_order_relaxed);
@@ -330,7 +334,7 @@ loom_result_t loom_dag_add_edge(loom_dag_t *dag, uint32_t from, uint32_t to)
     if (f->succs_len == f->succs_cap) {
         uint32_t          newcap = f->succs_cap ? f->succs_cap * 2 : 4;
         loom_dag_node_t **ns =
-            (loom_dag_node_t **)realloc(f->succs, newcap * sizeof(loom_dag_node_t *));
+            (loom_dag_node_t **)realloc((void *)f->succs, newcap * sizeof(loom_dag_node_t *));
         if (!ns) {
             pthread_mutex_unlock(&dag->lock);
             return LOOMWORKS_ERR_ALLOC;
@@ -413,18 +417,26 @@ loom_result_t loom_dag_submit(loom_dag_t *dag)
             }
         }
     }
-    uint32_t qh = 0;
-    while (qh < qt) {
+    uint32_t qh      = 0;
+    bool     bounded = true;
+    while (qh < qt && bounded) {
         uint32_t         id = queue[qh++];
         loom_dag_node_t *f  = &dag->nodes[id];
         for (uint32_t j = 0; j < f->succs_len; j++) {
             uint32_t sid = f->succs[j]->node_id;
-            if (--indeg[sid] == 0) {
-                queue[qt++] = sid;
+            if (--indeg[sid] != 0) {
+                continue;
             }
+            if (qt >= added) {
+                /* Each id enters the queue at most once, so this should never
+                 * fire; treat a violation as a malformed graph. */
+                bounded = false;
+                break;
+            }
+            queue[qt++] = sid;
         }
     }
-    bool has_cycle = (qt != added);
+    bool has_cycle = !bounded || (qt != added);
 
     if (has_cycle) {
         atomic_store_explicit(&dag->submitted, true, memory_order_release);
@@ -548,7 +560,7 @@ loom_result_t loom_dag_destroy(loom_dag_t *dag)
                 if (atomic_load_explicit(&n->future_owner, memory_order_acquire)) {
                     loom_future_destroy_embedded(&n->future);
                 }
-                free(n->succs);
+                free((void *)n->succs);
             }
         }
         free(dag->nodes);

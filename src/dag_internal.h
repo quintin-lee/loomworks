@@ -34,25 +34,25 @@
  * counting.
  */
 struct loom_dag_node {
-    uint32_t         node_id;  /* user id; stamped at add_node */
-    loom_dag_t      *dag;      /* back-pointer for the runner (R2) */
-    loom_dag_task_fn fn;       /* NULL = id not added (R5) */
+    uint32_t         node_id; /* user id; stamped at add_node */
+    loom_dag_t      *dag;     /* back-pointer for the runner (R2) */
+    loom_dag_task_fn fn;      /* NULL = id not added (R5) */
     void            *user_data;
-    int              priority; /* loom_task_priority_t value */
-    uint32_t         in_degree; /* build-phase in-degree; IMMUTABLE after submit.
-                                 * Kept separate from pending_preds: Kahn and the
-                                 * root scan read it while runners concurrently
-                                 * decrement pending_preds, so it must not change. */
-    loom_future_t    future;   /* embedded; init'd at release (D1) */
-    loom_result_t    status;   /* fn's return (or a release error, D6) */
+    int              priority;      /* loom_task_priority_t value */
+    uint32_t         in_degree;     /* build-phase in-degree; IMMUTABLE after submit.
+                                     * Kept separate from pending_preds: Kahn and the
+                                     * root scan read it while runners concurrently
+                                     * decrement pending_preds, so it must not change. */
+    loom_future_t    future;        /* embedded; init'd at release (D1) */
+    loom_result_t    status;        /* fn's return (or a release error, D6) */
     _Atomic uint32_t pending_preds; /* live predecessor countdown; seeded from
                                      * in_degree at submit, decremented once per
                                      * completed predecessor. */
-    _Atomic bool     future_owner;  /* embedded future initialised (D6); read by
+    _Atomic bool future_owner;      /* embedded future initialised (D6); read by
                                      * node_future()/node_status()/destroy. */
-    loom_dag_node_t **succs;   /* dynamic array of successor node ptrs */
-    uint32_t         succs_cap;
-    uint32_t         succs_len;
+    loom_dag_node_t **succs;        /* dynamic array of successor node ptrs */
+    uint32_t          succs_cap;
+    uint32_t          succs_len;
 };
 
 /**
@@ -68,14 +68,14 @@ struct loom_dag {
     loom_thread_pool_t *pool;
     loom_dag_node_t    *nodes; /* [node_capacity]; lazily alloc'd on first add_node */
     uint32_t            node_capacity;
-    pthread_mutex_t     lock; /* build phase + one-shot submit */
-    _Atomic bool        submitted; /* frozen after a successful submit OR a cycle (R6) */
-    bool                destroyed; /* under d->lock */
-    _Atomic bool        failed; /* D3: a release failed (or cycle at submit) */
-    loom_result_t       fail_error; /* written before failed=true; read after acquire (R3) */
-    _Atomic uint32_t    in_flight; /* started runners not yet drained (D4) */
+    pthread_mutex_t     lock;           /* build phase + one-shot submit */
+    _Atomic bool        submitted;      /* frozen after a successful submit OR a cycle (R6) */
+    bool                destroyed;      /* under d->lock */
+    _Atomic bool        failed;         /* D3: a release failed (or cycle at submit) */
+    loom_result_t       fail_error;     /* written before failed=true; read after acquire (R3) */
+    _Atomic uint32_t    in_flight;      /* started runners not yet drained (D4) */
     _Atomic uint32_t    released_total; /* successful releases so far (D5) */
-    _Atomic uint32_t    added_count; /* added nodes; stamped at submit (D5) */
+    _Atomic uint32_t    added_count;    /* added nodes; stamped at submit (D5) */
     pthread_cond_t      done_cv; /* wait sleep; guarded by done_mu; CLOCK_MONOTONIC condattr */
     pthread_mutex_t     done_mu;
 };
@@ -102,7 +102,7 @@ static inline bool dag_drained(const struct loom_dag *d)
     return atomic_load_explicit(&d->in_flight, memory_order_acquire) == 0 &&
            (atomic_load_explicit(&d->failed, memory_order_acquire) ||
             atomic_load_explicit(&d->released_total, memory_order_acquire) ==
-            atomic_load_explicit(&d->added_count, memory_order_acquire));
+                atomic_load_explicit(&d->added_count, memory_order_acquire));
 }
 
 /**
@@ -113,8 +113,8 @@ static inline bool dag_drained(const struct loom_dag *d)
  * user_data for DAG tasks.
  */
 typedef struct {
-    loom_dag_t  *dag;
-    uint32_t     node_id;
+    loom_dag_t *dag;
+    uint32_t    node_id;
 } dag_runner_ctx_t;
 
 #endif /* LOOMWORKS_DAG_INTERNAL_H */

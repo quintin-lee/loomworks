@@ -2166,8 +2166,8 @@ loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
  * free_data=false: the DAG owns user_data (its runner frees it).  A full
  * bounded queue returns LOOMWORKS_ERR_INVALID immediately (block=false).
  */
-loom_result_t loom_pool_submit_internal(loom_thread_pool_t *pool, loom_task_fn fn, void *user,
-                                        uint8_t priority)
+loom_result_t
+loom_pool_submit_internal(loom_thread_pool_t *pool, loom_task_fn fn, void *user, uint8_t priority)
 {
     if (!pool || !fn) {
         return LOOMWORKS_ERR_INVALID;
@@ -2215,6 +2215,7 @@ void loom_future_complete(loom_future_t *fut, loom_result_t status)
         return;
     }
     pthread_mutex_lock(&fut->mutex);
+    /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
     fut->result     = (void *)(intptr_t)(int)status;
     fut->has_result = true;
     fut->ready      = true;
