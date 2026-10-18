@@ -300,6 +300,48 @@ void loom_metrics_clear_pool(loom_metrics_t *m);
 void loom_test_arm_alloc_failure(long n);
 
 /* ================================================================
+ *  Task DAG hooks (src/dag.c).  Non-public: used only by the DAG
+ *  engine, which embeds a loom_future_t by value in each node and
+ *  submits its per-release wrapper without backpressure blocking.
+ *  ================================================================ */
+
+/**
+ * @brief Non-blocking, non-freeing submit used by the DAG release path.
+ *
+ * `free_data=false`: the caller (the DAG) owns user_data and frees it in
+ * its own runner.  A bounded-full queue returns LOOMWORKS_ERR_INVALID
+ * immediately instead of stalling on space_cond.  Not part of the public
+ * API.
+ */
+loom_result_t
+loom_pool_submit_internal(loom_thread_pool_t *pool, loom_task_fn fn, void *user, uint8_t priority);
+
+/**
+ * @brief Initialise an embedded (by-value) loom_future_t.
+ *
+ * Sets up its mutex + CLOCK_MONOTONIC condattr so the DAG's node futures
+ * can be waited on / read by loom_future_wait() like heap futures.
+ * @return LOOMWORKS_OK, or LOOMWORKS_ERR_ALLOC if the mutex/cond init fails.
+ */
+loom_result_t loom_future_init(loom_future_t *fut);
+
+/**
+ * @brief Pack a loom_result_t into an embedded future and signal it.
+ *
+ * The DAG runner calls this with the node task's return value; the value
+ * is stored in fut->result and read back by loom_dag_node_status().
+ */
+void loom_future_complete(loom_future_t *fut, loom_result_t status);
+
+/**
+ * @brief Tear down an embedded future's mutex + cond (no free()).
+ *
+ * Mirrors loom_future_destroy() minus the allocation — used by
+ * loom_dag_destroy() for node futures embedded by value.
+ */
+void loom_future_destroy_embedded(loom_future_t *fut);
+
+/* ================================================================
  *  Chase-Lev work-stealing deque operations.
  *  Owner thread: deque_push / deque_pop (LIFO at the bottom).
  *  Idle thieves: deque_steal (FIFO from the top).
