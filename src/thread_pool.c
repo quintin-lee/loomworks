@@ -2156,6 +2156,85 @@ loom_result_t loom_pool_submit_future_priority(loom_thread_pool_t *pool,
 }
 
 /* ================================================================
+ *  Task DAG hooks (src/dag.c).  See src/thread_pool_internal.h and
+ *  docs/superpowers/specs/2026-09-21-task-dag-design.md §4.3.
+ * ================================================================ */
+
+/**
+ * @brief Non-blocking, non-freeing submit used by the DAG release path.
+ *
+ * free_data=false: the DAG owns user_data (its runner frees it).  A full
+ * bounded queue returns LOOMWORKS_ERR_INVALID immediately (block=false).
+ */
+loom_result_t loom_pool_submit_internal(loom_thread_pool_t *pool, loom_task_fn fn, void *user,
+                                        uint8_t priority)
+{
+    if (!pool || !fn) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    return enqueue_task(pool, fn, user, priority, false, NULL, false);
+}
+
+/**
+ * @brief Initialise an embedded (by-value) loom_future_t.
+ *
+ * Mirrors the future setup inside loom_pool_submit_future() minus the
+ * allocation, so a DAG node's by-value future can be waited on.
+ */
+loom_result_t loom_future_init(loom_future_t *fut)
+{
+    if (!fut) {
+        return LOOMWORKS_ERR_INVALID;
+    }
+    if (pthread_mutex_init(&fut->mutex, NULL) != 0) {
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    pthread_once(&g_condattr_once, init_monotonic_condattr);
+    if (pthread_cond_init(&fut->cond, &g_condattr_mono) != 0) {
+        pthread_mutex_destroy(&fut->mutex);
+        return LOOMWORKS_ERR_ALLOC;
+    }
+    fut->result     = NULL;
+    fut->ready      = false;
+    fut->has_result = false;
+    fut->cancelled  = false;
+    return LOOMWORKS_OK;
+}
+
+/**
+ * @brief Pack a loom_result_t into an embedded future and signal it.
+ *
+ * The result encoding is the integer status in the result pointer slot;
+ * loom_dag_node_status() reads the node's status field rather than the
+ * pointer, so the encoding is only observable through a user calling
+ * loom_future_wait() on a DAG node future.
+ */
+void loom_future_complete(loom_future_t *fut, loom_result_t status)
+{
+    if (!fut) {
+        return;
+    }
+    pthread_mutex_lock(&fut->mutex);
+    fut->result     = (void *)(intptr_t)(int)status;
+    fut->has_result = true;
+    fut->ready      = true;
+    pthread_cond_signal(&fut->cond);
+    pthread_mutex_unlock(&fut->mutex);
+}
+
+/**
+ * @brief Tear down an embedded future's mutex + cond (no free()).
+ */
+void loom_future_destroy_embedded(loom_future_t *fut)
+{
+    if (!fut) {
+        return;
+    }
+    pthread_mutex_destroy(&fut->mutex);
+    pthread_cond_destroy(&fut->cond);
+}
+
+/* ================================================================
  *  loom_future_wait — block until the future's task has completed.
  *
  *  The caller receives the result pointer through @p result (which may
