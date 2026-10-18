@@ -14,11 +14,13 @@
  *   8. priority_fairness — REALTIME response latency under LOW flood (JSON)
  *   9. tail_latency     — completion latency p50/p99/p999, 4 workers (JSON)
  *   10. coro_switch     — coroutine resume->yield->resume round-trip (JSON)
+ *   11. task_dag        — DAG diamond node throughput + completion latency
  *
  * Usage: ./bench [--iterations N] [--tasks M] [--json]
  */
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/coroutine.h"
+#include "loomworks/dag.h"
 #include "loomworks/thread_pool.h"
 
 #include <pthread.h>
@@ -43,6 +45,9 @@ static int    g_queue_depths[4]       = {1000, 10000, 50000, 100000};
 static double g_fairness_resp_ns[3]   = {0.0, 0.0, 0.0}; /* avg, p50, p99 */
 static double g_tail_latency_ns[3]    = {0.0, 0.0, 0.0}; /* p50, p99, p999 */
 static double g_coro_switch_ns        = 0.0;
+static double g_dag_throughput_tps    = 0.0;
+static double g_dag_latency_p50_ns    = 0.0;
+static double g_dag_latency_p99_ns    = 0.0;
 
 /* ---------- Timer ---------- */
 static double now_ns(void)
@@ -695,6 +700,109 @@ static void print_usage(const char *prog)
 }
 
 /* ---------- Main ---------- */
+static loom_result_t bench_dag_noop(void *ud)
+{
+    (void)ud;
+    return LOOMWORKS_OK;
+}
+
+static double bench_dag_once(loom_thread_pool_t *pool, int width)
+{
+    loom_dag_t *dag = NULL;
+    if (loom_dag_create(pool, width + 2, &dag) != LOOMWORKS_OK) {
+        return 0.0;
+    }
+    if (loom_dag_add_node(dag, 0, bench_dag_noop, NULL, LOOMWORKS_PRIORITY_NORMAL, NULL) !=
+        LOOMWORKS_OK) {
+        loom_dag_destroy(dag);
+        return 0.0;
+    }
+    if (loom_dag_add_node(dag, width + 1, bench_dag_noop, NULL, LOOMWORKS_PRIORITY_NORMAL, NULL) !=
+        LOOMWORKS_OK) {
+        loom_dag_destroy(dag);
+        return 0.0;
+    }
+    for (int i = 1; i <= width; i++) {
+        if (loom_dag_add_node(dag, i, bench_dag_noop, NULL, LOOMWORKS_PRIORITY_NORMAL, NULL) !=
+                LOOMWORKS_OK ||
+            loom_dag_add_edge(dag, 0, i) != LOOMWORKS_OK ||
+            loom_dag_add_edge(dag, i, width + 1) != LOOMWORKS_OK) {
+            loom_dag_destroy(dag);
+            return 0.0;
+        }
+    }
+    double t0 = now_ns();
+    if (loom_dag_submit(dag) != LOOMWORKS_OK) {
+        loom_dag_destroy(dag);
+        return 0.0;
+    }
+    loom_result_t rc = loom_dag_wait(dag);
+    double        t1 = now_ns();
+    loom_dag_destroy(dag);
+    return rc == LOOMWORKS_OK ? t1 - t0 : 0.0;
+}
+
+static void
+bench_dag_throughput(int iterations, int width, double *tps_out, double *p50_ns, double *p99_ns)
+{
+    int nodes = width + 2;
+    *tps_out  = 0.0;
+    *p50_ns   = 0.0;
+    *p99_ns   = 0.0;
+    if (iterations < 1 || width < 1) {
+        return;
+    }
+    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
+    loom_thread_pool_t *pool = NULL;
+    if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
+        return;
+    }
+    double *lat = (double *)malloc(sizeof(double) * (size_t)iterations);
+    if (lat == NULL) {
+        loom_pool_destroy(&pool);
+        return;
+    }
+    int    n   = 0;
+    double sum = 0.0;
+    for (int i = 0; i < iterations; i++) {
+        double ns = bench_dag_once(pool, width);
+        if (ns <= 0.0) {
+            continue;
+        }
+        lat[n++] = ns;
+        sum += (double)nodes * 1e9 / ns;
+    }
+    if (n > 0) {
+        for (int i = 1; i < n; i++) {
+            double key = lat[i];
+            int    j   = i - 1;
+            while (j >= 0 && lat[j] > key) {
+                lat[j + 1] = lat[j];
+                j--;
+            }
+            lat[j + 1] = key;
+        }
+        *tps_out = sum / (double)n;
+        *p50_ns  = lat[((n - 1) * 50) / 100];
+        *p99_ns  = lat[((n - 1) * 99) / 100];
+    }
+    free(lat);
+    loom_pool_destroy(&pool);
+}
+
+static void bench_task_dag(void)
+{
+    bench_dag_throughput(g_iterations > 0 ? g_iterations : 20,
+                         64,
+                         &g_dag_throughput_tps,
+                         &g_dag_latency_p50_ns,
+                         &g_dag_latency_p99_ns);
+    printf("dag:               %10.0f nodes/s   p50=%.0f ns  p99=%.0f ns\n",
+           g_dag_throughput_tps,
+           g_dag_latency_p50_ns,
+           g_dag_latency_p99_ns);
+}
+
 int main(int argc, char *argv[])
 {
     for (int i = 1; i < argc; i++) {
@@ -773,6 +881,10 @@ int main(int argc, char *argv[])
     fflush(stdout);
     bench_coro_switch();
 
+    printf("\n[11/11] task_dag\n");
+    fflush(stdout);
+    bench_task_dag();
+
     printf("\nDone.\n");
 
     if (g_json_output) {
@@ -800,6 +912,10 @@ int main(int argc, char *argv[])
                g_tail_latency_ns[0],
                g_tail_latency_ns[1],
                g_tail_latency_ns[2]);
+        printf("  \"dag_throughput_tps\": %.2f,\n", g_dag_throughput_tps);
+        printf("  \"dag_latency_ns\": {\"p50\": %.0f, \"p99\": %.0f},\n",
+               g_dag_latency_p50_ns,
+               g_dag_latency_p99_ns);
         printf("  \"coro_switch_ns\": %.1f\n", g_coro_switch_ns);
         printf("}\n");
     }
