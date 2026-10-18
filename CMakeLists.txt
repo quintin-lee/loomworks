@@ -147,6 +147,12 @@ target_link_libraries(test_numa PRIVATE loomworks_static)
 add_test(NAME NumaTests COMMAND test_numa)
 set_tests_properties(NumaTests PROPERTIES TIMEOUT 120)
 
+add_executable(test_dag tests/test_dag.c)
+target_include_directories(test_dag PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_dag PRIVATE loomworks_static)
+add_test(NAME DagTests COMMAND test_dag)
+set_tests_properties(DagTests PROPERTIES TIMEOUT 900)
+
 add_executable(example_pipeline examples/pipeline_demo.c)
 target_link_libraries(example_pipeline PRIVATE loomworks_static)
 
