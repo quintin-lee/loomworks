@@ -36,6 +36,7 @@
 static int g_iterations  = 100;
 static int g_task_count  = 10000;
 static int g_json_output = 0;
+static int g_workers     = 0;
 
 /* JSON result capture (populated by each bench when g_json_output) */
 static double g_submit_latency_avg_ns = 0.0;
@@ -48,6 +49,12 @@ static double g_coro_switch_ns        = 0.0;
 static double g_dag_throughput_tps    = 0.0;
 static double g_dag_latency_p50_ns    = 0.0;
 static double g_dag_latency_p99_ns    = 0.0;
+
+/* Pool sizing: --workers overrides the phase's own default when non-zero. */
+static uint32_t eff_workers(uint32_t fallback)
+{
+    return g_workers > 0 ? (uint32_t)g_workers : fallback;
+}
 
 /* ---------- Timer ---------- */
 static double now_ns(void)
@@ -84,7 +91,7 @@ static int cmp_double(const void *a, const void *b)
 static void bench_submit_latency(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {.worker_count = 0, .queue_capacity = 0};
+    loom_pool_config_t  cfg  = {.worker_count = eff_workers(0), .queue_capacity = 0};
     loom_pool_create(&cfg, &pool);
 
     double total = 0.0;
@@ -121,7 +128,7 @@ static void bench_submit_latency(void)
 static void bench_throughput(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {.worker_count = 0, .queue_capacity = 0};
+    loom_pool_config_t  cfg  = {.worker_count = eff_workers(0), .queue_capacity = 0};
     loom_pool_create(&cfg, &pool);
 
     double t0 = now_ns();
@@ -290,7 +297,7 @@ static void bench_bounded_queue(void)
     for (int i = 0; i < (int)(sizeof(capacities) / sizeof(capacities[0])); i++) {
         uint32_t            cap  = capacities[i];
         loom_thread_pool_t *pool = NULL;
-        loom_pool_config_t  cfg  = {.worker_count = 0, .queue_capacity = cap};
+        loom_pool_config_t  cfg  = {.worker_count = eff_workers(0), .queue_capacity = cap};
         loom_pool_create(&cfg, &pool);
 
         double t0 = now_ns();
@@ -367,7 +374,7 @@ static void bench_future_overhead(void)
 
     /* --- Fire-and-forget --- */
     loom_thread_pool_t *pool_ff = NULL;
-    loom_pool_config_t  cfg_ff  = {.worker_count = 0, .queue_capacity = 0};
+    loom_pool_config_t  cfg_ff  = {.worker_count = eff_workers(0), .queue_capacity = 0};
     loom_pool_create(&cfg_ff, &pool_ff);
     double t0 = now_ns();
     for (int i = 0; i < FUTURE_N; i++) {
@@ -379,7 +386,7 @@ static void bench_future_overhead(void)
 
     /* --- Future-based --- */
     loom_thread_pool_t *pool_fut = NULL;
-    loom_pool_config_t  cfg_fut  = {.worker_count = 0, .queue_capacity = 0};
+    loom_pool_config_t  cfg_fut  = {.worker_count = eff_workers(0), .queue_capacity = 0};
     loom_pool_create(&cfg_fut, &pool_fut);
     t0 = now_ns();
     for (int i = 0; i < FUTURE_N; i++) {
@@ -483,7 +490,7 @@ static void bench_priority_fairness(void)
     }
 
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {.worker_count = 0, .queue_capacity = 0};
+    loom_pool_config_t  cfg  = {.worker_count = eff_workers(0), .queue_capacity = 0};
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         fprintf(stderr, "fairness: pool create failed\n");
         exit(1);
@@ -578,7 +585,7 @@ static void bench_tail_latency(void)
 
     int                 n    = g_task_count;
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
+    loom_pool_config_t  cfg  = {.worker_count = eff_workers(4), .queue_capacity = 0};
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         fprintf(stderr, "tail_latency: pool create failed\n");
         exit(1);
@@ -689,14 +696,17 @@ static void bench_coro_switch(void)
 static void print_usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--iterations N] [--tasks M] [--json]\n"
+            "Usage: %s [--iterations N] [--tasks M] [--workers W] [--json]\n"
             "  --iterations  Number of repeat runs per benchmark (default: %d)\n"
             "  --tasks       Number of tasks in throughput benchmark (default: %d)\n"
+            "  --workers     Worker threads per pool; 0 keeps each phase's own\n"
+            "                sizing (default: %d)\n"
             "  --json        Output results in JSON format (adds queue_depth,\n"
             "                priority_fairness, tail_latency scenarios)\n",
             prog,
             g_iterations,
-            g_task_count);
+            g_task_count,
+            g_workers);
 }
 
 /* ---------- Main ---------- */
@@ -752,7 +762,7 @@ bench_dag_throughput(int iterations, int width, double *tps_out, double *p50_ns,
     if (iterations < 1 || width < 1) {
         return;
     }
-    loom_pool_config_t  cfg  = {.worker_count = 4, .queue_capacity = 0};
+    loom_pool_config_t  cfg  = {.worker_count = eff_workers(4), .queue_capacity = 0};
     loom_thread_pool_t *pool = NULL;
     if (loom_pool_create(&cfg, &pool) != LOOMWORKS_OK) {
         return;
@@ -822,6 +832,14 @@ int main(int argc, char *argv[])
                 return 1;
             }
             g_task_count = (int)v;
+        } else if (strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
+            char *end;
+            long  v = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || v < 0) {
+                fprintf(stderr, "Invalid --workers value: %s\n", argv[i]);
+                return 1;
+            }
+            g_workers = (int)v;
         } else if (strcmp(argv[i], "--json") == 0) {
             g_json_output = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -834,7 +852,10 @@ int main(int argc, char *argv[])
         }
     }
 
-    printf("loomworks benchmark  (iterations=%d, tasks=%d)\n", g_iterations, g_task_count);
+    printf("loomworks benchmark  (iterations=%d, tasks=%d, workers=%d)\n",
+           g_iterations,
+           g_task_count,
+           g_workers);
     printf("---------------------------------------------------\n");
 
     printf("\n[1/5] submit_latency\n");
