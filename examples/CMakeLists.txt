@@ -32,6 +32,9 @@ target_link_libraries(example_resize PRIVATE loomworks_static)
 add_executable(example_runtime runtime_demo.c)
 target_link_libraries(example_runtime PRIVATE loomworks_static)
 
+add_executable(example_task_dag task_dag_demo.c)
+target_link_libraries(example_task_dag PRIVATE loomworks_static)
+
 add_executable(loom_metrics loom_metrics.c)
 # standalone tool: reads /dev/shm directly, no library link needed
 set_target_properties(loom_metrics PROPERTIES INSTALL_RPATH "")
