@@ -45,6 +45,24 @@ def gate_p99(name, base, new):
     return 0
 
 
+def gate_dag(base, new):
+    """Compare DAG node throughput between base and new. Missing in the
+    baseline (older bench build) -> warn and skip."""
+    b = base.get("dag_throughput_tps")
+    n = new.get("dag_throughput_tps")
+    if b is None or n is None:
+        print("warning: dag_throughput_tps missing in base (old bench build); skipping comparison")
+        return 0
+    if b <= 0.0:
+        return 0
+    ratio = n / b
+    print(f"{'dag_throughput_tps':>26}  base={b:>12.2f}  new={n:>12.2f}  ratio={ratio:>5.2f}x")
+    if ratio < THRESHOLD:
+        print(f"FAIL: dag_throughput_tps regressed {ratio:.2f}x (limit {THRESHOLD:.2f}x)")
+        return 1
+    return 0
+
+
 def main():
     if len(sys.argv) != 3:
         print("usage: bench_compare.py BASE.txt NEW.txt", file=sys.stderr)
@@ -72,12 +90,14 @@ def main():
         return 1
     print(f"OK: worst delta {worst:.1f}% within {THRESHOLD * 100:.0f}% limit")
     rc = 0
+    rc |= gate_dag(base, new)
+    rc |= gate_p99("dag_latency_ns", base, new)
     rc |= gate_p99("fairness_resp_ns", base, new)
     rc |= gate_p99("tail_latency_ns", base, new)
     if rc:
-        print(f"FAIL: fairness/tail p99 above {P99_LIMIT:.2f}x limit")
+        print("FAIL: dag / fairness / tail gates above their limits")
         return 1
-    print(f"OK: fairness/tail p99 within {P99_LIMIT:.2f}x limit (queue-depth gate above)")
+    print(f"OK: dag/fairness/tail p99 within {P99_LIMIT:.2f}x limit (queue-depth gate above)")
     return rc
 
 
