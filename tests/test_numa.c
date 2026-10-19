@@ -125,11 +125,11 @@ static void test_pool_numa_auto(void)
 static void test_pool_numa_virtual_domains(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {
-        .worker_count    = 4,
-        .numa_mode       = LOOM_NUMA_VIRTUAL,
-        .virtual_domains = 2,
-    };
+    loom_pool_config_t  cfg  = {0};
+
+    cfg.worker_count    = 4;
+    cfg.numa_mode       = LOOM_NUMA_VIRTUAL;
+    cfg.virtual_domains = 2;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create virtual pool");
     uint32_t dcount = loom_pool_numa_domain_count(pool);
     if (dcount >= 2) {
@@ -151,11 +151,11 @@ static void test_pool_numa_virtual_domains(void)
 static void test_pool_numa_resize(void)
 {
     loom_thread_pool_t *pool = NULL;
-    loom_pool_config_t  cfg  = {
-        .worker_count    = 2,
-        .numa_mode       = LOOM_NUMA_VIRTUAL,
-        .virtual_domains = 2,
-    };
+    loom_pool_config_t  cfg  = {0};
+
+    cfg.worker_count    = 2;
+    cfg.numa_mode       = LOOM_NUMA_VIRTUAL;
+    cfg.virtual_domains = 2;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "create virtual pool for resize");
     uint32_t dcount = loom_pool_numa_domain_count(pool);
 
