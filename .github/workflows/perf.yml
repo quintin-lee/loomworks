@@ -19,7 +19,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake
       - name: Configure current (Release)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_CLANG_FORMAT=OFF
       - name: Build current
         run: cmake --build build -j$(nproc)
       - name: Checkout baseline
@@ -38,7 +38,7 @@ jobs:
           echo "Baseline ref: $BASE_REF"
           git worktree add /tmp/base "$BASE_REF" || git worktree add /tmp/base "origin/$BASE_REF"
       - name: Configure baseline (Release)
-        run: cmake -S /tmp/base -B /tmp/base/build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S /tmp/base -B /tmp/base/build -DCMAKE_BUILD_TYPE=Release -DENABLE_CLANG_FORMAT=OFF
       - name: Build baseline
         run: cmake --build /tmp/base/build -j$(nproc)
       - name: Run benchmarks (current)
