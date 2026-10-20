@@ -14,5 +14,6 @@ compile_commands.json
 .cache/
 .omo/
 .codegraph/
+.omp/
 
 docs/superpowers/plans/
