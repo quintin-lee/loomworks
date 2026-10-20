@@ -16,4 +16,6 @@ compile_commands.json
 .codegraph/
 .omp/
 
+*__pycache__/
+
 docs/superpowers/plans/
