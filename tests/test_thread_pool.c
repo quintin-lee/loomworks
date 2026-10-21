@@ -16,13 +16,23 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Scale down loop iterations under valgrind to keep total runtime within
- * the 20-minute CI timeout (valgrind slows execution ~100×). */
-#ifdef __VALGRIND__
-#define VGI(n) ((n) / 4)
-#else
-#define VGI(n) (n)
+/* Runtime valgrind detection: __VALGRIND__ is only defined by valgrind.h
+ * under specific configurations, and CI runs the plain -O0 binary under
+ * valgrind — so loop scaling must be decided at run time via the
+ * RUNNING_ON_VALGRIND client request (0 when not under valgrind). */
+#if defined(__has_include) && __has_include(<valgrind/valgrind.h>)
+#include <valgrind/valgrind.h>
 #endif
+#ifndef RUNNING_ON_VALGRIND
+#define RUNNING_ON_VALGRIND 0
+#endif
+
+static int g_vgi_scale = 0; /* set in main(): 1 when running under valgrind */
+
+/* Scale loop iterations to 1/4 under valgrind (the original compile-time
+ * intent) to keep total runtime within the CI timeout.  Native behavior
+ * is unchanged: g_vgi_scale == 0 makes VGI(n) == n. */
+#define VGI(n) ((g_vgi_scale) ? ((n) / 4) : (n))
 
 /* Spin-wait with moderate limit + clock-based safety valve.
  * Moderate spin limit avoids consuming CI time before the clock timeout kicks in.
@@ -103,6 +113,19 @@ static void simple_task(void *arg)
  * drain, spun 40M times on an already-empty deque, and falsely FAILed). */
 static void slow_count_task(void *arg)
 {
+    /* Under valgrind a spin-only task does NOT yield the CPU: valgrind's
+     * scheduler runs the worker's entire drain in one slice while the
+     * hot-spinning main thread is frozen, so main never samples
+     * deque_total > 0 (measured 20-40% of rounds, spy22-spy27 series).
+     * Blocking between tasks forces the interleaving and makes the
+     * window deterministic (12/12 container rounds). */
+    if (g_vgi_scale) {
+        struct timespec ts = {0, 1000000}; /* 1 ms */
+        nanosleep(&ts, NULL);
+        volatile int *counter = (volatile int *)arg;
+        __sync_fetch_and_add(counter, 1);
+        return;
+    }
     volatile long sink = 0;
     for (long i = 0; i < 65536L; i++) {
         sink += i;
@@ -141,9 +164,18 @@ static volatile int g_steal_owner_count = 0;
 static void record_owner_task(void *arg)
 {
     (void)arg;
-    /* ~1ms dwell: keeps the deque non-empty long enough for a thief
-     * to arrive even on a loaded machine. */
-    for (volatile int spin = 0; spin < 3000000; spin++) {
+    /* Under valgrind a spin-only task does NOT yield the CPU (see
+     * slow_count_task): the whole drain collapses into one scheduler
+     * slice and the main thread's observation window never opens.  A
+     * 1ms block forces the interleaving. */
+    if (g_vgi_scale) {
+        struct timespec ts = {0, 1000000}; /* 1 ms */
+        nanosleep(&ts, NULL);
+    } else {
+        /* ~1ms dwell: keeps the deque non-empty long enough for a thief
+         * to arrive even on a loaded machine. */
+        for (volatile int spin = 0; spin < 3000000; spin++) {
+        }
     }
     int idx = __sync_fetch_and_add(&g_steal_owner_count, 1);
     if (idx < STEAL_MAX_TASKS) {
@@ -1256,8 +1288,9 @@ static void test_ring_basic(void)
     }
 
     loom_pool_shutdown(pool);
-    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == 1000,
-           "basic: all 1000 NORMAL tasks ran exactly once");
+    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) ==
+               VGI(1000),
+           "basic: all submitted NORMAL tasks ran exactly once");
     ASSERT(loom_pool_pending_count(pool) == 0, "basic: nothing pending");
     loom_pool_destroy(&pool);
 }
@@ -1786,16 +1819,16 @@ static void test_metrics_monitoring(void)
 
     uint64_t started   = loom_metrics_started(metrics);
     uint64_t completed = loom_metrics_completed(metrics);
-    ASSERT(started == 100, "started == 100");
-    ASSERT(completed == 100, "completed == 100");
+    ASSERT(started == VGI(100), "started == submit count");
+    ASSERT(completed == VGI(100), "completed == submit count");
     ASSERT(loom_metrics_failed(metrics) == 0, "failed == 0");
     ASSERT(loom_metrics_avg_latency_ns(metrics) > 0, "avg latency > 0");
 
     loom_metrics_snapshot_t snap;
     ASSERT(loom_metrics_snapshot(metrics, &snap) == LOOMWORKS_OK, "snapshot ok");
-    ASSERT(snap.submitted == 100, "snap submitted");
-    ASSERT(snap.started == 100, "snap started");
-    ASSERT(snap.completed == 100, "snap completed");
+    ASSERT(snap.submitted == VGI(100), "snap submitted");
+    ASSERT(snap.started == VGI(100), "snap started");
+    ASSERT(snap.completed == VGI(100), "snap completed");
     ASSERT(snap.cancelled == 0, "snap cancelled");
     ASSERT(snap.failed == 0, "snap failed");
     ASSERT(snap.latency_sum_ns == loom_metrics_latency_sum_ns(metrics), "snap sum matches");
@@ -2008,6 +2041,18 @@ static void test_cancel_by_id_first_of_many(void)
     int      shared = 0;
     uint64_t ids[5];
 
+    /* Freeze the sole worker so all 5 tasks are queued (cancel index
+     * resident) when the cancel fires — same submit→run race family as
+     * the cancel-callback test: under valgrind the worker won the race
+     * ~35% of rounds and the cancel returned ERR_INVALID. */
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_gate_parked  = 0;
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "gate submitted");
+    while (g_gate_parked < 1) {
+        sched_yield();
+    }
+
     for (int i = 0; i < 5; i++) {
         ASSERT(loom_pool_submit(pool, increment_task, &shared, &ids[i]) == LOOMWORKS_OK,
                "submit task");
@@ -2015,6 +2060,8 @@ static void test_cancel_by_id_first_of_many(void)
 
     /* Cancel the first submitted task */
     ASSERT(loom_pool_cancel_by_id(pool, ids[0]) == LOOMWORKS_OK, "cancel first by id");
+
+    g_gate_release = 1;
 
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
@@ -2451,7 +2498,7 @@ static void test_submit_blocking_unbounded(void)
     }
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
-    ASSERT(counter == 100, "all blocking submits executed");
+    ASSERT(counter == VGI(100), "all blocking submits executed");
 }
 
 /* ---------- Test: submit_blocking returns task ID ---------- */
@@ -2523,7 +2570,7 @@ static void test_resize_grow(void)
     }
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
-    ASSERT(counter == 100, "all tasks executed after grow");
+    ASSERT(counter == VGI(100), "all tasks executed after grow");
 }
 
 /* ---------- Test: loom_pool_resize shrink ---------- */
@@ -3944,7 +3991,7 @@ static void test_shutdown_drains_deque(void)
 
     loom_pool_shutdown(pool); /* must drain deque then exit, not hang */
 
-    ASSERT(counter == 300, "shutdown-drain: all 300 tasks ran");
+    ASSERT(counter == VGI(300), "shutdown-drain: all submitted tasks ran");
     ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,
            "shutdown-drain: ring drained");
     ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
@@ -3990,7 +4037,7 @@ static void test_resize_down_spills_deque(void)
     ASSERT(loom_pool_resize(pool, 1) == LOOMWORKS_OK, "resize-spill: resize to 1");
     loom_pool_shutdown(pool);
 
-    ASSERT(counter == 300, "resize-spill: all 300 tasks ran exactly once");
+    ASSERT(counter == VGI(300), "resize-spill: all submitted tasks ran exactly once");
     ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0,
            "resize-spill: ring drained");
     ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
@@ -4023,12 +4070,13 @@ static void test_steal_trigger(void)
     ASSERT(g_gate_parked >= 1 && g_gate_parked2 >= 1, "steal: both workers parked");
 
     /* Flood the ring while both workers are frozen. */
-    for (int i = 0; i < STEAL_MAX_TASKS; i++) {
+    for (int i = 0; i < VGI(STEAL_MAX_TASKS); i++) {
         ASSERT(loom_pool_submit(pool, record_owner_task, NULL, NULL) == LOOMWORKS_OK,
                "steal: submit owner-record task");
     }
-    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == (size_t)STEAL_MAX_TASKS,
-           "steal: all 512 tasks resident in ring");
+    ASSERT(atomic_load_explicit(&pool->ring_count, memory_order_relaxed) ==
+               (size_t)VGI(STEAL_MAX_TASKS),
+           "steal: all submitted tasks resident in ring");
 
     /* Release worker 2 only: it drains the ring into its deque and runs
      * ~1ms dwell tasks, keeping the deque non-empty.  The first worker
@@ -4061,7 +4109,8 @@ static void test_steal_trigger(void)
     g_gate_release = 1;
     loom_pool_shutdown(pool);
 
-    ASSERT(g_steal_owner_count == STEAL_MAX_TASKS, "steal: all 512 owner tasks ran exactly once");
+    ASSERT(g_steal_owner_count == (int)VGI(STEAL_MAX_TASKS),
+           "steal: all submitted owner tasks ran exactly once");
     ASSERT(count_distinct_owner_threads() >= 2,
            "steal: parked worker stole from free worker (>= 2 threads ran)");
     ASSERT(atomic_load_explicit(&pool->deque_total, memory_order_relaxed) == 0,
@@ -4418,6 +4467,7 @@ static void test_backpressure_blocked(void)
 
 int main(void)
 {
+    g_vgi_scale = RUNNING_ON_VALGRIND;
     printf("=== Thread Pool Tests ===\n");
     test_basic_create_destroy();
     test_config();
