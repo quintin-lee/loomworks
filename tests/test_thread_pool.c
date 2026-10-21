@@ -1288,8 +1288,7 @@ static void test_ring_basic(void)
     }
 
     loom_pool_shutdown(pool);
-    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) ==
-               VGI(1000),
+    ASSERT(atomic_load_explicit(&g_ring_run_count, memory_order_relaxed) == VGI(1000),
            "basic: all submitted NORMAL tasks ran exactly once");
     ASSERT(loom_pool_pending_count(pool) == 0, "basic: nothing pending");
     loom_pool_destroy(&pool);
