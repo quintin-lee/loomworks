@@ -146,9 +146,11 @@ static void test_guard_page(void)
 static void test_config_validation(void)
 {
     loom_pool_config_t cfg;
-    cfg.worker_count   = 0;
-    cfg.stack_size     = 0;
-    cfg.queue_capacity = 0;
+    cfg.worker_count    = 0;
+    cfg.stack_size      = 0;
+    cfg.queue_capacity  = 0;
+    cfg.numa_mode       = LOOM_NUMA_DISABLED;
+    cfg.virtual_domains = 0;
 
     loom_thread_pool_t *pool = NULL;
     ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "defaults config");
