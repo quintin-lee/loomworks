@@ -2255,23 +2255,39 @@ static void test_metrics_callback_all_events(void)
     ASSERT(loom_metrics_create(pool, metrics_event_callback, &ctx, &metrics) == LOOMWORKS_OK,
            "create metrics");
 
+    /* Freeze the sole worker first: everything submitted below stays
+     * queued (cancel index resident) until release, so the cancel is
+     * deterministic.  The old submit→cancel race let the worker reach
+     * its run boundary first and drop the CANCELLED event. */
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_gate_parked  = 0;
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "gate submitted");
+    while (g_gate_parked < 1) {
+        sched_yield();
+    }
+
     int counter = 0;
-    loom_pool_submit(pool, increment_task, &counter, NULL);
-    loom_pool_submit(pool, increment_task, &counter, NULL);
+    ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "increment 1");
+    ASSERT(loom_pool_submit(pool, increment_task, &counter, NULL) == LOOMWORKS_OK, "increment 2");
 
     /* Cancel one before it runs */
     int cancel_data = 999;
-    loom_pool_submit(pool, increment_task, &cancel_data, NULL);
-    loom_pool_cancel(pool, &cancel_data);
+    ASSERT(loom_pool_submit(pool, increment_task, &cancel_data, NULL) == LOOMWORKS_OK,
+           "cancel target submitted");
+    ASSERT(loom_pool_cancel(pool, &cancel_data) == LOOMWORKS_OK, "cancel queued task");
+
+    g_gate_release = 1;
 
     loom_pool_shutdown(pool);
     loom_metrics_destroy(&metrics);
     loom_pool_destroy(&pool);
 
-    ASSERT(ctx.submitted >= 2, "callback received submitted events");
-    ASSERT(ctx.completed >= 2, "callback received completed events");
-    ASSERT(ctx.cancelled >= 1, "callback received cancelled event");
-    (void)counter;
+    ASSERT(ctx.submitted == 4, "all 4 submissions counted (gate + 3)");
+    ASSERT(ctx.completed == 3, "gate + 2 increments completed, cancelled did not");
+    ASSERT(ctx.cancelled == 1, "callback received cancelled event");
+    ASSERT(ctx.failed == 0, "no failures");
+    ASSERT(counter == 2, "both increments executed");
 }
 
 /* ---------- Test: metrics latency is non-zero ---------- */
