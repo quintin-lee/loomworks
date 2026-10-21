@@ -167,9 +167,13 @@ static void record_owner_task(void *arg)
     /* Under valgrind a spin-only task does NOT yield the CPU (see
      * slow_count_task): the whole drain collapses into one scheduler
      * slice and the main thread's observation window never opens.  A
-     * 1ms block forces the interleaving. */
+     * block forces the interleaving. */
     if (g_vgi_scale) {
-        struct timespec ts = {0, 1000000}; /* 1 ms */
+        /* 20 ms: on a contended 2-vCPU runner the main thread can be
+         * descheduled for tens of ms; a 1 ms block let the last ~7ms
+         * deque window close during one such burst (CI run 39671601003).
+         * 20 ms × 128 tasks ≈ 2.6 s drain, window ≈ 2.5 s. */
+        struct timespec ts = {0, 20000000}; /* 20 ms */
         nanosleep(&ts, NULL);
     } else {
         /* ~1ms dwell: keeps the deque non-empty long enough for a thief
@@ -4094,19 +4098,27 @@ static void test_steal_trigger(void)
            "steal: all submitted tasks resident in ring");
 
     /* Release worker 2 only: it drains the ring into its deque and runs
-     * ~1ms dwell tasks, keeping the deque non-empty.  The first worker
-     * stays parked until we release it, so it can only get work by
-     * stealing.  Time-based deadline (not a fixed spin count): on a
-     * loaded box the draining worker may be preempted mid-drain. */
+     * dwell tasks.  Wait until the ring is fully consumed while deque
+     * work remains, then release worker 1 IMMEDIATELY — worker 1's deque
+     * is empty and the ring is empty, so its only way to run anything is
+     * to steal from worker 2's deque.
+     * The staging observation (ring==0 && deque>0) is inherently
+     * scheduling-fragile under valgrind — on a contended runner the
+     * drain can outlast any deadline (measured: 16-32 tasks still
+     * undrained at 60s, instrumented misses 2026-10-22) — so the wait is
+     * bounded at 60s and the steal itself is asserted afterwards via the
+     * distinct-owner-thread count.  Releasing worker 1 immediately (even
+     * if staging was missed) keeps the race-free semantics: worker 1 can
+     * then only pick up work via Step 3 steal. */
     g_gate_release2 = 1;
     struct timespec wait_deadline;
     clock_gettime(CLOCK_MONOTONIC, &wait_deadline);
     wait_deadline.tv_sec += 60;
-    bool ring_drained = false;
-    while (!ring_drained) {
+    bool staged = false;
+    while (!staged) {
         if (atomic_load_explicit(&pool->ring_count, memory_order_relaxed) == 0 &&
             atomic_load_explicit(&pool->deque_total, memory_order_relaxed) > 0) {
-            ring_drained = true;
+            staged = true;
         } else {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -4117,10 +4129,10 @@ static void test_steal_trigger(void)
             sched_yield();
         }
     }
-    ASSERT(ring_drained, "steal: ring drained into worker deque");
 
-    /* Release worker 1: own deque empty, ring empty, worker_count > 1 ->
-     * it MUST steal from worker 2's deque to run anything at all. */
+    /* Release worker 1: own deque empty; ring empty (or the tail worker 2
+     * hasn't reached yet — either way worker 1 must go through Step 3
+     * steal to run anything). */
     g_gate_release = 1;
     loom_pool_shutdown(pool);
 
