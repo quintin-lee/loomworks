@@ -3,7 +3,7 @@
 Industrial-grade C11 concurrency library featuring a **thread pool**, a **stackful coroutine** subsystem, and higher-level **pipeline**, **task group**, and **metrics** layers.
 
 ```
-Tests: ~21930 pool + ~5627 coroutine + ~79332 integration + ~200014 ctx_smoke — all passing
+Tests: ~21945 pool + ~5627 coroutine + ~79288 integration + ~52147 DAG + ~200014 ctx_smoke — all passing
 Build: gcc -Wall -Wextra -Werror -pedantic -std=c11 -pthread — zero warnings
 ```
 
@@ -111,12 +111,13 @@ loomworks/
 │   ├── numa_internal.h
 │   └── portability.h          # Feature-test macros, POSIX shims
 ├── tests/
-│   ├── test_thread_pool.c     # ~21930 assertions
+│   ├── test_thread_pool.c     # ~21945 assertions
 │   ├── test_coroutine.c       # ~5627 assertions
-│   ├── test_integration.c     # ~79332 assertions
+│   ├── test_integration.c     # ~79288 assertions
 │   ├── test_runtime.c         # ~330 runtime assertions
 │   ├── test_health.c          # ~23 health assertions
 │   ├── test_numa.c            # ~168 NUMA assertions
+│   ├── test_dag.c             # ~52147 DAG assertions
 │   └── ctx_smoke.c            # ~200014 context-switch smoke checks
 ├── examples/
 │   ├── basic_pool.c           # Minimal pool usage
