@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [1.0.2] - 2026-10-23
 
 ### Added
 - **Task DAG (`loom_dag_t`)** — submit a dependency graph in which every node runs
@@ -88,6 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on sleep, and destroys it on completion. Failures surface through the
   existing `LOOMWORKS_METRIC_FAILED` metric; the returned `task_id` supports
   the usual cancellation path.
+- **DAG test suite**: dedicated `tests/test_dag.c` (52147 assertions)
+  covering node dependencies, per-node futures/status, `loom_dag_wait`
+  timeouts, and destroy-joins-in-flight semantics.
 
 ### Changed
 - **`group_wait()` no longer shuts down the backing pool**: it now waits only
@@ -112,8 +115,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pipeline/sequence-number guidance for callers needing strict ordering;
   the public headers make no FIFO/order promise.
 - **Assertion counts synchronized (R10)**: README and CHANGELOG now reflect
-  the current suite — ~21874 pool + ~5627 coroutine + ~79288 integration +
-  ~200014 ctx_smoke.
+  the current suite — ~21945 pool + ~5627 coroutine + ~79288 integration +
+  ~52147 DAG + ~200014 ctx_smoke.
+- **CI valgrind job is now a hard gate**: loop scaling is decided at run
+  time (`RUNNING_ON_VALGRIND`), drain/spill observation tasks block
+  instead of spinning under valgrind, the steal trigger releases the
+  parked worker as soon as staging completes and asserts the steal via
+  distinct owner threads, and `continue-on-error` is gone — every CI
+  run now fails on valgrind regressions.
 
 ### Fixed
 - **Lifecycle destroy gates (2026-08-17)**: `loom_pool_destroy` requires
@@ -233,6 +242,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Crash-count test is no longer racy**: `test_recovery_counts_crashed_worker` asserted
   `active_count == 0` the instant the task's sink was stored, i.e. before the worker epilogue could
   clear the reclaim slot and decrement `active_workers`; it now waits for the idle state first.
+- **Uninitialized config fields in test_config_validation**: the stack
+  `loom_pool_config_t` left `numa_mode`/`virtual_domains` unset; valgrind
+  flagged the uninitialized read in `pool_init` on CI runners. Both
+  fields are now initialized (surfaced by the new valgrind hard gate).
+
 ## [1.0.1] - 2026-08-14
 
 ### Added
