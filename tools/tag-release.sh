@@ -100,7 +100,7 @@ case "${1:-}" in
         exit 0
         ;;
     --version)
-        CUR="$(sed -n 's/^project(loomworks VERSION \([0-9][0-9.]*\) LANGUAGES C).*/\1/p' "$SRC")"
+        CUR="$(sed -n 's/^project(loomworks VERSION \([0-9][0-9.]*\) LANGUAGES C ASM).*/\1/p' "$SRC")"
         if [[ -n "$CUR" ]]; then
             printf 'loomworks current version: %s\n' "$CUR"
             exit 0
@@ -128,7 +128,7 @@ fi
 # Read the current version from the single source of truth (shared by both
 # the dry-run preview and the real run).
 # ---------------------------------------------------------------------------
-CURRENT_VERSION="$(sed -n 's/^project(loomworks VERSION \([0-9][0-9.]*\) LANGUAGES C).*/\1/p' "$SRC")"
+CURRENT_VERSION="$(sed -n 's/^project(loomworks VERSION \([0-9][0-9.]*\) LANGUAGES C ASM).*/\1/p' "$SRC")"
 [[ -n "$CURRENT_VERSION" ]] || die "could not parse current version from $SRC"
 TODAY="$(date +%F)"
 
@@ -152,6 +152,8 @@ Current version: ${CURRENT_VERSION}   requested: ${NEW_VERSION}
 Would change:
   1. ${SRC}                     project() VERSION ${CURRENT_VERSION} -> ${NEW_VERSION}
   2. ${CHANGELOG}               insert "## [${NEW_VERSION}] - ${TODAY}" section under [Unreleased]
+                                (keeps an empty [Unreleased] block; a hand-written
+                                [${NEW_VERSION}] section is preserved as-is)
   3. ${MIGRATION}               project() example lines ${CURRENT_VERSION} -> ${NEW_VERSION}
   4. build_*/                   regenerate loomworksConfigVersion.cmake
                                 (cmake -S . -B <dir> for each configured build tree)
@@ -195,7 +197,7 @@ fi
 # ---------------------------------------------------------------------------
 say "updating $SRC"
 sed -i \
-    "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C)/" \
+    "s/^project(loomworks VERSION [0-9][0-9.]* LANGUAGES C ASM).*/project(loomworks VERSION ${NEW_VERSION} LANGUAGES C ASM)/" \
     "$SRC"
 
 say "updating $CHANGELOG  ([Unreleased] -> [${NEW_VERSION}] - $TODAY)"
@@ -245,7 +247,7 @@ check() { # check <description> <file> <regex>
 }
 
 check "project(VERSION) source of truth" "$SRC" \
-    "^project\(loomworks VERSION ${NEW_VERSION} LANGUAGES C\)"
+    "^project\(loomworks VERSION ${NEW_VERSION} LANGUAGES C ASM\)"
 for dir in build build_asan build_tsan build_ubsan build_release build_cmake; do
     if [[ -f "$dir/loomworksConfigVersion.cmake" ]]; then
         check "generated ConfigVersion (${dir})" "$dir/loomworksConfigVersion.cmake" \
