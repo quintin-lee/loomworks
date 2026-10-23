@@ -267,10 +267,12 @@ static void test_submit_future(void)
 
 static void test_submit_future_cancel(void)
 {
-    /* Use a 2-worker runtime: one worker is blocked by the gate,
-     * leaving the future task queued behind it so we can cancel before
-     * it runs. */
-    loom_runtime_config_t cfg = {.worker_count = 2};
+    /* Use a 1-worker runtime: the gate occupies the only worker, so the
+     * future task stays queued (cancel index resident) until we release —
+     * the cancel is deterministic.  With 2 workers the idle second worker
+     * drains the ring and runs the future task before the cancel lands
+     * (ASan-timing race, CI run 39876514945). */
+    loom_runtime_config_t cfg = {.worker_count = 1};
     loom_runtime_t       *rt  = NULL;
     ASSERT(loom_runtime_create(&cfg, &rt) == LOOMWORKS_OK, "create runtime");
 
@@ -295,15 +297,17 @@ static void test_submit_future_cancel(void)
     /* Cancel while the future is still queued (worker is blocked by gate). */
     ASSERT(loom_runtime_cancel(rt, tid) == LOOMWORKS_OK, "cancel future task");
 
+    /* Release the gate BEFORE waiting: the tombstone is processed at the
+     * worker's run boundary, so with only one worker nobody moves the
+     * future to `cancelled` until the gate lets it drain. */
+    g_gate_release = 1;
+
     void *result = NULL;
     ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_ERR_CANCELLED, "wait returns cancelled");
     ASSERT(result == NULL, "result is NULL for cancelled future");
 
     /* Destroying a completed (cancelled) future is now legal. */
     ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "destroy cancelled future");
-
-    /* Release the gate so the remaining worker can finish. */
-    g_gate_release = 1;
 
     loom_runtime_shutdown(rt);
     loom_runtime_destroy(&rt);
