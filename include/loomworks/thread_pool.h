@@ -42,6 +42,7 @@ typedef enum {
     LOOMWORKS_ERR_SHUTDOWN,  /**< Pool is shutting down or shut down. */
     LOOMWORKS_ERR_TIMEOUT,   /**< Operation timed out. */
     LOOMWORKS_ERR_CANCELLED, /**< Operation was cancelled. */
+    LOOMWORKS_ERR_FAILED,    /**< Submitted task failed during execution. */
 } loom_result_t;
 
 /**

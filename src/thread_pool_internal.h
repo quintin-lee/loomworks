@@ -60,6 +60,7 @@ typedef struct loom_task {
     bool              is_coro;    /**< true if this task wraps a pool coroutine. */
     loom_coro_fn      coro_fn;    /**< Coroutine entry (valid when is_coro). */
     size_t            stack_size; /**< Coroutine stack size (0 = default). */
+    loom_future_t    *completion; /**< Optional future signalled at a terminal path (NULL after). */
 } loom_task_t;
 
 /* Ring cell — canonical Vyukov sequence numbers.  seq == pos is "empty for
@@ -142,6 +143,7 @@ struct loom_future {
     bool            ready;      /**< true once the task has completed. */
     bool            has_result; /**< true if result is non-NULL. */
     bool            cancelled;  /**< true if the underlying task was cancelled. */
+    bool            failed;     /**< true if the task completed with a failure. */
 };
 
 /* ================================================================

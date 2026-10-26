@@ -2198,6 +2198,7 @@ loom_result_t loom_future_init(loom_future_t *fut)
     fut->ready      = false;
     fut->has_result = false;
     fut->cancelled  = false;
+    fut->failed     = false;
     return LOOMWORKS_OK;
 }
 
@@ -2215,9 +2216,16 @@ void loom_future_complete(loom_future_t *fut, loom_result_t status)
         return;
     }
     pthread_mutex_lock(&fut->mutex);
+    if (fut->cancelled) {
+        /* A concurrent cancel already resolved this future; its wait must
+         * keep returning LOOMWORKS_ERR_CANCELLED.  Never overwrite. */
+        pthread_mutex_unlock(&fut->mutex);
+        return;
+    }
     /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
     fut->result     = (void *)(intptr_t)(int)status;
-    fut->has_result = true;
+    fut->has_result = false;
+    fut->failed     = (status != LOOMWORKS_OK);
     fut->ready      = true;
     pthread_cond_signal(&fut->cond);
     pthread_mutex_unlock(&fut->mutex);
@@ -2259,6 +2267,13 @@ loom_result_t loom_future_wait(loom_future_t *future, void **result)
         }
         pthread_mutex_unlock(&future->mutex);
         return LOOMWORKS_ERR_CANCELLED;
+    }
+    if (future->failed) {
+        if (result) {
+            *result = NULL;
+        }
+        pthread_mutex_unlock(&future->mutex);
+        return LOOMWORKS_ERR_FAILED;
     }
     if (result) {
         *result = future->result;
