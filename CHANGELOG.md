@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Coroutine completion handles (R22)**: new
+  `loom_pool_submit_coroutine_ex()` and
+  `loom_runtime_submit_coroutine_ex()` accept an optional future that
+  resolves to the task's final outcome — `LOOMWORKS_OK` (ran to DONE),
+  `LOOMWORKS_ERR_FAILED` (execution failure), or
+  `LOOMWORKS_ERR_CANCELLED` (cancelled queued/sleeping/during drain).
+  The existing fire-and-forget `loom_pool_submit_coroutine()` is
+  unchanged.
+
 ## [1.0.2] - 2026-10-23
 
 ### Added
