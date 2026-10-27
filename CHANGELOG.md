@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Performance gate stability (CI)**: the CI p99 latency gate now
+  compares the median of 3 benchmark runs per side instead of a single
+  run, and the fairness/DAG scenarios use 300 probes instead of 20
+  (a true ~1% quantile).  Eliminates spurious gate failures from
+  single-run noise; consistent regressions still fail the unchanged
+  2.00× p99 / 65% throughput limits.
+
 ## [1.1.0] - 2026-10-27
 
 ### Added
