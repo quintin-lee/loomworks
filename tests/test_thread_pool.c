@@ -4302,6 +4302,12 @@ static void coro_sleeper(void *arg)
     loom_coro_sleep(200000000L); /* 200 ms */
 }
 
+static void coro_fail_task(void *arg)
+{
+    (void)arg;
+    loom_coro_fail(LOOMWORKS_ERR_INVALID);
+}
+
 static void test_submit_coroutine_ex_ok(void)
 {
     loom_thread_pool_t *pool = NULL;
@@ -4372,6 +4378,28 @@ static void test_submit_coroutine_ex_cancel_before_run(void)
     ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_ERR_CANCELLED, "ex-cancel: wait CANCELLED");
     ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "ex-cancel: destroy future");
 
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_submit_coroutine_ex_failed(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "ex-failed: create pool");
+
+    loom_future_t *fut = NULL;
+    uint64_t       tid = 0;
+    ASSERT(loom_pool_submit_coroutine_ex(pool, coro_fail_task, NULL, 0, &fut, &tid) == LOOMWORKS_OK,
+           "ex-failed: submit");
+    ASSERT(fut != NULL, "ex-failed: future allocated");
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_ERR_FAILED,
+           "ex-failed: wait reports ERR_FAILED");
+    ASSERT(result == NULL, "ex-failed: *result stays NULL (R22 contract)");
+
+    ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "ex-failed: destroy future");
     loom_pool_shutdown(pool);
     loom_pool_destroy(&pool);
 }
@@ -4776,6 +4804,7 @@ int main(void)
     test_submit_coroutine_ex_cancel_before_run();
     test_submit_coroutine_ex_cancel_during_sleep();
     test_submit_coroutine_ex_cancel_complete_race();
+    test_submit_coroutine_ex_failed();
     test_pool_coro_sleep();
     test_coro_cancel_sleeping();
     test_coro_execution_timeout();
