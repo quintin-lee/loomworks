@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-27
+
 ### Added
 - **Coroutine completion handles (R22)**: new
   `loom_pool_submit_coroutine_ex()` and
