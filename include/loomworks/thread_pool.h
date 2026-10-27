@@ -202,6 +202,40 @@ loom_result_t loom_pool_submit_coroutine(
     loom_thread_pool_t *pool, loom_coro_fn fn, void *arg, size_t stack_size, uint64_t *task_id);
 
 /**
+ * @brief Submit a coroutine task with an optional completion handle.
+ *
+ * Identical to loom_pool_submit_coroutine() except that, when @p future
+ * is non-NULL, the pool allocates a future that resolves to the task's
+ * final outcome:
+ *   - LOOMWORKS_OK          the coroutine ran to DONE
+ *   - LOOMWORKS_ERR_FAILED  the coroutine failed during execution
+ *   - LOOMWORKS_ERR_CANCELLED  the task was cancelled (queued, sleeping,
+ *                              or during shutdown drain)
+ * The caller must loom_future_wait() then loom_future_destroy() the
+ * returned future.  `*result` from loom_future_wait() is always NULL —
+ * coroutines return void; this handle reports completion status only.
+ * On submit failure, `*future` is set to NULL and no future is
+ * allocated.
+ *
+ * @param pool       The pool handle.
+ * @param fn         Coroutine entry function.
+ * @param arg        Opaque argument passed to @p fn.
+ * @param stack_size Coroutine stack size (0 = default).
+ * @param future     Optional output for the completion future (may be NULL
+ *                   for fire-and-forget behavior identical to
+ *                   loom_pool_submit_coroutine()).
+ * @param task_id    Output for the task id (may be NULL).
+ * @return           LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_pool_submit_coroutine_ex(loom_thread_pool_t *pool,
+                                            loom_coro_fn        fn,
+                                            void               *arg,
+                                            size_t              stack_size,
+                                            loom_future_t     **future,
+                                            uint64_t           *task_id);
+    loom_thread_pool_t *pool, loom_coro_fn fn, void *arg, size_t stack_size, uint64_t *task_id);
+
+/**
  * @brief Wait for a future's result. Blocks until the task completes.
  *
  * @param future   The future handle.

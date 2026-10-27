@@ -148,6 +148,23 @@ static void future_mark_cancelled(future_task_ctx_t *ctx)
     pthread_mutex_unlock(&fut->mutex);
 }
 
+/* Resolve a coroutine completion future as cancelled (mark + wake).
+ * Takes the bare future directly — coroutine tasks carry a
+ * loom_future_t* in their completion field, not a future_task_ctx_t. */
+static void coro_future_mark_cancelled(loom_future_t *fut)
+{
+    if (!fut) {
+        return;
+    }
+    pthread_mutex_lock(&fut->mutex);
+    fut->cancelled  = true;
+    fut->ready      = true;
+    fut->has_result = false;
+    fut->result     = NULL;
+    pthread_cond_broadcast(&fut->cond);
+    pthread_mutex_unlock(&fut->mutex);
+}
+
 /* Smallest power of two >= v (1 when v == 0). */
 static inline uint64_t next_pow2_u64(uint32_t v)
 {
@@ -767,6 +784,10 @@ static void *worker_entry(void *arg)
             if (ctask != NULL && atomic_load_explicit(&ctask->cancelled, memory_order_relaxed)) {
                 loom_coro_terminate(coro);
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+                if (ctask->completion) {
+                    coro_future_mark_cancelled(ctask->completion);
+                    ctask->completion = NULL;
+                }
                 loom_coro_destroy(&coro);
                 if (ctask->free_data && ctask->user_data) {
                     free(ctask->user_data);
@@ -835,6 +856,10 @@ static void *worker_entry(void *arg)
                 loom_task_t            *t = r->task;
                 loom_coro_terminate(c);
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
+                if (t->completion) {
+                    coro_future_mark_cancelled(t->completion);
+                    t->completion = NULL;
+                }
                 loom_coro_destroy(&c);
                 if (t->free_data && t->user_data) {
                     free(t->user_data);
@@ -866,6 +891,10 @@ static void *worker_entry(void *arg)
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
                 loom_coro_destroy(&c);
                 loom_task_t *t = (loom_task_t *)e.task;
+                if (t && t->completion) {
+                    coro_future_mark_cancelled(t->completion);
+                    t->completion = NULL;
+                }
                 if (t && t->free_data && t->user_data) {
                     free(t->user_data);
                 }
@@ -1102,15 +1131,27 @@ static void *worker_entry(void *arg)
                         continue;
                     }
                     /* calloc failed: fall through to recycle. */
+                    if (task->completion) {
+                        loom_future_complete(task->completion, LOOMWORKS_ERR_FAILED);
+                        task->completion = NULL;
+                    }
                 } else if (st == LOOMWORKS_CORO_SLEEPING) {
                     /* sleep_reg already registered the timer entry; the timer
                      * thread will push a fresh ready node at the deadline. */
                     continue;
                 } else if (st == LOOMWORKS_CORO_DONE) {
                     metrics_fire(pool, LOOMWORKS_METRIC_COMPLETED);
+                    if (task->completion) {
+                        loom_future_complete(task->completion, LOOMWORKS_OK);
+                        task->completion = NULL;
+                    }
                 }
             } else if (crc != LOOMWORKS_CORO_ERR_RUNNING) {
                 metrics_fire(pool, LOOMWORKS_METRIC_FAILED);
+                if (task->completion) {
+                    loom_future_complete(task->completion, LOOMWORKS_ERR_FAILED);
+                    task->completion = NULL;
+                }
             }
             loom_coro_destroy(&coro);
             task_destroy(pool, task);
@@ -1967,45 +2008,102 @@ loom_pool_submit(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint64_t
  *
  *  @return  LOOMWORKS_OK on success.
  * ================================================================ */
-loom_result_t loom_pool_submit_coroutine(
-    loom_thread_pool_t *pool, loom_coro_fn fn, void *arg, size_t stack_size, uint64_t *task_id)
+loom_result_t loom_pool_submit_coroutine_ex(loom_thread_pool_t *pool,
+                                            loom_coro_fn        fn,
+                                            void               *arg,
+                                            size_t              stack_size,
+                                            loom_future_t     **future,
+                                            uint64_t           *task_id)
 {
     if (!pool || !fn) {
+        if (future) {
+            *future = NULL;
+        }
         return LOOMWORKS_ERR_INVALID;
+    }
+    if (future) {
+        *future = NULL;
     }
     if (atomic_load_explicit(&pool->shutdown, memory_order_relaxed)) {
         return LOOMWORKS_ERR_SHUTDOWN;
     }
+    loom_future_t *fut = NULL;
+    if (future != NULL) {
+        fut = (loom_future_t *)calloc(1, sizeof(*fut));
+        if (!fut) {
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        if (pthread_mutex_init(&fut->mutex, NULL) != 0) {
+            free(fut);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+        pthread_once(&g_condattr_once, init_monotonic_condattr);
+        if (pthread_cond_init(&fut->cond, &g_condattr_mono) != 0) {
+            pthread_mutex_destroy(&fut->mutex);
+            free(fut);
+            return LOOMWORKS_ERR_ALLOC;
+        }
+    }
     loom_result_t rc = ensure_timer_thread(pool);
     if (rc != LOOMWORKS_OK) {
+        if (fut) {
+            pthread_cond_destroy(&fut->cond);
+            pthread_mutex_destroy(&fut->mutex);
+            free(fut);
+        }
         return rc;
     }
     pthread_mutex_lock(&pool->lock);
     if (pool->shutdown || pool->draining) {
         pthread_mutex_unlock(&pool->lock);
+        if (fut) {
+            pthread_cond_destroy(&fut->cond);
+            pthread_mutex_destroy(&fut->mutex);
+            free(fut);
+        }
         return LOOMWORKS_ERR_SHUTDOWN;
     }
     if (pool->queue_capacity > 0 && pool->queue_len >= pool->queue_capacity) {
         pthread_mutex_unlock(&pool->lock);
+        if (fut) {
+            pthread_cond_destroy(&fut->cond);
+            pthread_mutex_destroy(&fut->mutex);
+            free(fut);
+        }
         return LOOMWORKS_ERR_INVALID;
     }
     loom_task_t *task = task_create(pool, (loom_task_fn)fn, arg, LOOMWORKS_PRIORITY_NORMAL);
     if (!task) {
         pthread_mutex_unlock(&pool->lock);
+        if (fut) {
+            pthread_cond_destroy(&fut->cond);
+            pthread_mutex_destroy(&fut->mutex);
+            free(fut);
+        }
         return LOOMWORKS_ERR_ALLOC;
     }
     task->is_coro    = true;
     task->coro_fn    = fn;
     task->stack_size = stack_size;
+    task->completion = fut;
     task->free_data  = false; /* user_data is reused as the coroutine handle */
     loom_enqueue_unlocked(pool, task);
     if (task_id) {
         *task_id = task->task_id;
     }
+    if (fut) {
+        *future = fut;
+    }
     sem_post(&pool->work_sem);
     pthread_mutex_unlock(&pool->lock);
     metrics_fire(pool, LOOMWORKS_METRIC_SUBMITTED);
     return LOOMWORKS_OK;
+}
+
+loom_result_t loom_pool_submit_coroutine(
+    loom_thread_pool_t *pool, loom_coro_fn fn, void *arg, size_t stack_size, uint64_t *task_id)
+{
+    return loom_pool_submit_coroutine_ex(pool, fn, arg, stack_size, NULL, task_id);
 }
 
 /* ================================================================
@@ -2500,6 +2598,10 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
             task->cancelled = true;
             if (cancel_index_claim(pool, task)) {
                 atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
+                if (task->is_coro && task->completion) {
+                    coro_future_mark_cancelled(task->completion);
+                    task->completion = NULL;
+                }
                 pthread_mutex_unlock(&pool->lock);
                 metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
                 return LOOMWORKS_OK;
@@ -2516,6 +2618,10 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
         loom_task_t *task = (loom_task_t *)pool->timer_heap[ti].task;
         if (task != NULL && task->user_data == data) {
             atomic_store_explicit(&task->cancelled, true, memory_order_release);
+            if (task->completion) {
+                coro_future_mark_cancelled(task->completion);
+                task->completion = NULL;
+            }
             pthread_mutex_unlock(&pool->timer_lock);
             pthread_mutex_unlock(&pool->lock);
             metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
@@ -2546,6 +2652,10 @@ loom_result_t loom_pool_cancel(loom_thread_pool_t *pool, void *data)
                 loom_task_t *to_free = cur;
                 if (to_free->is_future) {
                     future_mark_cancelled((future_task_ctx_t *)to_free->user_data);
+                }
+                if (to_free->is_coro && to_free->completion) {
+                    coro_future_mark_cancelled(to_free->completion);
+                    to_free->completion = NULL;
                 }
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);
@@ -2593,6 +2703,10 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
         task->cancelled = true; /* published to the worker via the tombstone release */
         if (cancel_index_claim(pool, task)) {
             atomic_fetch_sub_explicit(&pool->queue_len, 1, memory_order_relaxed);
+            if (task->is_coro && task->completion) {
+                coro_future_mark_cancelled(task->completion);
+                task->completion = NULL;
+            }
             pthread_mutex_unlock(&pool->lock);
             metrics_fire(pool, LOOMWORKS_METRIC_CANCELLED);
             return LOOMWORKS_OK;
@@ -2612,6 +2726,10 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
     if (in_timer) {
         loom_task_t *ctask = (loom_task_t *)te.task;
         atomic_store_explicit(&ctask->cancelled, true, memory_order_release);
+        if (ctask->completion) {
+            coro_future_mark_cancelled(ctask->completion);
+            ctask->completion = NULL;
+        }
         struct loom_coro_ready *rn = (struct loom_coro_ready *)calloc(1, sizeof(*rn));
         if (rn != NULL) {
             rn->coro    = (struct loom_coroutine *)te.coro_ctx;
@@ -2655,6 +2773,10 @@ loom_result_t loom_pool_cancel_by_id(loom_thread_pool_t *pool, uint64_t task_id)
                 loom_task_t *to_free = cur;
                 if (to_free->is_future) {
                     future_mark_cancelled((future_task_ctx_t *)to_free->user_data);
+                }
+                if (to_free->is_coro && to_free->completion) {
+                    coro_future_mark_cancelled(to_free->completion);
+                    to_free->completion = NULL;
                 }
                 if (to_free->free_data && to_free->user_data) {
                     free(to_free->user_data);

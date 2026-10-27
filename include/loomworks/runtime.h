@@ -144,6 +144,25 @@ loom_result_t loom_runtime_submit_future(loom_runtime_t     *rt,
                                          uint64_t           *task_id);
 
 /**
+ * @brief Submit a coroutine task with an optional completion handle.
+ *
+ * Stack size is the runtime's configured coroutine stack size.  See
+ * loom_pool_submit_coroutine_ex() for the future's completion contract.
+ *
+ * @param rt      The runtime handle.
+ * @param fn      Coroutine entry function.
+ * @param arg     Opaque argument passed to @p fn.
+ * @param future  Optional output for the completion future (may be NULL).
+ * @param task_id Output for the task id (may be NULL).
+ * @return        LOOMWORKS_OK on success, error code otherwise.
+ */
+loom_result_t loom_runtime_submit_coroutine_ex(loom_runtime_t *rt,
+                                               loom_coro_fn     fn,
+                                               void            *arg,
+                                               loom_future_t   **future,
+                                               uint64_t        *task_id);
+
+/**
  * @brief Submit a thread task, blocking until there is queue space.
  *
  * Same as loom_runtime_submit() but blocks (with timeout) when the queue
