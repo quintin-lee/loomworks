@@ -156,11 +156,8 @@ loom_result_t loom_runtime_submit_future(loom_runtime_t     *rt,
  * @param task_id Output for the task id (may be NULL).
  * @return        LOOMWORKS_OK on success, error code otherwise.
  */
-loom_result_t loom_runtime_submit_coroutine_ex(loom_runtime_t *rt,
-                                               loom_coro_fn     fn,
-                                               void            *arg,
-                                               loom_future_t   **future,
-                                               uint64_t        *task_id);
+loom_result_t loom_runtime_submit_coroutine_ex(
+    loom_runtime_t *rt, loom_coro_fn fn, void *arg, loom_future_t **future, uint64_t *task_id);
 
 /**
  * @brief Submit a thread task, blocking until there is queue space.

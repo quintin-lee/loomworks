@@ -348,6 +348,41 @@ static void test_coro_cancel_pending(void)
     ASSERT(counter == 0, "cancelled coroutine task did not execute");
 }
 
+static void test_submit_coroutine_ex_runtime(void)
+{
+    /* 1-worker runtime, same gate discipline as test_coro_cancel_pending. */
+    loom_runtime_config_t cfg = {.worker_count = 1};
+    loom_runtime_t       *rt  = NULL;
+    ASSERT(loom_runtime_create(&cfg, &rt) == LOOMWORKS_OK, "ex: create runtime");
+
+    g_gate_started          = 0;
+    g_gate_release          = 0;
+    g_gate_parked           = 0;
+    loom_fn_union_t blocker = {.thread_fn = gate_blocker};
+    ASSERT(loom_runtime_submit(rt, blocker, NULL, LOOM_SUBMIT_THREAD, 5, NULL) == LOOMWORKS_OK,
+           "ex: submit blocker");
+    while (g_gate_parked == 0) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000000L};
+        nanosleep(&ts, NULL);
+    }
+
+    loom_future_t *fut = NULL;
+    uint64_t       tid = 0;
+    ASSERT(loom_runtime_submit_coroutine_ex(rt, simple_coro_task, NULL, &fut, &tid) == LOOMWORKS_OK,
+           "ex: submit coro");
+    ASSERT(fut != NULL, "ex: future allocated");
+    ASSERT(loom_runtime_cancel(rt, tid) == LOOMWORKS_OK, "ex: cancel queued coro");
+
+    g_gate_release = 1; /* release BEFORE wait (run-boundary lesson) */
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_ERR_CANCELLED, "ex: wait CANCELLED");
+    ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "ex: destroy future");
+
+    loom_runtime_shutdown(rt);
+    loom_runtime_destroy(&rt);
+}
+
 static void test_submit_blocking(void)
 {
     /* Verify blocking submit works with an unbounded queue. */
@@ -643,6 +678,7 @@ int main(void)
     test_submit_future();
     test_submit_future_cancel();
     test_coro_cancel_pending();
+    test_submit_coroutine_ex_runtime();
     test_resize();
     test_submit_blocking();
     test_submit_blocking_rejects_coro();

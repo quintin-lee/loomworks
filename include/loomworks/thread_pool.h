@@ -233,7 +233,6 @@ loom_result_t loom_pool_submit_coroutine_ex(loom_thread_pool_t *pool,
                                             size_t              stack_size,
                                             loom_future_t     **future,
                                             uint64_t           *task_id);
-    loom_thread_pool_t *pool, loom_coro_fn fn, void *arg, size_t stack_size, uint64_t *task_id);
 
 /**
  * @brief Wait for a future's result. Blocks until the task completes.

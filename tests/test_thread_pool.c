@@ -4290,6 +4290,152 @@ static void test_coro_cancel_sleeping(void)
     ASSERT(atomic_load(&g_coro_tasks_done) == 0, "cancel-sleep: task never ran to completion");
 }
 
+/* ---------- R22: submit_coroutine_ex completion handles ---------- */
+static void coro_noop_task(void *arg)
+{
+    (void)arg;
+}
+
+static void coro_sleeper(void *arg)
+{
+    (void)arg;
+    loom_coro_sleep(200000000L); /* 200 ms */
+}
+
+static void test_submit_coroutine_ex_ok(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "ex-ok: create pool");
+
+    loom_future_t *fut = NULL;
+    uint64_t       tid = 0;
+    ASSERT(loom_pool_submit_coroutine_ex(pool, coro_noop_task, NULL, 0, &fut, &tid) == LOOMWORKS_OK,
+           "ex-ok: submit");
+    ASSERT(fut != NULL, "ex-ok: future allocated");
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_OK, "ex-ok: wait returns OK");
+    ASSERT(result == NULL, "ex-ok: coroutine result is NULL");
+
+    ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "ex-ok: destroy future");
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_submit_coroutine_ex_legacy_parity(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "ex-legacy: create pool");
+
+    uint64_t tid = 0;
+    ASSERT(loom_pool_submit_coroutine_ex(pool, coro_noop_task, NULL, 0, NULL, &tid) == LOOMWORKS_OK,
+           "ex-legacy: submit with NULL future");
+    ASSERT(tid != 0, "ex-legacy: task id returned");
+
+    uint64_t tid2 = 0;
+    ASSERT(loom_pool_submit_coroutine(pool, coro_noop_task, NULL, 0, &tid2) == LOOMWORKS_OK,
+           "ex-legacy: legacy function still works");
+    ASSERT(tid2 != 0, "ex-legacy: legacy task id returned");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_submit_coroutine_ex_cancel_before_run(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_gate_parked  = 0;
+
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "ex-cancel: create pool");
+
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "ex-cancel: gate");
+    while (g_gate_parked < 1) {
+        sched_yield();
+    }
+
+    loom_future_t *fut = NULL;
+    uint64_t       tid = 0;
+    ASSERT(loom_pool_submit_coroutine_ex(pool, coro_noop_task, NULL, 0, &fut, &tid) == LOOMWORKS_OK,
+           "ex-cancel: submit");
+    ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_OK, "ex-cancel: cancel queued coro");
+
+    /* Release BEFORE waiting: the tombstone is processed at the worker's
+     * run boundary (2026-10-23 lesson — waiting while gated hangs). */
+    g_gate_release = 1;
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_ERR_CANCELLED, "ex-cancel: wait CANCELLED");
+    ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "ex-cancel: destroy future");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_submit_coroutine_ex_cancel_during_sleep(void)
+{
+    g_gate_started = 0;
+    g_gate_release = 0;
+    g_gate_parked  = 0;
+
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "ex-sleep: create pool");
+
+    ASSERT(loom_pool_submit(pool, gate_task, NULL, NULL) == LOOMWORKS_OK, "ex-sleep: gate");
+    while (g_gate_parked < 1) {
+        sched_yield();
+    }
+
+    loom_future_t *fut = NULL;
+    uint64_t       tid = 0;
+    ASSERT(loom_pool_submit_coroutine_ex(pool, coro_sleeper, NULL, 0, &fut, &tid) == LOOMWORKS_OK,
+           "ex-sleep: submit sleeper");
+
+    /* Cancel while the worker is gated: the coroutine is still queued. */
+    ASSERT(loom_pool_cancel_by_id(pool, tid) == LOOMWORKS_OK, "ex-sleep: cancel queued sleeper");
+
+    g_gate_release = 1;
+
+    void *result = NULL;
+    ASSERT(loom_future_wait(fut, &result) == LOOMWORKS_ERR_CANCELLED, "ex-sleep: wait CANCELLED");
+    ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "ex-sleep: destroy future");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+static void test_submit_coroutine_ex_cancel_complete_race(void)
+{
+    /* Cancel racing completion: wait must resolve to exactly one of
+     * {OK, CANCELLED} every round and never hang. */
+    for (int round = 0; round < VGI(50); round++) {
+        loom_thread_pool_t *pool = NULL;
+        loom_pool_config_t  cfg  = {.worker_count = 1};
+        ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "ex-race: create pool");
+
+        loom_future_t *fut = NULL;
+        uint64_t       tid = 0;
+        ASSERT(loom_pool_submit_coroutine_ex(pool, coro_noop_task, NULL, 0, &fut, &tid) ==
+                   LOOMWORKS_OK,
+               "ex-race: submit");
+
+        (void)loom_pool_cancel_by_id(pool, tid); /* may miss: task already ran */
+
+        void         *result = NULL;
+        loom_result_t w      = loom_future_wait(fut, &result);
+        ASSERT(w == LOOMWORKS_OK || w == LOOMWORKS_ERR_CANCELLED, "ex-race: wait resolves");
+        ASSERT(loom_future_destroy(fut) == LOOMWORKS_OK, "ex-race: destroy");
+
+        loom_pool_shutdown(pool);
+        loom_pool_destroy(&pool);
+    }
+}
+
 /* ---- Per-coroutine execution timeout (loom_coro_set_timeout) ----
  * Differential regression.  A forever-spinning coroutine under a tight
  * 50 ms execution budget must be force-killed at its next yield point, while
@@ -4625,6 +4771,11 @@ int main(void)
     test_worker_crash_detected();
     test_recovery_counts_crashed_worker();
     test_pool_submit_coroutine();
+    test_submit_coroutine_ex_ok();
+    test_submit_coroutine_ex_legacy_parity();
+    test_submit_coroutine_ex_cancel_before_run();
+    test_submit_coroutine_ex_cancel_during_sleep();
+    test_submit_coroutine_ex_cancel_complete_race();
     test_pool_coro_sleep();
     test_coro_cancel_sleeping();
     test_coro_execution_timeout();

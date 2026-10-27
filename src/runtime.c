@@ -123,11 +123,8 @@ loom_result_t loom_runtime_submit(loom_runtime_t    *rt,
     return loom_pool_submit_priority(rt->pool, fn.thread_fn, data, priority, task_id);
 }
 
-loom_result_t loom_runtime_submit_coroutine_ex(loom_runtime_t *rt,
-                                               loom_coro_fn     fn,
-                                               void            *arg,
-                                               loom_future_t   **future,
-                                               uint64_t        *task_id)
+loom_result_t loom_runtime_submit_coroutine_ex(
+    loom_runtime_t *rt, loom_coro_fn fn, void *arg, loom_future_t **future, uint64_t *task_id)
 {
     if (!rt || !rt->pool || !fn) {
         if (future) {
@@ -135,8 +132,7 @@ loom_result_t loom_runtime_submit_coroutine_ex(loom_runtime_t *rt,
         }
         return LOOMWORKS_ERR_INVALID;
     }
-    return loom_pool_submit_coroutine_ex(
-        rt->pool, fn, arg, rt->coro_stack_size, future, task_id);
+    return loom_pool_submit_coroutine_ex(rt->pool, fn, arg, rt->coro_stack_size, future, task_id);
 }
 
 loom_result_t loom_runtime_submit_future(loom_runtime_t     *rt,
