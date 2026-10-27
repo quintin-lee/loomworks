@@ -43,9 +43,10 @@ LOOMWORKS_CORO_ERR_FAILED,  /**< loom_coro_fail() was invoked. */
  * the coroutine state is LOOMWORKS_CORO_ERROR.  No-op when called
  * outside a running coroutine (documented user error).
  *
- * @param err  Failure code to record (any LOOMWORKS_ERR_*).
+ * @param err  Failure code to record (any LOOMWORKS_ERR_* value; the
+ *             LOOMWORKS_* constants are plain ints that widen to uint32_t).
  */
-void loom_coro_fail(loom_result_t err);
+void loom_coro_fail(uint32_t err);
 
 /**
  * @brief Read a coroutine's exit status after it stops running.
@@ -55,19 +56,28 @@ void loom_coro_fail(loom_result_t err);
  *         state ERROR + infra   -> LOOMWORKS_ERR_FAILED (guard/alloc/context)
  *         otherwise            -> LOOMWORKS_ERR_INVALID
  */
-loom_result_t loom_coro_exit_status(loom_coroutine_t *coro);
+uint32_t loom_coro_exit_status(loom_coroutine_t *coro);
 ```
 
 `loom_coroutine_t` is already the public opaque type from `coroutine.h`;
 both functions take/return it, no new public types.
 
+**Type constraint (why `uint32_t`, not `loom_result_t`):** `coroutine.h`
+is the *leaf* header — `thread_pool.h` includes it (thread_pool.h:22) for
+`loom_coro_fn`, so it cannot in turn include `thread_pool.h` to pull in
+`loom_result_t` (include cycle). Sibling headers that use `loom_result_t`
+(pipeline/metrics/dag/task_group) all sit *above* thread_pool.h. Hence the
+public signatures use `uint32_t` codes; call sites passing
+`LOOMWORKS_ERR_*` constants convert implicitly, and `coroutine.c` (which
+includes `thread_pool.h`) still names the enum in its implementation.
+
 ## 3. Mechanism
 
 1. **Struct fields** (`coroutine_internal.h`): replace
    `uint64_t padding[2]` with
-   `loom_result_t exit_code; bool exit_failed; uint64_t padding[1];`
-   (one `uint64_t` consumed; struct stays 64-byte-padded, size unchanged,
-   ASan fiber field untouched).
+   `uint32_t exit_code; uint8_t exit_failed; uint64_t padding[1];`
+   (one `uint64_t` of padding consumed; struct stays 64-byte-padded, size
+   unchanged, ASan fiber field untouched).
 2. **`loom_coro_fail(err)`** (`coroutine.c`, async-signal-safe like the
    guard handler): `c = g_current; if (!c) return; c->state =
    LOOMWORKS_CORO_ERROR; c->exit_code = (uint32_t)err; c->exit_failed =

@@ -62,7 +62,7 @@ In `include/loomworks/coroutine.h`, immediately after the `void loom_coro_exit(v
  *
  * @param err  Failure code to record (any LOOMWORKS_ERR_* value).
  */
-void loom_coro_fail(loom_result_t err);
+void loom_coro_fail(uint32_t err);
 
 /**
  * @brief Read a coroutine's exit status after it stops running.
@@ -76,10 +76,14 @@ void loom_coro_fail(loom_result_t err);
  *
  * @param coro  Coroutine handle (NULL -> LOOMWORKS_ERR_INVALID).
  */
-loom_result_t loom_coro_exit_status(loom_coroutine_t *coro);
+uint32_t loom_coro_exit_status(loom_coroutine_t *coro);
 ```
 
-Note: `loom_result_t` comes from `thread_pool.h`; `coroutine.h` already includes it (verify with `grep '#include' include/loomworks/coroutine.h`; if not present, add `#include "loomworks/thread_pool.h"` at the top — it is a sibling public header, no cycle).
+Note: signatures use `uint32_t`, NOT `loom_result_t` — `coroutine.h` is the leaf
+header (`thread_pool.h:22` includes it for `loom_coro_fn`, so it cannot include
+`thread_pool.h` back without an include cycle). `LOOMWORKS_ERR_*` constants are
+plain ints that widen to `uint32_t` at call sites, and `coroutine.c` (which
+includes `thread_pool.h`) names the enum in its implementation.
 
 - [ ] **Step 3: Add the struct fields**
 
@@ -116,7 +120,7 @@ git commit -m "feat(coroutine): ✨ add ERR_FAILED result and exit-status fields
 ## Task 2: `loom_coro_fail` + resume jmp arm + `loom_coro_exit_status`
 
 **Files:**
-- Modify: `src/coroutine.c` (jmp arm at line 533-535; new functions near `loom_coro_exit` ~line 830)
+- Modify: `src/coroutine.c` (jmp arm at line 533-535; new functions near `loom_coro_exit` ~line 830). ALSO add `#include "loomworks/thread_pool.h"` near the top: the TU does NOT currently declare `LOOMWORKS_OK`/`LOOMWORKS_ERR_*` (probe compile: `LOOMWORKS_OK undeclared`), and `loom_coro_exit_status` returns those constants cast to `uint32_t`. Including the sibling public header from a `.c` file is cycle-safe (probe compiled clean).
 
 - [ ] **Step 1: Write the failing standalone test**
 
@@ -187,13 +191,13 @@ to
 Then, near `loom_coro_exit` (find it with `grep -n "void loom_coro_exit" src/coroutine.c`), add:
 
 ```c
-void loom_coro_fail(loom_result_t err)
+void loom_coro_fail(uint32_t err)
 {
     loom_coroutine_t *c = g_current;
     if (c == NULL) {
         return; /* not running inside a coroutine: documented no-op */
     }
-    c->exit_code   = (uint32_t)err;
+    c->exit_code   = err;
     c->exit_failed = 1;
     c->state       = LOOMWORKS_CORO_ERROR;
     g_current       = NULL;
@@ -203,21 +207,21 @@ void loom_coro_fail(loom_result_t err)
     siglongjmp(g_guard_jmp, 1);
 }
 
-loom_result_t loom_coro_exit_status(loom_coroutine_t *coro)
+uint32_t loom_coro_exit_status(loom_coroutine_t *coro)
 {
     if (coro == NULL) {
-        return LOOMWORKS_ERR_INVALID;
+        return (uint32_t)LOOMWORKS_ERR_INVALID;
     }
     switch (coro->state) {
     case LOOMWORKS_CORO_DONE:
-        return LOOMWORKS_OK;
+        return (uint32_t)LOOMWORKS_OK;
     case LOOMWORKS_CORO_ERROR:
         if (coro->exit_failed) {
-            return (loom_result_t)coro->exit_code;
+            return coro->exit_code;
         }
-        return LOOMWORKS_ERR_FAILED; /* infra error: guard/alloc/context */
+        return (uint32_t)LOOMWORKS_ERR_FAILED; /* infra error: guard/alloc/context */
     default:
-        return LOOMWORKS_ERR_INVALID; /* still NEW/RUNNING/SUSPENDED/SLEEPING */
+        return (uint32_t)LOOMWORKS_ERR_INVALID; /* still NEW/RUNNING/SUSPENDED/SLEEPING */
     }
 }
 ```
