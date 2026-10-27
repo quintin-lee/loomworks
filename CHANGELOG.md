@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Coroutine failure propagation**: `loom_coro_fail(err)` lets a
+  coroutine report a deterministic failure; `loom_coro_exit_status()`
+  reads the recorded code on the handle.  A pool task that calls
+  `loom_coro_fail` now completes its `submit_coroutine_ex` future with
+  `LOOMWORKS_ERR_FAILED` — closing the R22 FAILED branch that previously
+  could only be reached by infrastructure errors.
+
 ### Changed
 - **Performance gate stability (CI)**: the CI p99 latency gate now
   compares the median of 3 benchmark runs per side instead of a single
