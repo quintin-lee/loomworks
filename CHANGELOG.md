@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single-run noise; consistent regressions still fail the unchanged
   2.00× p99 / 65% throughput limits.
 
+### Fixed
+- **Fortify cross-stack fiber unwind abort**: `loom_coro_fail()` and the
+  guard-page handler `siglongjmp()` back to the resumer's `sigsetjmp` target
+  from a coroutine's mmap'd stack.  Under glibc `_FORTIFY_SOURCE` (the
+  default in Ubuntu CI Release builds) the macro redirects to
+  `__longjmp_chk`, which misjudges the legitimate cross-stack unwind as an
+  "uninitialized stack frame" and aborts the process.  The two unwinds now
+  bind the plain ELF `siglongjmp` symbol directly, matching the
+  non-fortify behavior.
+
 ## [1.1.0] - 2026-10-27
 
 ### Added

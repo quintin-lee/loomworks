@@ -79,6 +79,26 @@ typedef struct scheduler_stack_node {
 
 static scheduler_stack_node_t *g_scheduler_stacks = NULL;
 
+/* glibc's fortify variant maps the siglongjmp() macro onto __longjmp_chk,
+ * whose "was this jmp_buf setjmp'd within the current stack's bounds"
+ * check false-positives on the fiber's legitimate cross-stack unwind
+ * (setjmp on the worker's scheduler stack, longjmp back from the mmap'd
+ * coroutine stack) and aborts the process ("longjmp causes uninitialized
+ * stack frame").  Declare the *plain* ELF symbol under a distinct C name
+ * (the siglongjmp macro is not available here, so the identifier cannot be
+ * spelled plainly) and call that: it is the same unchecked __siglongjmp
+ * every non-fortify build links (the macro already resolves to it when
+ * __USE_FORTIFY_LEVEL is 0), so behavior there is unchanged, and it keeps
+ * the signal-mask restoration the checked variant lacks.  Trivial,
+ * alloc-free, async-signal-safe. */
+extern void loom_coro_plain_siglongjmp(sigjmp_buf env, int val) __asm__("siglongjmp")
+    __attribute__((noreturn));
+
+static inline void loom_coro_siglongjmp(sigjmp_buf target)
+{
+    loom_coro_plain_siglongjmp(target, 1);
+}
+
 /* Serializes all mutations of g_scheduler_stacks.  Three writers:
  *  - ensure_scheduler()           appends (a thread's first coro resume)
  *  - loom_coro_exit()             unlinks + frees (worker loop top)
@@ -208,7 +228,7 @@ static void guard_handler(int sig, siginfo_t *info, void *uctx)
             c->state  = LOOMWORKS_CORO_ERROR;
             g_current = NULL;
             atomic_fetch_sub_explicit(&g_guard_recurse_depth, 1, memory_order_relaxed);
-            siglongjmp(g_guard_jmp, 1);
+            loom_coro_siglongjmp(g_guard_jmp);
         }
     }
     /* Not our guard page — terminate the process immediately.
@@ -811,7 +831,7 @@ void loom_coro_fail(uint32_t err)
     /* Same async-signal-safe longjmp the guard handler uses.  The resumer
      * re-acquires g_guard_jmp in its sigsetjmp arm and reports
      * LOOMWORKS_CORO_ERR_FAILED (exit_failed discriminator). */
-    siglongjmp(g_guard_jmp, 1);
+    loom_coro_siglongjmp(g_guard_jmp);
 }
 
 uint32_t loom_coro_exit_status(loom_coroutine_t *coro)
