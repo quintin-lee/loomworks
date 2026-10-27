@@ -67,12 +67,67 @@ def gate_dag(base, new):
     return 0
 
 
+PCTL_OBJECTS = ("tail_latency_ns", "fairness_resp_ns", "dag_latency_ns")
+
+
+def median_of_3(values):
+    """Middle value after sorting.  Non-numeric/missing inputs are
+    excluded; all-missing -> None so callers keep their warn+skip
+    contract.  With 2 present values the larger (conservative for p99)."""
+    vals = [v for v in values if isinstance(v, (int, float))]
+    if not vals:
+        return None
+    vals.sort()
+    return vals[len(vals) // 2]
+
+
+def synthesize(paths):
+    """Collapse per-side bench JSON files into one dict: element-wise
+    median across files for each percentile object, dag_throughput_tps,
+    and the index-aligned queue_depth_tps array.  Gates then run on the
+    stable middle value instead of one noisy run."""
+    docs = [load(p) for p in paths]
+    out = {}
+    for name in PCTL_OBJECTS:
+        fields = {}
+        for doc in docs:
+            obj = doc.get(name)
+            if not isinstance(obj, dict):
+                continue
+            for metric, value in obj.items():
+                fields.setdefault(metric, []).append(value)
+        out[name] = {
+            m: median_of_3(vals)
+            for m, vals in fields.items()
+            if median_of_3(vals) is not None
+        }
+    dag = median_of_3([d.get("dag_throughput_tps") for d in docs])
+    if dag is not None:
+        out["dag_throughput_tps"] = dag
+    qd = [d.get("queue_depth_tps") for d in docs if isinstance(d.get("queue_depth_tps"), list)]
+    if qd:
+        width = min(len(q) for q in qd)
+        out["queue_depth_tps"] = [
+            median_of_3([q[i] for q in qd]) for i in range(width)
+        ]
+        out["queue_depths"] = docs[0].get("queue_depths", [])
+    return out
+
+
 def main():
-    if len(sys.argv) != 3:
-        print("usage: bench_compare.py BASE.txt NEW.txt", file=sys.stderr)
+    if len(sys.argv) not in (3, 7):
+        print(
+            "usage: bench_compare.py BASE NEW | BASE1 BASE2 BASE3 NEW1 NEW2 NEW3",
+            file=sys.stderr,
+        )
         return 2
-    base = load(sys.argv[1])
-    new = load(sys.argv[2])
+    if len(sys.argv) == 7:
+        print("median-of-3 synthesis: base=argv[1:4], new=argv[4:7]")
+        base = synthesize(sys.argv[1:4])
+        new = synthesize(sys.argv[4:7])
+    else:
+        base = load(sys.argv[1])
+        new = load(sys.argv[2])
     bq = base.get("queue_depth_tps", [])
     nq = new.get("queue_depth_tps", [])
     if not bq:
