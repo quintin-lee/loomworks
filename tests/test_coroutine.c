@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "loomworks/coroutine.h"
+#include "loomworks/thread_pool.h"
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -65,6 +66,15 @@ static void sleepy_coro_fn(void *arg)
     int64_t now_ns = (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
     loom_coro_sleep_until(now_ns + 10000000); /* +10 ms */
     (*state)++;
+}
+
+/* Fails mid-run via loom_coro_fail; code after the call must not run. */
+static void fail_probe_coro(void *arg)
+{
+    int *flag = (int *)arg;
+    *flag     = 1;
+    loom_coro_fail(LOOMWORKS_ERR_INVALID);
+    *flag = 2; /* must not run */
 }
 
 static loom_coroutine_t *g_self_terminate_target;
@@ -644,6 +654,27 @@ static void test_coro_sleep_until(void)
     loom_coro_destroy(&coro);
 }
 
+/* ---------- Test: loom_coro_fail propagates to the resumer ---------- */
+static void test_coro_fail_propagates(void)
+{
+    loom_coroutine_t  *coro = NULL;
+    int                flag = 0;
+    loom_coro_result_t rc   = loom_coro_create(fail_probe_coro, &flag, 0, &coro);
+    ASSERT(rc == LOOMWORKS_CORO_OK, "fail: create");
+    rc = loom_coro_resume(coro);
+    ASSERT(rc == LOOMWORKS_CORO_ERR_FAILED, "fail: resume reports ERR_FAILED");
+    ASSERT(flag == 1, "fail: code after loom_coro_fail did not run");
+    ASSERT(loom_coro_exit_status(coro) == LOOMWORKS_ERR_INVALID, "fail: exit_status");
+    ASSERT(loom_coro_state(coro) == LOOMWORKS_CORO_ERROR, "fail: state ERROR");
+
+    loom_coroutine_t  *okcoro = NULL;
+    loom_coro_result_t orc    = loom_coro_create(simple_coro_fn, &flag, 0, &okcoro);
+    ASSERT(orc == LOOMWORKS_CORO_OK, "fail: create ok coro");
+    loom_coro_resume(okcoro);
+    ASSERT(loom_coro_exit_status(okcoro) == LOOMWORKS_OK, "done: exit_status OK");
+    loom_coro_destroy(&okcoro);
+    loom_coro_destroy(&coro);
+}
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -678,6 +709,7 @@ int main(void)
     test_cross_thread_guard();
     test_coro_destroy_suspended_rejected();
     test_coro_sleep_until();
+    test_coro_fail_propagates();
 
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;

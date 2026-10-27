@@ -2,6 +2,7 @@
 #include "portability.h" /* MAP_ANON fallback for the guard-page mmap */
 #include "loomworks/coroutine.h"
 #include "coroutine_internal.h"
+#include "loomworks/thread_pool.h" /* LOOMWORKS_OK / LOOMWORKS_ERR_* (exit_status) */
 
 #include <errno.h>
 #include <pthread.h>
@@ -531,7 +532,11 @@ loom_coro_result_t loom_coro_resume(loom_coroutine_t *coro)
      * (or any coroutine on this thread) unwinds here with a nonzero
      * setjmp value, reporting LOOMWORKS_CORO_ERR_GUARD. */
     if (sigsetjmp(g_guard_jmp, 1) != 0) {
-        return LOOMWORKS_CORO_ERR_GUARD;
+        /* Two distinct longjmp sources share this target: a guard-page
+         * fault (state=ERROR, exit_failed stays 0) and a user-initiated
+         * loom_coro_fail() (exit_failed set).  Distinguish by the flag so
+         * callers can report the specific failure. */
+        return coro->exit_failed ? LOOMWORKS_CORO_ERR_FAILED : LOOMWORKS_CORO_ERR_GUARD;
     }
     if (!ensure_scheduler()) {
         return LOOMWORKS_CORO_ERR_CONTEXT;
@@ -793,6 +798,40 @@ void loom_coro_exit(void)
     }
 }
 
+void loom_coro_fail(uint32_t err)
+{
+    loom_coroutine_t *c = g_current;
+    if (c == NULL) {
+        return; /* not running inside a coroutine: documented no-op */
+    }
+    c->exit_code   = err;
+    c->exit_failed = 1;
+    c->state       = LOOMWORKS_CORO_ERROR;
+    g_current      = NULL;
+    /* Same async-signal-safe longjmp the guard handler uses.  The resumer
+     * re-acquires g_guard_jmp in its sigsetjmp arm and reports
+     * LOOMWORKS_CORO_ERR_FAILED (exit_failed discriminator). */
+    siglongjmp(g_guard_jmp, 1);
+}
+
+uint32_t loom_coro_exit_status(loom_coroutine_t *coro)
+{
+    if (coro == NULL) {
+        return (uint32_t)LOOMWORKS_ERR_INVALID;
+    }
+    switch (coro->state) {
+    case LOOMWORKS_CORO_DONE:
+        return (uint32_t)LOOMWORKS_OK;
+    case LOOMWORKS_CORO_ERROR:
+        if (coro->exit_failed) {
+            return coro->exit_code;
+        }
+        return (uint32_t)LOOMWORKS_ERR_FAILED; /* infra error: guard/alloc/context */
+    default:
+        return (uint32_t)LOOMWORKS_ERR_INVALID; /* still NEW/RUNNING/SUSPENDED/SLEEPING */
+    }
+}
+
 static void free_all_scheduler_stacks(void)
 {
     /* Snapshot the head under the lock (mirrors free_all_pooled_stacks);
@@ -869,6 +908,8 @@ const char *loom_coro_result_str(loom_coro_result_t result)
         return "Timer registration failed";
     case LOOMWORKS_CORO_ERR_TIMEOUT:
         return "Execution timeout exceeded";
+    case LOOMWORKS_CORO_ERR_FAILED:
+        return "Coroutine reported failure";
     default:
         return "Unknown";
     }
