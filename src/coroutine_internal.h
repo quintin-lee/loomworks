@@ -65,7 +65,9 @@ struct loom_coroutine {
     int64_t execution_start_ns; /**< CLOCK_MONOTONIC time when coroutine started running. */
     int64_t max_execution_ns;   /**< Maximum allowed execution time (0 = unlimited). */
 
-    uint64_t padding[2]; /**< Pad to 64-byte cache-line boundary. */
+    uint32_t exit_code;   /**< loom_coro_fail() payload (valid when exit_failed). */
+    uint8_t  exit_failed; /**< 1 if terminated via loom_coro_fail(). */
+    uint64_t padding[1];  /**< Pad to 64-byte cache-line boundary. */
 };
 
 /**

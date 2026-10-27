@@ -69,6 +69,7 @@ typedef enum {
     LOOMWORKS_CORO_ERR_RUNNING,  /**< Operation invalid in current state. */
     LOOMWORKS_CORO_ERR_TIMER,    /**< Timer registration failed (sleep not tracked). */
     LOOMWORKS_CORO_ERR_TIMEOUT,  /**< Execution timeout exceeded. */
+    LOOMWORKS_CORO_ERR_FAILED,   /**< loom_coro_fail() was invoked. */
 } loom_coro_result_t;
 
 /**
@@ -221,6 +222,35 @@ const char *loom_coro_result_str(loom_coro_result_t result);
  * managed by the coroutine runtime (e.g., pool worker threads).
  */
 void loom_coro_exit(void);
+
+/**
+ * @brief Signal failure from within a running coroutine; does NOT return.
+ *
+ * Records @p err on the current coroutine and unwinds back to the thread
+ * that last resumed it (the same longjmp path the guard-page handler uses).
+ * After the resumer returns, the coroutine state is LOOMWORKS_CORO_ERROR.
+ *
+ * Calling outside a running coroutine (no current coroutine on this thread)
+ * is a no-op (documented user error).
+ *
+ * @param err  Failure code to record (any LOOMWORKS_ERR_* value; the
+ *             constants are plain ints that widen to uint32_t).
+ */
+void loom_coro_fail(uint32_t err);
+
+/**
+ * @brief Read a coroutine's exit status after it stops running.
+ *
+ * Valid from the owning thread once the coroutine is DONE or ERROR.
+ *
+ * @return   DONE             -> LOOMWORKS_OK
+ *           ERROR + fail()  -> the err recorded by loom_coro_fail()
+ *           ERROR + infra   -> LOOMWORKS_ERR_FAILED (guard/alloc/context)
+ *           otherwise       -> LOOMWORKS_ERR_INVALID
+ *
+ * @param coro  Coroutine handle (NULL -> LOOMWORKS_ERR_INVALID).
+ */
+uint32_t loom_coro_exit_status(loom_coroutine_t *coro);
 
 /**
  * @brief Install the SIGSEGV/SIGBUS guard-page handler.
