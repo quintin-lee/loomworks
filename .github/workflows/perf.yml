@@ -41,22 +41,32 @@ jobs:
         run: cmake -S /tmp/base -B /tmp/base/build -DCMAKE_BUILD_TYPE=Release -DENABLE_CLANG_FORMAT=OFF
       - name: Build baseline
         run: cmake --build /tmp/base/build -j$(nproc)
-      - name: Run benchmarks (current)
+      - name: Run benchmarks (current, 3 runs)
         run: |
           cd build
-          ./examples/bench --json --iterations 20 --tasks 10000 2>&1 | tee bench_new.json
-      - name: Run benchmarks (baseline)
+          for i in 1 2 3; do
+            ./examples/bench --json --iterations 300 --tasks 10000 2>&1 | tee "bench_new_${i}.json"
+          done
+      - name: Run benchmarks (baseline, 3 runs)
         run: |
           cd /tmp/base/build
-          ./examples/bench --json --iterations 20 --tasks 10000 2>&1 | tee bench_base.json
-      - name: Compare and gate
+          for i in 1 2 3; do
+            ./examples/bench --json --iterations 300 --tasks 10000 2>&1 | tee "bench_base_${i}.json"
+          done
+      - name: Compare and gate (median of 3)
         run: |
-          python3 tools/bench_compare.py /tmp/base/build/bench_base.json build/bench_new.json
+          python3 tools/bench_compare.py \
+            /tmp/base/build/bench_base_1.json /tmp/base/build/bench_base_2.json /tmp/base/build/bench_base_3.json \
+            build/bench_new_1.json build/bench_new_2.json build/bench_new_3.json
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: bench-results
           path: |
-            build/bench_new.json
-            /tmp/base/build/bench_base.json
+            build/bench_new_1.json
+            build/bench_new_2.json
+            build/bench_new_3.json
+            /tmp/base/build/bench_base_1.json
+            /tmp/base/build/bench_base_2.json
+            /tmp/base/build/bench_base_3.json
           retention-days: 30
