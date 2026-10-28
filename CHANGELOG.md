@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "uninitialized stack frame" and aborts the process.  The two unwinds now
   bind the plain ELF `siglongjmp` symbol directly, matching the
   non-fortify behavior.
+- **Dormant node pool activated with a correct free list**: the pool's task-node
+  allocator (a 4096-slot array documented in `docs/architecture.md`) was inert —
+  `pool_init` seeded its stack to 0, so every `task_create` was a `malloc` and
+  every `task_destroy` a `free`. Simply seeding it "full" was attempted first and
+  was found to hang the suite: the old protocol was a *counter*, only sound under
+  strict LIFO destroy order, so two workers destroying out of order re-handed a
+  still-in-flight slot, two live tasks aliased one node, and
+  `loom_pool_shutdown()` waited forever. The free list is now a Treiber stack of
+  slot indices (`node_free_next` per-slot link chain + tagged head), which is
+  order-independent by construction and removes steady-state `malloc`/`free` from
+  every submit. Regressed by `test_node_pool_free_list_full_after_drain`.
 
 ## [1.1.0] - 2026-10-27
 

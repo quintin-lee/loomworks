@@ -324,9 +324,35 @@ static loom_result_t pool_init(loom_thread_pool_t *pool)
     atomic_store_explicit(&pool->ring_head, 0, memory_order_relaxed);
     atomic_store_explicit(&pool->ring_tail, 0, memory_order_relaxed);
     atomic_store_explicit(&pool->ring_count, 0, memory_order_relaxed);
-    pool->node_pool     = (loom_task_t *)calloc(LOOMWORKS_NODE_POOL_CAP, sizeof(loom_task_t));
-    pool->node_pool_cap = pool->node_pool != NULL ? LOOMWORKS_NODE_POOL_CAP : 0;
-    atomic_store_explicit(&pool->node_stack, 0, memory_order_relaxed);
+    pool->node_pool = (loom_task_t *)calloc(LOOMWORKS_NODE_POOL_CAP, sizeof(loom_task_t));
+    pool->node_free_next =
+        (_Atomic uint32_t *)calloc(LOOMWORKS_NODE_POOL_CAP, sizeof(*pool->node_free_next));
+    /* Best-effort: both allocations must succeed for the pool to be active;
+     * otherwise degrade to the malloc fallback (cap 0, empty free-list)
+     * rather than abort pool creation. */
+    if (pool->node_pool == NULL || pool->node_free_next == NULL) {
+        free(pool->node_pool);
+        free(pool->node_free_next);
+        pool->node_pool      = NULL;
+        pool->node_free_next = NULL;
+        pool->node_pool_cap  = 0;
+        atomic_store_explicit(&pool->node_stack,
+                              ((uint64_t)LOOMWORKS_NODE_FREE_END) /* head = END = empty */,
+                              memory_order_relaxed);
+    } else {
+        pool->node_pool_cap = LOOMWORKS_NODE_POOL_CAP;
+        /* Seed the free-list FULL: chain 0 → 1 → … → (cap-1) → END, so
+         * nodes cycle create→destroy→recycle instead of every submit
+         * falling through to malloc. head = slot 0, tag = 0. */
+        for (uint32_t i = 0; i < LOOMWORKS_NODE_POOL_CAP; i++) {
+            atomic_store_explicit(&pool->node_free_next[i],
+                                  (i + 1 < LOOMWORKS_NODE_POOL_CAP) ? (i + 1)
+                                                                    : LOOMWORKS_NODE_FREE_END,
+                                  memory_order_release);
+        }
+        atomic_store_explicit(
+            &pool->node_stack, ((uint64_t)0) /* head = slot 0, tag = 0 */, memory_order_relaxed);
+    }
 
     pool->max_worker_count = pool->worker_count;
     /* Creation timestamp for health uptime (CLOCK_MONOTONIC, write-once
@@ -494,6 +520,7 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     free(pool->cancel_slots);
     free(pool->ring);
     free(pool->node_pool);
+    free(pool->node_free_next);
 
     /* Free work-stealing deques and their per-deque slot arrays. */
     if (pool->deques != NULL) {
@@ -1222,11 +1249,15 @@ static void *worker_entry(void *arg)
     return NULL;
 }
 
-/* --- Node pool: lock-free tagged bounded stack -----------------------------
- * node_stack: low 32 bits = top index, high 32 bits = ABA tag (incremented on
- * every successful CAS).  The pool array is a fixed cap; the stack can never
- * overflow (cap == array cap).  Underflow (empty stack) falls back to malloc,
- * and pushing a malloc'd node frees it — same pooling semantics as before. */
+/* --- Node pool: lock-free Treiber free-list of slot indices ---------------
+ * node_stack: low 32 bits = head slot index (LOOMWORKS_NODE_FREE_END = empty),
+ * high 32 bits = ABA tag (incremented on every successful CAS).  The free
+ * list is built from node_free_next[] — a per-slot next-free index chain —
+ * so it is ORDER-INDEPENDENT: any worker may push any slot back in any
+ * order, and a slot is never re-handed while its node is still in flight.
+ * (The pre-2026 counter scheme assumed strict LIFO destroy order and was
+ * sound only because the pool was dormant / seeded to 0.)  Empty underflow
+ * falls back to malloc; pushing a malloc'd node frees it. */
 
 static bool node_from_pool(loom_thread_pool_t *pool, const loom_task_t *node)
 {
@@ -1240,17 +1271,17 @@ static bool node_from_pool(loom_thread_pool_t *pool, const loom_task_t *node)
 
 static loom_task_t *node_stack_pop(loom_thread_pool_t *pool)
 {
-    uint64_t stack = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
+    uint64_t head = atomic_load_explicit(&pool->node_stack, memory_order_acquire);
     for (;;) {
-        uint32_t top = (uint32_t)stack;
-        if (top == 0) {
+        uint32_t slot = (uint32_t)head;
+        if (slot == LOOMWORKS_NODE_FREE_END) {
             return NULL; /* empty: caller falls back to malloc */
         }
-        uint32_t next    = top - 1;
-        uint64_t updated = ((uint64_t)((uint32_t)(stack >> 32) + 1) << 32) | next;
+        uint32_t next    = atomic_load_explicit(&pool->node_free_next[slot], memory_order_acquire);
+        uint64_t updated = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | next);
         if (atomic_compare_exchange_weak_explicit(
-                &pool->node_stack, &stack, updated, memory_order_acquire, memory_order_relaxed)) {
-            return &pool->node_pool[top - 1];
+                &pool->node_stack, &head, updated, memory_order_acquire, memory_order_acquire)) {
+            return &pool->node_pool[slot];
         }
     }
 }
@@ -1258,13 +1289,21 @@ static loom_task_t *node_stack_pop(loom_thread_pool_t *pool)
 static void node_stack_push(loom_thread_pool_t *pool, loom_task_t *node)
 {
     if (node_from_pool(pool, node)) {
-        uint64_t stack = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
+        /* Recover the slot index from the node pointer. */
+        uintptr_t base = (uintptr_t)pool->node_pool;
+        uint32_t  slot = (uint32_t)(((uintptr_t)node - base) / sizeof(loom_task_t));
+        uint64_t  head = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
         for (;;) {
-            uint32_t top     = (uint32_t)stack;
-            uint32_t next    = top + 1;
-            uint64_t updated = ((uint64_t)((uint32_t)(stack >> 32) + 1) << 32) | next;
+            uint32_t old_head = (uint32_t)head;
+            /* Link the slot as the new head.  The cell is atomic and must be
+             * released: a different thread will later acquire-load it during
+             * a pop, and that acquire is the happens-before edge for this
+             * store.  (Ordering only node_stack would leave this cell's
+             * store/load unpaired — a real TSan-detectable data race.) */
+            atomic_store_explicit(&pool->node_free_next[slot], old_head, memory_order_release);
+            uint64_t updated = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | (uint64_t)slot);
             if (atomic_compare_exchange_weak_explicit(&pool->node_stack,
-                                                      &stack,
+                                                      &head,
                                                       updated,
                                                       memory_order_release,
                                                       memory_order_relaxed)) {
@@ -1301,6 +1340,7 @@ task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t prior
     t->coro_fn    = NULL;
     t->stack_size = 0;
     t->next       = NULL;
+    t->completion = NULL;
     return t;
 }
 

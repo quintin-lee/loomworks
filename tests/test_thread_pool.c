@@ -4662,6 +4662,65 @@ static void test_backpressure_blocked(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: node free-list is order-independent and self-healing ----------
+ * Regression net for the Treiber free-list (src/thread_pool.c). The pre-Treiber
+ * counter scheme was sound only under strict LIFO destroy order: two workers
+ * destroying out of order re-handed a still-in-flight slot, so two live nodes
+ * aliased one loom_task_t and shutdown drained forever. This drives out-of-order
+ * destroys across many workers and then asserts the free list is structurally
+ * intact: starting from the head, the chain covers every slot exactly once
+ * (no duplicate, no cycle, no lost slot) and terminates at LOOMWORKS_NODE_FREE_END. */
+
+static void test_node_pool_free_list_full_after_drain(void)
+{
+    loom_pool_config_t  cfg  = {.worker_count = 8, .queue_capacity = 0};
+    loom_thread_pool_t *pool = NULL;
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "node-pool: create pool");
+    ASSERT(pool->node_pool_cap == LOOMWORKS_NODE_POOL_CAP,
+           "node-pool: pool is active (not OOM-degraded)");
+
+    /* Burn through every pooled slot at least twice, so pops and pushes interleave
+     * with per-task completion order that no single thread dictates. 2*cap forces
+     * the free list empty (falls back to malloc) and refill under real contention. */
+    _Atomic int done = 0;
+    for (int i = 0; i < 2 * (int)LOOMWORKS_NODE_POOL_CAP; i++) {
+        ASSERT(loom_pool_submit(pool, simple_task, &done, NULL) == LOOMWORKS_OK,
+               "node-pool: submit under free-list churn");
+    }
+    loom_pool_shutdown(pool);
+    ASSERT(done == 2 * (int)LOOMWORKS_NODE_POOL_CAP, "node-pool: every task ran exactly once");
+
+    /* Drain done: every node is back in the free list, so walking the chain from
+     * the head must reach every slot exactly once and terminate at the sentinel.
+     * A cycle (walk exceeds cap), a duplicated link (bitmap hit twice), or a lost
+     * slot (short count) are all structural corruption of the free list. */
+    uint32_t head = (uint32_t)atomic_load_explicit(&pool->node_stack, memory_order_acquire);
+    ASSERT(head != LOOMWORKS_NODE_FREE_END, "node-pool: free list non-empty after drain");
+
+    /* One bit per slot: cap 4096 → 64 words. Stack-safe (512 B). */
+    static uint64_t visited[(LOOMWORKS_NODE_POOL_CAP + 63) / 64];
+    memset(visited, 0, sizeof(visited));
+
+    uint32_t seen = 0;
+    uint32_t cur  = head;
+    while (cur != LOOMWORKS_NODE_FREE_END) {
+        /* Validate before dereferencing: a corrupted link can hold any 32-bit
+         * value, so an unchecked index reads out of bounds (and the bitmap
+         * index below has the same exposure). */
+        ASSERT(cur < LOOMWORKS_NODE_POOL_CAP, "node-pool: chain link out of range");
+        ASSERT(++seen <= LOOMWORKS_NODE_POOL_CAP,
+               "node-pool: chain walk exceeded cap (cycle in free list)");
+        uint64_t bit = (uint64_t)1 << (cur & 63);
+        ASSERT(!(visited[cur >> 6] & bit), "node-pool: slot reachable twice (duplicate/loop link)");
+        visited[cur >> 6] |= bit;
+        cur = atomic_load_explicit(&pool->node_free_next[cur], memory_order_acquire);
+    }
+    ASSERT(seen == LOOMWORKS_NODE_POOL_CAP,
+           "node-pool: free list covers every slot exactly once after drain");
+
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -4810,6 +4869,7 @@ int main(void)
     test_coro_execution_timeout();
     test_backpressure_window();
     test_backpressure_blocked();
+    test_node_pool_free_list_full_after_drain();
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
 }

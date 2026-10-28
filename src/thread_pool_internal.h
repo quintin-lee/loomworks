@@ -23,6 +23,10 @@
  * residency after bursts; excess nodes are freed normally). */
 #define LOOMWORKS_NODE_POOL_CAP 4096
 
+/* Sentinel for node_free_next[]: "no next free slot" (end of the Treiber
+ * free-list).  Distinct from any valid slot index [0, cap). */
+#define LOOMWORKS_NODE_FREE_END UINT32_MAX
+
 /* Priority-lane occupancy: one bucket per 8-bit priority value (256
  * buckets); the non-empty bitmap is one uint64_t word per 64 buckets,
  * so 256/64 = 4 words.  A word index for bucket b is b/64; the bit
@@ -198,10 +202,21 @@ struct loom_thread_pool {
     cancel_slot_t *cancel_slots; /**< NULL when ring is NULL. */
     uint64_t       cancel_cap;   /**< Power of two >= ring_size + total deque slots. */
 
-    /* Lock-free node pool (tagged bounded stack; the sole task-node allocator). */
-    loom_task_t     *node_pool;     /**< Preallocated node array (never freed individually). */
-    uint32_t         node_pool_cap; /**< == LOOMWORKS_NODE_POOL_CAP. */
-    _Atomic uint64_t node_stack;    /**< low32: top, high32: ABA tag. */
+    /* Lock-free node pool (Treiber free-list of slot indices; the sole task-node
+     * allocator). node_free_next[i] links slot i to the next free slot;
+     * LOOMWORKS_NODE_FREE_END marks the tail.  The cells are _Atomic because
+     * a slot's link is written by whichever thread pushes that slot back and
+     * read by a different thread popping it — without atomicity (release
+     * store / acquire load) there is no happens-before edge between them.
+     * Unlike the old LIFO-only counter, this design is order-independent:
+     * any worker can push any slot back in any order, so a slot is never
+     * re-handed while its node is still in flight. */
+    loom_task_t *node_pool;     /**< Preallocated node array (never freed individually). */
+    uint32_t     node_pool_cap; /**< == LOOMWORKS_NODE_POOL_CAP. */
+    _Atomic uint32_t
+                    *node_free_next; /**< Per-slot next-free index chain. NULL when OOM-degraded. */
+    _Atomic uint64_t node_stack;     /**< low32: head slot index (LOOMWORKS_NODE_FREE_END = empty),
+                                        high32: ABA tag. */
 
     _Atomic uint32_t active_workers; /**< Workers currently executing a task. */
 
