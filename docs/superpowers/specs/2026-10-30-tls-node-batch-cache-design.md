@@ -178,7 +178,7 @@ At most 1 of every K+1 destroys touches the global head.
 | Case | Handling |
 |---|---|
 | refill returns 0 (empty chain) | `malloc` fallback; on destroy `node_from_pool` is false → `free()`. Pre-existing behavior, zero change |
-| `batch_push` fails (returns false) | Caller **retains all n nodes** and frees them. Do not add a retry-via-single-push branch: `node_stack_batch_push` already retries internally against `node_stack`, so an external failure is unreachable in practice and a retry branch would be untestable dead code. `task_destroy` therefore just `free()`s the batch |
+| `batch_push` fails (returns false) | Caller **retains all n nodes** and `free()`s them. No retry-via-single-push branch: `node_stack_batch_push` already retries internally against `node_stack`, so an external failure means the single CAS failed under contention — a retry path here would be untestable dead code. Note that `task_destroy` freeing rather than re-queueing these nodes trades capacity for simplicity on a path that contention only |
 | TLS stale + old pool dead | State III above: discard only |
 | OOM-degraded pool (cap 0) | `node_from_pool` always false → never cached, always malloc/free |
 
@@ -189,11 +189,16 @@ from adding an untestable retry branch.
 
 1. `test_node_batch_roundtrip` — primitive invariants: `n ≤ want`, empty chain
    returns 0, and the ownership contract (nodes handed to `batch_push` are
-   either all linked or all returned to the caller). Drives the failure branch
-   deterministically via the existing test-only fault-injection hooks
-   (`g_test_alloc_fail_at` / `g_fault_alloc_arm`, `src/thread_pool.c:3008`) so
-   no untestable branch is left behind. The old spec's LIFO-order assertions are
-   **removed** (the list is order-independent).
+   either all linked or all returned to the caller). The existing test-only
+   fault-injection hooks (`loom_test_arm_alloc_failure` / `g_test_alloc_fail_at`,
+   `src/thread_pool.c:3008`) deliberately guard **`loom_pool_resize` call sites
+   only** and do not inject into `task_create`'s `malloc`; they are therefore
+   **not** used here. Since `node_stack_batch_push` retries internally against
+   `node_stack` and its only failure mode is CAS contention (which a
+   single-threaded test cannot force), the failure branch is covered by
+   asserting the documented contract on the success path plus the "all or
+   nothing" signature — not by a synthetic injection. No LIFO-order assertion
+   is included, because the list is order-independent.
 2. `test_tls_cache_cross_pool` — **the most important new test.** Two pools
    alternated on one thread, exercising all three owner-switch states,
    including destroy-A-then-submit-to-B (the exact use-after-free regression
