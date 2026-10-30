@@ -27,6 +27,17 @@
  * free-list).  Distinct from any valid slot index [0, cap). */
 #define LOOMWORKS_NODE_FREE_END UINT32_MAX
 
+/* Per-thread task-node cache: number of nodes a submitting thread keeps
+ * in its _Thread_local slots, and the "want" a batch pop attempts.  One
+ * submit (the latency-sensitive path) recycles one node, so one slot is the
+ * natural granularity; the round-trip test also drives off this value. */
+#define LOOMWORKS_TLS_NODE_SLOTS 1
+
+/* Max simultaneously-live pools tracked by the TLS node cache registry.
+ * A missed registration (registry full) degrades that thread to capacity
+ * loss, never corruption or error. */
+#define LOOMWORKS_POOL_REGISTRY_CAP 256
+
 /* Priority-lane occupancy: one bucket per 8-bit priority value (256
  * buckets); the non-empty bitmap is one uint64_t word per 64 buckets,
  * so 256/64 = 4 words.  A word index for bucket b is b/64; the bit
@@ -213,6 +224,7 @@ struct loom_thread_pool {
      * re-handed while its node is still in flight. */
     loom_task_t *node_pool;     /**< Preallocated node array (never freed individually). */
     uint32_t     node_pool_cap; /**< == LOOMWORKS_NODE_POOL_CAP. */
+    uint64_t     id;            /**< Monotonic pool id; identity key for the TLS node cache. */
     _Atomic uint32_t
                     *node_free_next; /**< Per-slot next-free index chain. NULL when OOM-degraded. */
     _Atomic uint64_t node_stack;     /**< low32: head slot index (LOOMWORKS_NODE_FREE_END = empty),
@@ -407,5 +419,17 @@ bool loom_timer_remove_by_task(loom_thread_pool_t *pool, uint64_t task_id, loom_
 void loom_pool_attach_metrics_shm(loom_thread_pool_t *pool,
                                   loom_metrics_shm_t *shm,
                                   void (*shm_update)(loom_metric_event_t event, void *ctx));
+
+/* ================================================================
+ *  Per-thread TLS node cache support (src/thread_pool.c).
+ *  The registry answers "is pool id N still alive?"; the batch primitives
+ *  amortize task-node recycling over one CAS.  Declared here because the
+ *  cache lives in thread_pool.c but is exercised by tests and, later, by
+ *  task_create/task_destroy.
+ * ================================================================ */
+uint64_t            pool_reg_register(loom_thread_pool_t *pool);
+loom_thread_pool_t *pool_reg_lookup(uint64_t id);
+size_t              node_stack_batch_pop(loom_thread_pool_t *pool, loom_task_t *out[], size_t want);
+bool                node_stack_batch_push(loom_thread_pool_t *pool, loom_task_t *in[], size_t n);
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */

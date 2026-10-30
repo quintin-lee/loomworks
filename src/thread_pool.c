@@ -195,6 +195,68 @@ static inline uint64_t hash_ptr(const void *p)
  * module pair a monotonic deadline with a monotonic-clocked condvar. */
 static pthread_once_t     g_condattr_once = PTHREAD_ONCE_INIT;
 static pthread_condattr_t g_condattr_mono;
+/* --- Pool-ID registry for the TLS node cache -----------------------------
+ * Answers "is pool id N still alive?". It is a POSITIVE HINT, not an authority:
+ * a hit lets a thread hand its stale cached nodes back to their real owner
+ * (preserving capacity); a miss makes that thread discard them without any
+ * dereference. A missed registration therefore costs capacity, never safety.
+ * Touched only on pool create/destroy and on a TLS owner switch — never on the
+ * submit path. Non-static so tests and task_create/task_destroy can reach it
+ * through the internal header. */
+typedef struct {
+    uint64_t            id;
+    loom_thread_pool_t *pool;
+} pool_reg_entry_t;
+
+static pthread_mutex_t  g_pool_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+static pool_reg_entry_t g_pool_reg[LOOMWORKS_POOL_REGISTRY_CAP];
+static size_t           g_pool_reg_len;
+static _Atomic uint64_t g_pool_next_id = 1;
+
+/* Register a fresh pool; returns its new id.  Fails (returns 0) only if the
+ * registry is full, which degrades to "unknown" rather than erroring. */
+uint64_t pool_reg_register(loom_thread_pool_t *pool)
+{
+    uint64_t id = atomic_fetch_add_explicit(&g_pool_next_id, 1, memory_order_relaxed);
+    pthread_mutex_lock(&g_pool_reg_lock);
+    if (g_pool_reg_len < LOOMWORKS_POOL_REGISTRY_CAP) {
+        g_pool_reg[g_pool_reg_len].id   = id;
+        g_pool_reg[g_pool_reg_len].pool = pool;
+        g_pool_reg_len++;
+        pthread_mutex_unlock(&g_pool_reg_lock);
+        return id;
+    }
+    pthread_mutex_unlock(&g_pool_reg_lock);
+    return 0; /* registry full: capacity degradation, not an error */
+}
+
+/* Look up a live pool by id, or NULL if unknown/dead. */
+loom_thread_pool_t *pool_reg_lookup(uint64_t id)
+{
+    loom_thread_pool_t *found = NULL;
+    pthread_mutex_lock(&g_pool_reg_lock);
+    for (size_t i = 0; i < g_pool_reg_len; i++) {
+        if (g_pool_reg[i].id == id) {
+            found = g_pool_reg[i].pool;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pool_reg_lock);
+    return found;
+}
+
+static void pool_reg_unregister(loom_thread_pool_t *pool)
+{
+    pthread_mutex_lock(&g_pool_reg_lock);
+    for (size_t i = 0; i < g_pool_reg_len; i++) {
+        if (g_pool_reg[i].pool == pool) {
+            g_pool_reg[i] = g_pool_reg[g_pool_reg_len - 1];
+            g_pool_reg_len--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pool_reg_lock);
+}
 
 static void init_monotonic_condattr(void)
 {
@@ -507,6 +569,7 @@ static void pool_destroy_internal(loom_thread_pool_t *pool)
     if (!pool) {
         return;
     }
+    pool_reg_unregister(pool);
     /* Free any tasks still pending across all priority buckets. */
     for (int b = 0; b < LOOMWORKS_PRIORITY_BUCKETS; b++) {
         loom_task_t *t = pool->buckets_head[b];
@@ -1314,6 +1377,98 @@ static void node_stack_push(loom_thread_pool_t *pool, loom_task_t *node)
         free(node); /* malloc'd node: return to the heap */
     }
 }
+/* --- Batch node-stack primitives -----------------------------------------
+ * Unwind (pop) or link (push) n free slots in ONE CAS against node_stack,
+ * amortizing the global operation over n task-node operations.
+ *
+ * pop walks the chain read-only to find the nth successor, then a single CAS
+ * repoints the head there; the n detached nodes keep their unwind-residue
+ * free_next values and become the caller's (spec rule R1).
+ *
+ * push links the n nodes locally FIRST (no other thread can see them yet),
+ * then publishes with one CAS whose only mutable cell is the last link
+ * (spec rule R2: a retry re-fills only that cell, never a fixed segment).
+ * Takes all n or none (spec: no ambiguous partial ownership). */
+
+size_t node_stack_batch_pop(loom_thread_pool_t *pool, loom_task_t *out[], size_t want)
+{
+    if (pool->node_pool == NULL || pool->node_pool_cap == 0 || want == 0) {
+        return 0;
+    }
+    uint64_t head = atomic_load_explicit(&pool->node_stack, memory_order_acquire);
+    for (;;) {
+        uint32_t slot = (uint32_t)head;
+        if (slot == LOOMWORKS_NODE_FREE_END) {
+            return 0; /* empty chain: caller falls back to malloc */
+        }
+        /* Walk up to `want` links, read-only. */
+        uint32_t cur = slot;
+        size_t   n   = 0;
+        while (n < want) {
+            uint32_t link = atomic_load_explicit(&pool->node_free_next[cur], memory_order_acquire);
+            if (link == LOOMWORKS_NODE_FREE_END) {
+                break; /* chain exhausted before `want` */
+            }
+            n++;
+            cur = link;
+        }
+        if (n == 0) {
+            /* Only one slot left on the chain: take it. */
+            n = 1;
+        }
+        /* Detach head..cur in one CAS: head -> successor of cur. Note that when
+         * n == 1 the single walked-to link was END, so `cur` is still the head
+         * and this correctly detaches the last slot. */
+        uint32_t successor = atomic_load_explicit(&pool->node_free_next[cur], memory_order_acquire);
+        uint64_t updated   = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | successor);
+        if (atomic_compare_exchange_weak_explicit(
+                &pool->node_stack, &head, updated, memory_order_acquire, memory_order_acquire)) {
+            /* Publish the detached slots (walk again; the chain is ours now). */
+            uint32_t det = slot;
+            for (size_t i = 0; i < n; i++) {
+                out[i] = &pool->node_pool[det];
+                det    = atomic_load_explicit(&pool->node_free_next[det], memory_order_relaxed);
+            }
+            return n;
+        }
+    }
+}
+
+bool node_stack_batch_push(loom_thread_pool_t *pool, loom_task_t *in[], size_t n)
+{
+    if (n == 0) {
+        return true;
+    }
+    if (pool->node_pool == NULL || pool->node_pool_cap == 0) {
+        return false;
+    }
+    uintptr_t base = (uintptr_t)pool->node_pool;
+
+    /* Convert to slot indices and validate every node belongs to this pool
+     * BEFORE touching any state (spec rule R3). */
+    uint32_t slots[LOOMWORKS_TLS_NODE_SLOTS + 1];
+    for (size_t i = 0; i < n; i++) {
+        if (in[i] == NULL || !node_from_pool(pool, in[i])) {
+            return false; /* caller retains all n */
+        }
+        slots[i] = (uint32_t)(((uintptr_t)in[i] - base) / sizeof(loom_task_t));
+    }
+    /* Link in[0..n-1] into a private chain; in[n-1] stays unlinked (its cell
+     * is the only one a retry rewrites). */
+    for (size_t i = 0; i + 1 < n; i++) {
+        atomic_store_explicit(&pool->node_free_next[slots[i]], slots[i + 1], memory_order_release);
+    }
+    uint64_t head = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
+    for (;;) {
+        uint32_t old_head = (uint32_t)head;
+        atomic_store_explicit(&pool->node_free_next[slots[n - 1]], old_head, memory_order_release);
+        uint64_t updated = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | slots[0]);
+        if (atomic_compare_exchange_weak_explicit(
+                &pool->node_stack, &head, updated, memory_order_release, memory_order_relaxed)) {
+            return true;
+        }
+    }
+}
 
 /* ================================================================
  *  task_create / task_destroy — allocate and free a single task node.
@@ -1818,6 +1973,7 @@ loom_result_t loom_pool_create(const loom_pool_config_t *config, loom_thread_poo
         free(p);
         return rc;
     }
+    p->id = pool_reg_register(p);
     for (uint32_t i = 0; i < p->worker_count; i++) {
         worker_arg_t *wa = (worker_arg_t *)malloc(sizeof(*wa));
         if (!wa) {
