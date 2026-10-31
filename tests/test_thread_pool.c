@@ -4721,6 +4721,185 @@ static void test_node_pool_free_list_full_after_drain(void)
     loom_pool_destroy(&pool);
 }
 
+/* ---------- Test: batch node-stack primitives round-trip ----------
+ * Consumer-visible invariants of node_stack_batch_pop/push: a pop returns at
+ * most `want` nodes and no more than the chain holds, an empty chain returns
+ * 0, and a push either links all n nodes or returns them all to the caller.
+ * Order is deliberately NOT asserted: the free-list is order-independent, so a
+ * LIFO assertion here would be invalid. The test reaches the primitives via
+ * thread_pool_internal.h. */
+static void test_node_batch_roundtrip(void)
+{
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 1, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "batch: create pool");
+    ASSERT(pool->node_pool != NULL && pool->node_pool_cap == LOOMWORKS_NODE_POOL_CAP,
+           "batch: node pool active");
+
+    /* The pool starts FULL: head = slot 0, chain 0 -> 1 -> ... -> END. Pop
+     * fewer than available and confirm we get exactly that many. */
+    loom_task_t *out[4] = {NULL, NULL, NULL, NULL};
+    size_t       got    = node_stack_batch_pop(pool, out, 3);
+    ASSERT(got == 3, "batch: pop returns want when chain is full");
+    /* Bounds as uintptr_t so the check is pure integer arithmetic (a
+     * pointer + NULL base would trip NullPointerArithm under -Werror). */
+    uintptr_t base = (uintptr_t)pool->node_pool;
+    uintptr_t end  = base + (uintptr_t)pool->node_pool_cap * sizeof(loom_task_t);
+    for (size_t i = 0; i < got; i++) {
+        ASSERT(out[i] != NULL, "batch: every returned slot is non-NULL");
+        ASSERT((uintptr_t)out[i] >= base && (uintptr_t)out[i] < end,
+               "batch: returned slot belongs to the pool array");
+    }
+
+    /* Push them back; the pool is full again. Pop `want` nodes (fewer than
+     * remain) and confirm exactly `want` come back. */
+    ASSERT(node_stack_batch_push(pool, out, 3), "batch: push returns success");
+    loom_task_t *again[4] = {NULL, NULL, NULL, NULL};
+    size_t       got2     = node_stack_batch_pop(pool, again, 4);
+    ASSERT(got2 == 4, "batch: pop returns want when enough remain");
+    ASSERT(node_stack_batch_push(pool, again, 4), "batch: push restored");
+
+    /* Drain to empty, then confirm an empty chain yields 0 (not garbage). */
+    loom_task_t *drain[LOOMWORKS_NODE_POOL_CAP];
+    size_t       total = 0;
+    for (;;) {
+        size_t n = node_stack_batch_pop(pool, drain, LOOMWORKS_NODE_POOL_CAP);
+        if (n == 0) {
+            break;
+        }
+        total += n;
+    }
+    ASSERT(total == LOOMWORKS_NODE_POOL_CAP, "batch: whole chain drains exactly");
+    loom_task_t *none[1] = {NULL};
+    ASSERT(node_stack_batch_pop(pool, none, 4) == 0, "batch: empty chain pops 0");
+    ASSERT(none[0] == NULL, "batch: nothing written on empty chain");
+
+    /* Restore the full chain so the pool is pristine for destroy. */
+    ASSERT(node_stack_batch_push(pool, drain, LOOMWORKS_NODE_POOL_CAP), "batch: refill all");
+
+    loom_pool_shutdown(pool);
+    loom_pool_destroy(&pool);
+}
+
+/* ---------- Test: TLS node cache owner-switch states ----------
+ * The exact use-after-free regression path for the per-thread cache: a thread
+ * caches nodes from pool A, then A is destroyed while nodes are still cached,
+ * then the thread submits to pool B. States II/III must hand the stale nodes
+ * back to A or discard them without dereferencing either. Driven through the
+ * public API so it also guards task_create/task_destroy, not just the
+ * primitives. All submits happen on THIS thread, which is what makes its
+ * _Thread_local cache warm across pools. */
+static void test_tls_cache_cross_pool(void)
+{
+    loom_thread_pool_t *a   = NULL;
+    loom_pool_config_t  cfg = {.worker_count = 2, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &a) == LOOMWORKS_OK, "tls: create A");
+
+    /* --- State I: same pool, cache reused across many submits.  A stays
+     * alive; the submit path (task_create) is what drives tls_resolve_owner. */
+    int ran_a = 0;
+    for (int i = 0; i < LOOMWORKS_TLS_NODE_SLOTS + 4; i++) {
+        ASSERT(loom_pool_submit(a, simple_task, &ran_a, NULL) == LOOMWORKS_OK, "tls: submit A");
+    }
+
+    /* --- State II: switch to B while A is still alive -> stale A node in the
+     * cache is handed back to A (capacity preserved, not stranded).  Then back
+     * to A.  Both pools stay alive during every submit. */
+    loom_thread_pool_t *b = NULL;
+    ASSERT(loom_pool_create(&cfg, &b) == LOOMWORKS_OK, "tls: create B");
+    int ran_b = 0;
+    for (int i = 0; i < 4; i++) {
+        ASSERT(loom_pool_submit(b, simple_task, &ran_b, NULL) == LOOMWORKS_OK, "tls: submit B");
+    }
+    int ran_a2 = 0;
+    for (int i = 0; i < 4; i++) {
+        ASSERT(loom_pool_submit(a, simple_task, &ran_a2, NULL) == LOOMWORKS_OK, "tls: submit A2");
+    }
+
+    /* Finish both, then destroy them.  This thread's last-submit owner id now
+     * points at a *dead* pool (a, then b) — exactly the stale-owner case. */
+    loom_pool_shutdown(a);
+    loom_pool_shutdown(b);
+    ASSERT(ran_a == LOOMWORKS_TLS_NODE_SLOTS + 4, "tls: A ran exactly once");
+    ASSERT(ran_b == 4, "tls: B ran exactly once");
+    ASSERT(ran_a2 == 4, "tls: A2 ran exactly once after state II");
+    loom_pool_destroy(&a);
+    loom_pool_destroy(&b);
+
+    /* --- State III: A and B are dead but this thread's cache owner id still
+     * references one of them.  Submitting to C must not dereference any stale
+     * node — the lookup must return NULL and the cache discarded. */
+    loom_thread_pool_t *c = NULL;
+    ASSERT(loom_pool_create(&cfg, &c) == LOOMWORKS_OK, "tls: create C");
+    int ran_c = 0;
+    for (int i = 0; i < LOOMWORKS_TLS_NODE_SLOTS + 4; i++) {
+        ASSERT(loom_pool_submit(c, simple_task, &ran_c, NULL) == LOOMWORKS_OK, "tls: submit C");
+    }
+    loom_pool_shutdown(c);
+    ASSERT(ran_c == LOOMWORKS_TLS_NODE_SLOTS + 4, "tls: C ran exactly once");
+    loom_pool_destroy(&c);
+    loom_pool_destroy(&b);
+}
+
+/* ---------- Test: batch + single-node paths under concurrency ----------
+ * Multiple producers submit while workers destroy, so the batch refill/flush
+ * and the malloc-fallback paths interleave against one shared Treiber chain.
+ * Consumer-visible invariant: every submitted task runs exactly once. */
+typedef struct {
+    loom_thread_pool_t *pool;
+    int                *ran; /* only the producer sets it as the submit arg;
+                               simple_task increments it from workers */
+    int                n;
+    pthread_barrier_t *bar;
+} batch_prod_arg_t;
+
+static void *batch_producer(void *p)
+{
+    batch_prod_arg_t *a = (batch_prod_arg_t *)p;
+    pthread_barrier_wait(a->bar);
+    for (int i = 0; i < a->n; i++) {
+        /* Retry on a full queue so this measures recycling, not capacity. */
+        for (int retry = 0; retry < 100000; retry++) {
+            if (loom_pool_submit(a->pool, simple_task, a->ran, NULL) == LOOMWORKS_OK) {
+                break;
+            }
+            struct timespec ts = {0, 100};
+            nanosleep(&ts, NULL);
+        }
+    }
+    return NULL;
+}
+
+static void test_node_batch_concurrent(void)
+{
+    enum { THREADS = 4, PER_THREAD = 512 };
+    loom_thread_pool_t *pool = NULL;
+    loom_pool_config_t  cfg  = {.worker_count = 8, .queue_capacity = 0};
+    ASSERT(loom_pool_create(&cfg, &pool) == LOOMWORKS_OK, "batchconc: create");
+
+    int               ran = 0;
+    pthread_barrier_t bar;
+    pthread_t         th[THREADS];
+    batch_prod_arg_t  args[THREADS];
+    ASSERT(pthread_barrier_init(&bar, NULL, THREADS) == 0, "batchconc: barrier init");
+    for (int i = 0; i < THREADS; i++) {
+        args[i].pool = pool;
+        args[i].ran  = &ran;
+        args[i].n    = PER_THREAD;
+        args[i].bar  = &bar;
+        ASSERT(pthread_create(&th[i], NULL, batch_producer, &args[i]) == 0,
+               "batchconc: producer create");
+    }
+    for (int i = 0; i < THREADS; i++) {
+        pthread_join(th[i], NULL);
+    }
+    pthread_barrier_destroy(&bar);
+
+    loom_pool_shutdown(pool);
+    ASSERT(ran == THREADS * PER_THREAD, "batchconc: all ran exactly once");
+    loom_pool_destroy(&pool);
+}
+
 /* ================================================================
  *  Main
  * ================================================================ */
@@ -4870,6 +5049,9 @@ int main(void)
     test_backpressure_window();
     test_backpressure_blocked();
     test_node_pool_free_list_full_after_drain();
+    test_node_batch_roundtrip();
+    test_tls_cache_cross_pool();
+    test_node_batch_concurrent();
     printf("\nResults: %d passed, %d failed\n", g_passes, g_failures);
     return g_failures > 0 ? 1 : 0;
 }

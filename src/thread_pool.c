@@ -1309,6 +1309,13 @@ static void *worker_entry(void *arg)
             atomic_fetch_sub(&pool->active_workers, 1);
         }
     }
+    /* Return any nodes this worker parked in its per-thread cache to the
+     * pool's global free-list.  Without this, a dead worker's cache is
+     * _Thread_local storage that vanishes, stranding up to
+     * LOOMWORKS_TLS_NODE_SLOTS nodes per worker (a capacity leak) and leaving
+     * the post-drain structural walk to see a short chain.  The pool outlives
+     * its workers (shutdown joins before destroy), so the flush is safe. */
+    tls_flush_to_pool(pool);
     return NULL;
 }
 
@@ -1332,51 +1339,6 @@ static bool node_from_pool(loom_thread_pool_t *pool, const loom_task_t *node)
     return p >= base && p < base + (uintptr_t)pool->node_pool_cap * sizeof(loom_task_t);
 }
 
-static loom_task_t *node_stack_pop(loom_thread_pool_t *pool)
-{
-    uint64_t head = atomic_load_explicit(&pool->node_stack, memory_order_acquire);
-    for (;;) {
-        uint32_t slot = (uint32_t)head;
-        if (slot == LOOMWORKS_NODE_FREE_END) {
-            return NULL; /* empty: caller falls back to malloc */
-        }
-        uint32_t next    = atomic_load_explicit(&pool->node_free_next[slot], memory_order_acquire);
-        uint64_t updated = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | next);
-        if (atomic_compare_exchange_weak_explicit(
-                &pool->node_stack, &head, updated, memory_order_acquire, memory_order_acquire)) {
-            return &pool->node_pool[slot];
-        }
-    }
-}
-
-static void node_stack_push(loom_thread_pool_t *pool, loom_task_t *node)
-{
-    if (node_from_pool(pool, node)) {
-        /* Recover the slot index from the node pointer. */
-        uintptr_t base = (uintptr_t)pool->node_pool;
-        uint32_t  slot = (uint32_t)(((uintptr_t)node - base) / sizeof(loom_task_t));
-        uint64_t  head = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
-        for (;;) {
-            uint32_t old_head = (uint32_t)head;
-            /* Link the slot as the new head.  The cell is atomic and must be
-             * released: a different thread will later acquire-load it during
-             * a pop, and that acquire is the happens-before edge for this
-             * store.  (Ordering only node_stack would leave this cell's
-             * store/load unpaired — a real TSan-detectable data race.) */
-            atomic_store_explicit(&pool->node_free_next[slot], old_head, memory_order_release);
-            uint64_t updated = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | (uint64_t)slot);
-            if (atomic_compare_exchange_weak_explicit(&pool->node_stack,
-                                                      &head,
-                                                      updated,
-                                                      memory_order_release,
-                                                      memory_order_relaxed)) {
-                return;
-            }
-        }
-    } else {
-        free(node); /* malloc'd node: return to the heap */
-    }
-}
 /* --- Batch node-stack primitives -----------------------------------------
  * Unwind (pop) or link (push) n free slots in ONE CAS against node_stack,
  * amortizing the global operation over n task-node operations.
@@ -1401,24 +1363,21 @@ size_t node_stack_batch_pop(loom_thread_pool_t *pool, loom_task_t *out[], size_t
         if (slot == LOOMWORKS_NODE_FREE_END) {
             return 0; /* empty chain: caller falls back to malloc */
         }
-        /* Walk up to `want` links, read-only. */
+        /* Take the head (slot != END, so at least one node exists) and then
+         * advance up to `want - 1` more, following the chain while it is not
+         * exhausted.  `cur` ends on the LAST node we detach; its successor is
+         * the new head. */
         uint32_t cur = slot;
-        size_t   n   = 0;
+        size_t   n   = 1;
         while (n < want) {
             uint32_t link = atomic_load_explicit(&pool->node_free_next[cur], memory_order_acquire);
             if (link == LOOMWORKS_NODE_FREE_END) {
                 break; /* chain exhausted before `want` */
             }
-            n++;
             cur = link;
+            n++;
         }
-        if (n == 0) {
-            /* Only one slot left on the chain: take it. */
-            n = 1;
-        }
-        /* Detach head..cur in one CAS: head -> successor of cur. Note that when
-         * n == 1 the single walked-to link was END, so `cur` is still the head
-         * and this correctly detaches the last slot. */
+        /* Detach head..cur in one CAS: head -> successor of cur. */
         uint32_t successor = atomic_load_explicit(&pool->node_free_next[cur], memory_order_acquire);
         uint64_t updated   = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | successor);
         if (atomic_compare_exchange_weak_explicit(
@@ -1444,25 +1403,29 @@ bool node_stack_batch_push(loom_thread_pool_t *pool, loom_task_t *in[], size_t n
     }
     uintptr_t base = (uintptr_t)pool->node_pool;
 
-    /* Convert to slot indices and validate every node belongs to this pool
-     * BEFORE touching any state (spec rule R3). */
-    uint32_t slots[LOOMWORKS_TLS_NODE_SLOTS + 1];
+    /* Validate every node belongs to this pool BEFORE touching any state
+     * (spec rule R3). */
     for (size_t i = 0; i < n; i++) {
         if (in[i] == NULL || !node_from_pool(pool, in[i])) {
             return false; /* caller retains all n */
         }
-        slots[i] = (uint32_t)(((uintptr_t)in[i] - base) / sizeof(loom_task_t));
     }
-    /* Link in[0..n-1] into a private chain; in[n-1] stays unlinked (its cell
-     * is the only one a retry rewrites). */
+    /* Link in[0..n-1] into a private chain; only in[n-1]'s cell is re-rewritten
+     * on a CAS retry (spec rule R2: a retry never re-links the intermediates,
+     * which is what makes this safe under contention).  No scratch array: a
+     * batch may be the whole pool, so a fixed-size buffer would overflow. */
     for (size_t i = 0; i + 1 < n; i++) {
-        atomic_store_explicit(&pool->node_free_next[slots[i]], slots[i + 1], memory_order_release);
+        uint32_t s  = (uint32_t)(((uintptr_t)in[i] - base) / sizeof(loom_task_t));
+        uint32_t nx = (uint32_t)(((uintptr_t)in[i + 1] - base) / sizeof(loom_task_t));
+        atomic_store_explicit(&pool->node_free_next[s], nx, memory_order_release);
     }
-    uint64_t head = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
+    uint32_t first = (uint32_t)(((uintptr_t)in[0] - base) / sizeof(loom_task_t));
+    uint32_t last  = (uint32_t)(((uintptr_t)in[n - 1] - base) / sizeof(loom_task_t));
+    uint64_t head  = atomic_load_explicit(&pool->node_stack, memory_order_relaxed);
     for (;;) {
         uint32_t old_head = (uint32_t)head;
-        atomic_store_explicit(&pool->node_free_next[slots[n - 1]], old_head, memory_order_release);
-        uint64_t updated = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | slots[0]);
+        atomic_store_explicit(&pool->node_free_next[last], old_head, memory_order_release);
+        uint64_t updated = (((uint64_t)((uint32_t)(head >> 32) + 1) << 32) | first);
         if (atomic_compare_exchange_weak_explicit(
                 &pool->node_stack, &head, updated, memory_order_release, memory_order_relaxed)) {
             return true;
@@ -1470,17 +1433,131 @@ bool node_stack_batch_push(loom_thread_pool_t *pool, loom_task_t *in[], size_t n
     }
 }
 
+/* --- Per-thread task-node cache -----------------------------------------
+ * One cache per thread, owned by exactly one pool (g_tls_owner_id). On an
+ * owner switch the stale nodes are handed back to their real owner (state II)
+ * or discarded without dereference (state III). See the design spec. */
+typedef struct {
+    loom_task_t *node; /* NULL = empty slot */
+} tls_node_slot_t;
+
+static _Thread_local tls_node_slot_t g_tls_nodes[LOOMWORKS_TLS_NODE_SLOTS];
+static _Thread_local uint64_t        g_tls_owner_id = 0; /* 0 = never refilled */
+static _Thread_local unsigned        g_tls_next     = 0; /* round-robin cursor */
+
+/* Resolve g_tls_owner_id != pool->id. Returns false if the cache could not be
+ * resolved (unreachable in practice; kept for total-ness). */
+static bool tls_resolve_owner(loom_thread_pool_t *pool)
+{
+    uint64_t old = g_tls_owner_id;
+    if (old == 0 || old == pool->id) {
+        g_tls_owner_id = pool->id;
+        return true;
+    }
+    loom_thread_pool_t *owner = pool_reg_lookup(old);
+    if (owner != NULL) {
+        /* State II: hand everything back to the real owner. */
+        loom_task_t *batch[LOOMWORKS_TLS_NODE_SLOTS];
+        size_t       n = 0;
+        for (unsigned i = 0; i < LOOMWORKS_TLS_NODE_SLOTS; i++) {
+            if (g_tls_nodes[i].node != NULL) {
+                batch[n++]          = g_tls_nodes[i].node;
+                g_tls_nodes[i].node = NULL;
+            }
+        }
+        if (n > 0) {
+            (void)node_stack_batch_push(owner, batch, n);
+        }
+    }
+    /* State III (or a failed push-back): discard. Never dereference. */
+    for (unsigned i = 0; i < LOOMWORKS_TLS_NODE_SLOTS; i++) {
+        g_tls_nodes[i].node = NULL;
+    }
+    g_tls_owner_id = pool->id;
+    return true;
+}
+
+/* Hand this thread's cached nodes back to `pool`.  A thread that exits with a
+ * warm cache would otherwise strand its nodes in _Thread_local storage —
+ * lost from the global free-list forever (a capacity leak, and the reason the
+ * post-drain structural walk would see a short chain).  Workers call this on
+ * every exit path while their pool is still alive; the drain test calls it on
+ * the main thread before walking.  Flushing to a pool that does not own the
+ * cached nodes fails node_from_pool and discards — capacity loss, never
+ * corruption. */
+void tls_flush_to_pool(loom_thread_pool_t *pool)
+{
+    loom_task_t *batch[LOOMWORKS_TLS_NODE_SLOTS];
+    size_t       n = 0;
+    for (unsigned i = 0; i < LOOMWORKS_TLS_NODE_SLOTS; i++) {
+        if (g_tls_nodes[i].node != NULL) {
+            batch[n++]          = g_tls_nodes[i].node;
+            g_tls_nodes[i].node = NULL;
+        }
+    }
+    if (n > 0) {
+        (void)node_stack_batch_push(pool, batch, n);
+        /* A failed push means the nodes were not this pool's (their owner is
+         * already dead, see tls_resolve_owner state III); leaving them here
+         * would leak, so they are dropped by the next owner switch. */
+    }
+    g_tls_owner_id = 0;
+}
+
 /* ================================================================
- *  task_create / task_destroy — allocate and free a single task node.
+ *  task_create / task_destroy — allocate and free a task node.
+ *  Both route through the per-thread cache above: create pops a cached
+ *  node (or refills it in a batch, or mallocs), destroy stashes it back
+ *  (or flushes the whole cache in a batch when full).
  * ================================================================ */
 static loom_task_t *
 task_create(loom_thread_pool_t *pool, loom_task_fn fn, void *data, uint8_t priority)
 {
-    loom_task_t *t = node_stack_pop(pool);
-    if (!t) {
-        t = (loom_task_t *)malloc(sizeof(*t));
-        if (!t) {
-            return NULL;
+    if (pool != NULL && g_tls_owner_id != pool->id) {
+        (void)tls_resolve_owner(pool);
+    }
+    loom_task_t *t   = NULL;
+    int          hit = -1;
+    for (unsigned probe = 0; probe < LOOMWORKS_TLS_NODE_SLOTS; probe++) {
+        unsigned i = (g_tls_next + probe) % LOOMWORKS_TLS_NODE_SLOTS;
+        if (g_tls_nodes[i].node != NULL) {
+            hit        = (int)i;
+            g_tls_next = (unsigned)(i + 1) % LOOMWORKS_TLS_NODE_SLOTS;
+            break;
+        }
+    }
+    if (hit >= 0) {
+        t                     = g_tls_nodes[hit].node;
+        g_tls_nodes[hit].node = NULL;
+    } else {
+        /* Count empty slots so the refill never overflows the cache. */
+        unsigned room = 0;
+        for (unsigned i = 0; i < LOOMWORKS_TLS_NODE_SLOTS; i++) {
+            if (g_tls_nodes[i].node == NULL) {
+                room++;
+            }
+        }
+        if (pool != NULL && room > 0) {
+            loom_task_t *buf[LOOMWORKS_TLS_NODE_SLOTS];
+            size_t       n = node_stack_batch_pop(pool, buf, room);
+            if (n > 0) {
+                g_tls_owner_id = pool->id;
+                t              = buf[0]; /* keep one node live; stash the rest in cache */
+                for (unsigned i = 1; i < n && i < LOOMWORKS_TLS_NODE_SLOTS; i++) {
+                    for (unsigned j = 0; j < LOOMWORKS_TLS_NODE_SLOTS; j++) {
+                        if (g_tls_nodes[j].node == NULL) {
+                            g_tls_nodes[j].node = buf[i];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (t == NULL) {
+            t = (loom_task_t *)malloc(sizeof(*t));
+            if (!t) {
+                return NULL;
+            }
         }
     }
     t->fn        = fn;
@@ -1504,11 +1581,39 @@ void task_destroy(loom_thread_pool_t *pool, loom_task_t *t)
     if (!t) {
         return;
     }
-    if (pool) {
-        node_stack_push(pool, t);
-    } else {
-        free(t);
+    if (pool && node_from_pool(pool, t)) {
+        if (g_tls_owner_id != pool->id) {
+            (void)tls_resolve_owner(pool);
+        }
+        int slot = -1;
+        for (unsigned probe = 0; probe < LOOMWORKS_TLS_NODE_SLOTS; probe++) {
+            unsigned i = (g_tls_next + probe) % LOOMWORKS_TLS_NODE_SLOTS;
+            if (g_tls_nodes[i].node == NULL) {
+                slot       = (int)i;
+                g_tls_next = (unsigned)(i + 1) % LOOMWORKS_TLS_NODE_SLOTS;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            g_tls_nodes[slot].node = t;
+            return;
+        }
+        /* Cache full: flush this pool's whole cache plus t in one batch. */
+        loom_task_t *batch[LOOMWORKS_TLS_NODE_SLOTS + 1];
+        size_t       n = 0;
+        for (unsigned i = 0; i < LOOMWORKS_TLS_NODE_SLOTS; i++) {
+            if (g_tls_nodes[i].node != NULL) {
+                batch[n++]          = g_tls_nodes[i].node;
+                g_tls_nodes[i].node = NULL;
+            }
+        }
+        batch[n++] = t;
+        if (!node_stack_batch_push(pool, batch, n)) {
+            free(t); /* documented failure path: capacity, not safety */
+        }
+        return;
     }
+    free(t); /* malloc'd node or OOM-degraded pool */
 }
 
 /* ================================================================

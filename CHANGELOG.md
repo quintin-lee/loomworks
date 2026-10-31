@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `loom_coro_fail` now completes its `submit_coroutine_ex` future with
   `LOOMWORKS_ERR_FAILED` — closing the R22 FAILED branch that previously
   could only be reached by infrastructure errors.
+- **Per-thread task-node cache and pool registry**: steady-state submit
+  no longer takes the global node-stack CAS on every task. Each thread
+  caches up to `LOOMWORKS_TLS_NODE_SLOTS` released nodes in `_Thread_local`
+  storage, and `node_stack_batch_pop`/`node_stack_batch_push` move whole
+  batches between a thread's cache and the pool in a single CAS each,
+  instead of one node at a time. A thread's cached nodes remember their
+  owning pool by ID; on an owner switch the stale nodes are handed back
+  to their real owner (keeping node capacity intact) or — when the owning
+  pool has already been destroyed — discarded without ever being
+  dereferenced. The pool registry (monotonic, never-reused IDs assigned
+  at `loom_pool_create`, released at `loom_pool_destroy`) is what makes
+  that hand-back safe: a destroyed pool's ID can never be mistaken for a
+  live one. `tls_flush_to_pool` returns a thread's remaining cache to the
+  pool before it exits so no node is stranded. Regressed by
+  `test_node_batch_roundtrip`, `test_tls_cache_cross_pool`, and
+  `test_node_batch_concurrent`.
 
 ### Changed
 - **Performance gate stability (CI)**: the CI p99 latency gate now

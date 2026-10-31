@@ -431,5 +431,6 @@ uint64_t            pool_reg_register(loom_thread_pool_t *pool);
 loom_thread_pool_t *pool_reg_lookup(uint64_t id);
 size_t              node_stack_batch_pop(loom_thread_pool_t *pool, loom_task_t *out[], size_t want);
 bool                node_stack_batch_push(loom_thread_pool_t *pool, loom_task_t *in[], size_t n);
+void                tls_flush_to_pool(loom_thread_pool_t *pool);
 
 #endif /* LOOMWORKS_THREAD_POOL_INTERNAL_H */
