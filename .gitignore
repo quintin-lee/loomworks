@@ -15,6 +15,7 @@ compile_commands.json
 .omo/
 .codegraph/
 .omp/
+.superpowers/
 
 *__pycache__/
 
